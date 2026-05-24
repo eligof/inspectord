@@ -1,0 +1,33 @@
+version: 1.0.0
+name: journald
+description: systemd-journald — already shipped with systemd. We drop a config snippet to ensure persistent storage.
+required_when:
+  profiles: [minimal, standard]
+optional_when:
+  profiles: []
+distro_packages:
+  arch: []
+  cachyos: []
+service:
+  systemd_unit: systemd-journald.service
+  enable: true
+  start: true
+config:
+  strategy: sidecar
+  include_dir: /etc/systemd/journald.conf.d/
+  dropin:
+    filename: inspectord.conf
+    template: journald/inspectord.conf.j2
+    owner: root
+    mode: "0644"
+verify:
+  binary_paths: [/usr/bin/journalctl]
+  version_cmd: ["journalctl", "--version"]
+  version_regex: "systemd (\\d+)"
+  health_probe:
+    kind: service_active
+    unit: systemd-journald.service
+post_install_hooks: []
+rollback:
+  remove_dropin: true
+  reload_service: true

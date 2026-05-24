@@ -1,0 +1,21 @@
+version: 1.0.0
+name: ebpf_features
+description: Verify the kernel has eBPF support (CONFIG_BPF=y, CONFIG_BPF_SYSCALL=y). Verify-only; never installs.
+required_when:
+  profiles: [standard]
+optional_when:
+  profiles: []
+distro_packages:
+  arch: []
+  cachyos: []
+service: null
+config: null
+permissions: null
+verify:
+  binary_paths: []
+  health_probe:
+    kind: command_exit_zero
+    command: ["bash", "-c", "test -e /sys/fs/bpf || test -d /sys/kernel/btf"]
+post_install_hooks: []
+rollback:
+  remove_dropin: false
