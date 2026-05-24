@@ -1,0 +1,14 @@
+# inspectorctl-tray.service — installed to ~/.config/systemd/user/
+
+[Unit]
+Description=Local Inspection tray indicator
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@PYTHON@ -m inspectorctl.tray --socket /run/inspectord/inspectord.sock
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=graphical-session.target

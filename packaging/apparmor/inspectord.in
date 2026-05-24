@@ -1,0 +1,10 @@
+# AppArmor profile for inspectord — stub. Filled in during Phase 4 hardening pass.
+# See spec §17.3.
+#include <tunables/global>
+
+profile /usr/bin/inspectord {
+  # Placeholder — deliberately permissive for Phase 0; tightened later.
+  #include <abstractions/base>
+  #include <abstractions/python>
+  /usr/bin/inspectord r,
+}
