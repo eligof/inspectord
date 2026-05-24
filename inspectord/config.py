@@ -74,6 +74,19 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.dependency_manager",
                     "config": {"interval_s": 30.0},
                 },
+                {
+                    "name": "log_tailer",
+                    "module": "inspectord.workers.log_tailer",
+                    "config": {
+                        "pacman_log_path": "/var/log/pacman.log",
+                        "auth_log_path": "/var/log/auth.log",
+                    },
+                },
+                {
+                    "name": "fim_watcher",
+                    "module": "inspectord.workers.fim_watcher",
+                    "config": {},
+                },
             ],
         }
     )
