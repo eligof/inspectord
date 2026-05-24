@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Ruff check
+        run: |
+          if compgen -G "inspectord" > /dev/null || compgen -G "inspectorctl" > /dev/null || compgen -G "tests" > /dev/null; then
+            paths=()
+            [ -d inspectord ] && paths+=(inspectord)
+            [ -d inspectorctl ] && paths+=(inspectorctl)
+            [ -d tests ] && paths+=(tests)
+            ruff check "${paths[@]}"
+          else
+            echo "No Python source dirs yet — skipping ruff check (Task 2.5 initial state)."
+          fi
+
+      - name: Ruff format check
+        run: |
+          paths=()
+          [ -d inspectord ] && paths+=(inspectord)
+          [ -d inspectorctl ] && paths+=(inspectorctl)
+          [ -d tests ] && paths+=(tests)
+          if [ ${#paths[@]} -gt 0 ]; then
+            ruff format --check "${paths[@]}"
+          else
+            echo "No Python source dirs yet — skipping ruff format check."
+          fi
+
+      - name: Mypy
+        run: |
+          paths=()
+          [ -d inspectord ] && paths+=(inspectord)
+          [ -d inspectorctl ] && paths+=(inspectorctl)
+          if [ ${#paths[@]} -gt 0 ]; then
+            mypy "${paths[@]}"
+          else
+            echo "No Python source dirs yet — skipping mypy."
+          fi
+
+      - name: Pytest (unit)
+        run: |
+          if [ -d tests ]; then
+            pytest -m "not integration" -v
+          else
+            echo "No tests/ dir yet — skipping unit tests."
+          fi
+
+      - name: Pytest (integration)
+        run: |
+          if [ -d tests/integration ]; then
+            pytest -m integration -v
+          else
+            echo "No tests/integration dir yet — skipping integration tests."
+          fi

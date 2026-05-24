@@ -2,6 +2,8 @@
 
 Unified Linux endpoint security console. See `docs/superpowers/specs/2026-05-24-local-inspection-design.md` for the design.
 
+[![CI](https://github.com/eligof/inspectord/actions/workflows/ci.yml/badge.svg)](https://github.com/eligof/inspectord/actions/workflows/ci.yml)
+
 ## Status
 
 Phase 0 — skeleton only. No collectors, no rules, no notifications. The daemon, supervisor, router, journal, storage, IPC, healthcheck worker, CLI, and tray scaffolding are wired end-to-end so subsequent phases can plug detectors in.
