@@ -18,6 +18,7 @@ from queue import Empty as QueueEmpty
 from typing import Any
 
 from inspectord.config import DaemonConfig, WorkerSpec
+from inspectord.enrichment import enrich
 from inspectord.journal import Journal
 from inspectord.log import get
 from inspectord.router import DropPolicy, EventRouter
@@ -134,6 +135,7 @@ class Supervisor:
             try:
                 payload = json.loads(stripped.decode("utf-8"))
                 ev = Event.model_validate(payload)
+                ev = enrich(ev)
                 self._router.publish(ev)
             except Exception as exc:
                 log.error("worker %s emitted invalid event: %r", wp.spec.name, exc)
