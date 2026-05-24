@@ -16,6 +16,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from inspectord.alerts.ipc_handlers import (
+    handle_ack_alert,
+    handle_get_alert,
+    handle_list_alerts,
+    handle_resolve_alert,
+    handle_suppress_alert,
+)
 from inspectord.config import DaemonConfig, dev_config, load
 from inspectord.dependencies.ipc_handlers import (
     handle_apply_dependency_plan,
@@ -127,6 +134,33 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
             name="list_events",
             handler=lambda params: _list_events_handler(params, cfg.storage.db_path),
             mutates=False,
+        ),
+        Method(
+            name="list_alerts",
+            handler=lambda params: handle_list_alerts(params=params, db_path=cfg.storage.db_path),
+            mutates=False,
+        ),
+        Method(
+            name="get_alert",
+            handler=lambda params: handle_get_alert(params=params, db_path=cfg.storage.db_path),
+            mutates=False,
+        ),
+        Method(
+            name="ack_alert",
+            handler=lambda params: handle_ack_alert(params=params, db_path=cfg.storage.db_path),
+            mutates=True,
+        ),
+        Method(
+            name="resolve_alert",
+            handler=lambda params: handle_resolve_alert(params=params, db_path=cfg.storage.db_path),
+            mutates=True,
+        ),
+        Method(
+            name="suppress_alert",
+            handler=lambda params: handle_suppress_alert(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=True,
         ),
     ]
 
