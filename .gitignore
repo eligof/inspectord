@@ -32,4 +32,3 @@ Thumbs.db
 
 # Rust
 target/
-Cargo.lock
