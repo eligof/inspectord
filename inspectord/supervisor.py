@@ -34,6 +34,7 @@ from inspectord.schemas.alert import Alert
 from inspectord.schemas.event import Event
 from inspectord.storage.db import Database
 from inspectord.storage.migrations import run_migrations
+from inspectord.workers.notifier.__main__ import NotifierWorker
 
 log = get(__name__)
 
@@ -79,6 +80,9 @@ class Supervisor:
         self._subscribe_storage()
         for spec in self._cfg.workers:
             self._spawn_worker(spec)
+        if self._cfg.notifier_desktop_enabled:
+            self._notifier = NotifierWorker()
+            self.attach_alert_listener(self._notifier.on_alert)
 
     def attach_listener(self, fn: Callable[[Event], None]) -> None:
         self._listeners.append(fn)
