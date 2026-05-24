@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# inspectord pkg-helper wrapper — installed to /usr/libexec/inspectord/pkg-helper.
+# Invoked by pkexec via the org.inspectord.deps.install polkit action.
+# Templated: @PYTHON@ substituted at install time.
+set -euo pipefail
+
+exec @PYTHON@ -m inspectord.dependencies.pkg_helper "$@"
