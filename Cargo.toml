@@ -1,0 +1,5 @@
+[workspace]
+resolver = "2"
+members = []
+
+# Phase 2 will add eBPF crates here under crates/.

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-inspection"
+version = "0.1.0"
+description = "Unified Linux endpoint security console (Phase 0 skeleton)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "eli" }]
+
+dependencies = [
+    "pydantic>=2.7,<3",
+    "duckdb>=1.0,<2",
+    "typer>=0.12,<1",
+    "rich>=13.7,<14",
+    "pystray>=0.19,<1",
+    "Pillow>=10.0,<12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.23,<1",
+    "ruff>=0.5,<1",
+    "mypy>=1.10,<2",
+    "types-Pillow",
+]
+
+[project.scripts]
+inspectord = "inspectord.__main__:main"
+inspectorctl = "inspectorctl.__main__:main"
+inspectorctl-tray = "inspectorctl.tray.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["inspectord", "inspectorctl"]
