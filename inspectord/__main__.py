@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json as _json
 import signal
 import sys
 import threading
@@ -27,9 +28,45 @@ from inspectord.dependencies.pacman_backend import PacmanBackend
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.log import configure as configure_log
 from inspectord.log import get
+from inspectord.storage.db import Database
 from inspectord.supervisor import Supervisor
 
 log = get("inspectord")
+
+
+def _list_events_handler(params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    since_id = params.get("since_id")
+    module = params.get("module")
+    limit = int(params.get("limit", 100))
+    where = "WHERE 1=1"
+    args: list[Any] = []
+    if since_id:
+        where += " AND event_id > ?"
+        args.append(str(since_id))
+    if module:
+        where += " AND module = ?"
+        args.append(str(module))
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT event_id, ts, kind, module, action, severity, payload_json "
+            f"FROM events_enriched {where} ORDER BY event_id ASC LIMIT ?",
+            [*args, limit],
+        ).fetchall()
+    return {
+        "schema_version": "1.0.0",
+        "events": [
+            {
+                "event_id": r[0],
+                "ts": r[1].isoformat() if r[1] else None,
+                "kind": r[2],
+                "module": r[3],
+                "action": r[4],
+                "severity": r[5],
+                **_json.loads(r[6]),
+            }
+            for r in rows
+        ],
+    }
 
 
 def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
@@ -85,6 +122,11 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
                 chown=True,
             ),
             mutates=True,
+        ),
+        Method(
+            name="list_events",
+            handler=lambda params: _list_events_handler(params, cfg.storage.db_path),
+            mutates=False,
         ),
     ]
 
