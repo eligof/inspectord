@@ -1,0 +1,1 @@
+"""Dependency manager worker package."""

@@ -68,7 +68,12 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "name": "healthcheck",
                     "module": "inspectord.workers.healthcheck",
                     "config": {"interval_s": 1.0},
-                }
+                },
+                {
+                    "name": "dependency_manager",
+                    "module": "inspectord.workers.dependency_manager",
+                    "config": {"interval_s": 30.0},
+                },
             ],
         }
     )

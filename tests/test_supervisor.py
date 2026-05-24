@@ -54,3 +54,23 @@ def test_supervisor_journals_events(tmp_path: Path) -> None:
         sup.stop(timeout=5.0)
 
     assert any(cfg.storage.journal_dir.glob("*.jsonl.gz"))
+
+
+def test_supervisor_starts_dependency_manager_worker(tmp_path: Path) -> None:
+    cfg = dev_config(base=tmp_path)
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        modules: set[str] = set()
+
+        def listener(ev: object) -> None:
+            modules.add(getattr(ev, "module", ""))
+
+        sup.attach_listener(listener)
+
+        while time.monotonic() < deadline and "dependency_manager" not in modules:
+            time.sleep(0.1)
+        assert "dependency_manager" in modules
+    finally:
+        sup.stop(timeout=5.0)
