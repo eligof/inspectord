@@ -1,0 +1,19 @@
+version: 1.0.0
+id: persistence.sudoers_modified
+name: "sudoers file modified"
+severity: high
+category: persistence
+why: |
+  Modifying /etc/sudoers or /etc/sudoers.d/ grants persistent privileges.
+  Common attacker-persistence technique.
+false_positives:
+  - "You ran visudo deliberately."
+  - "A package post-install hook updated sudoers.d."
+detect:
+  any_of:
+    - event.module == "fim_watcher" AND event.action == "file_modified" AND file.path == "/etc/sudoers"
+    - event.module == "fim_watcher" AND event.action == "file_modified" AND file.path STARTSWITH "/etc/sudoers.d/"
+    - event.module == "fim_watcher" AND event.action == "file_created" AND file.path STARTSWITH "/etc/sudoers.d/"
+short: "sudoers modified: {file.path}"
+detail: "FIM detected modification of {file.path}. Investigate via diff against last-known-good."
+labels: [persistence, sudoers]

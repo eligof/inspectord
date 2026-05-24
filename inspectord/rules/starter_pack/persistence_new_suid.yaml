@@ -1,0 +1,18 @@
+version: 1.0.0
+id: persistence.new_suid_file
+name: "New SUID file"
+severity: high
+category: persistence
+why: |
+  Any new SUID binary outside the system package set is a strong persistence
+  indicator. Legitimate SUID binaries normally arrive via package manager,
+  which the package_monitor (separate collector) will correlate later.
+false_positives:
+  - "Package install legitimately added a new SUID (verify via pacman -F)."
+detect:
+  any_of:
+    - event.module == "fim_watcher" AND event.action == "file_created" AND file.setuid == true
+    - event.module == "fim_watcher" AND event.action == "file_attributes_changed" AND file.setuid == true
+short: "new SUID file: {file.path}"
+detail: "FIM observed a file with setuid bit set: {file.path}. Owner: {file.owner}. Hash: {file.hash.sha256}."
+labels: [persistence, suid]
