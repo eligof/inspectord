@@ -15,7 +15,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from inspectord.config import dev_config, load
+from inspectord.config import DaemonConfig, dev_config, load
+from inspectord.dependencies.ipc_handlers import (
+    handle_apply_dependency_plan,
+    handle_get_dep_audit,
+    handle_list_dependencies,
+    handle_plan_dependency_install,
+)
+from inspectord.dependencies.manifest import load_packaged_manifests
+from inspectord.dependencies.pacman_backend import PacmanBackend
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.log import configure as configure_log
 from inspectord.log import get
@@ -24,15 +32,61 @@ from inspectord.supervisor import Supervisor
 log = get("inspectord")
 
 
-def _ipc_methods(supervisor: Supervisor) -> list[Method]:
+def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
     def get_health(_params: dict[str, Any]) -> dict[str, Any]:
         return {
             "schema_version": "1.0.0",
             "supervisor": "running",
-            "workers": [{"name": "healthcheck", "status": "up"}],
+            "workers": [{"name": w.name, "status": "up"} for w in cfg.workers],
         }
 
-    return [Method(name="get_health", handler=get_health, mutates=False)]
+    manifests = load_packaged_manifests()
+    backend = PacmanBackend()
+
+    return [
+        Method(name="get_health", handler=get_health, mutates=False),
+        Method(
+            name="list_dependencies",
+            handler=lambda params: handle_list_dependencies(
+                params=params,
+                manifests=manifests,
+                backend=backend,
+                db_path=cfg.storage.db_path,
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="plan_dependency_install",
+            handler=lambda params: handle_plan_dependency_install(
+                params=params,
+                manifests=manifests,
+                backend=backend,
+                db_path=cfg.storage.db_path,
+            ),
+            mutates=True,
+        ),
+        Method(
+            name="get_dep_audit",
+            handler=lambda params: handle_get_dep_audit(
+                params=params,
+                db_path=cfg.storage.db_path,
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="apply_dependency_plan",
+            handler=lambda params: handle_apply_dependency_plan(
+                params=params,
+                manifests=manifests,
+                backend=backend,
+                runner=backend._runner,
+                db_path=cfg.storage.db_path,
+                sidecar_dirs=None,
+                chown=True,
+            ),
+            mutates=True,
+        ),
+    ]
 
 
 def main() -> None:
@@ -56,7 +110,7 @@ def main() -> None:
 
     ipc = IpcServer(
         socket_path=cfg.ipc.socket_path,
-        methods=_ipc_methods(sup),
+        methods=_ipc_methods(sup, cfg),
         allowed_uids=cfg.ipc.allowed_uids,
     )
     ipc.start()
