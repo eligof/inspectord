@@ -74,3 +74,14 @@ def test_supervisor_starts_dependency_manager_worker(tmp_path: Path) -> None:
         assert "dependency_manager" in modules
     finally:
         sup.stop(timeout=5.0)
+
+
+def test_supervisor_starts_log_tailer_and_fim_watcher(tmp_path: Path) -> None:
+    cfg = dev_config(base=tmp_path)
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        names = {wp.spec.name for wp in sup._procs}  # type: ignore[attr-defined]
+        assert {"healthcheck", "dependency_manager", "log_tailer", "fim_watcher"} <= names
+    finally:
+        sup.stop(timeout=5.0)
