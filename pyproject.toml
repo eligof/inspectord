@@ -45,3 +45,4 @@ packages = ["inspectord", "inspectorctl"]
 "inspectord/storage/migrations_data" = "inspectord/storage/migrations_data"
 "inspectord/dependencies/manifest_files" = "inspectord/dependencies/manifest_files"
 "inspectord/dependencies/templates" = "inspectord/dependencies/templates"
+"inspectord/rules/starter_pack" = "inspectord/rules/starter_pack"
