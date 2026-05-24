@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| **Spec version** | `0.2.0` |
+| **Spec version** | `0.2.1` |
 | **Date** | 2026-05-24 |
 | **Status** | Draft — pending user review |
 | **Target OS** | Linux only (developed on CachyOS / Arch family; portable to other modern Linux distros with systemd) |
@@ -21,6 +21,7 @@
 | --- | --- | --- |
 | 0.1.0 | 2026-05-24 | Initial draft. |
 | 0.2.0 | 2026-05-24 | Added Dependency Management subsystem (§30): new `dependency_manager` worker, declarative dependency manifest, cross-distro package backends (pacman/apt/dnf/zypper), sidecar-only configuration strategy, backup-before-modify, plan-then-execute UX, post-install verification, runtime health monitoring of dependencies. Updates: §0.1 (purpose), §2.2 (Dependencies panel under Management), §5.2 (worker added), §16.2 (IPC methods), §19.1 (bootstrap step 0), §24 (CLI commands), Appendix B (24 workers). |
+| 0.2.1 | 2026-05-24 | dependency_manager subsystem implemented for PacmanBackend + minimal-profile v1 manifests (auditd, journald, aide, yara, libudev, ebpf_features). CLI: `inspectorctl deps {status\|plan\|install\|audit}`. Manual acceptance procedure documented under `docs/manual-acceptance/deps-acceptance.md`. Other distro backends (Apt/Dnf/Zypper) still pending per §31 Phase 4. |
 
 ---
 
