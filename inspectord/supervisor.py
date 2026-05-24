@@ -14,14 +14,23 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from importlib.resources import files
 from queue import Empty as QueueEmpty
 from typing import Any
 
+import yaml as _yaml
+
+from inspectord.allowlist.file_loader import load_allowlist_file
 from inspectord.config import DaemonConfig, WorkerSpec
 from inspectord.enrichment import enrich
 from inspectord.journal import Journal
 from inspectord.log import get
 from inspectord.router import DropPolicy, EventRouter
+from inspectord.rule_engine import RuleEngine
+from inspectord.rules.python_loader import load_python_rules
+from inspectord.rules.registry import Registry
+from inspectord.rules.yaml_loader import load_yaml_rule_from_dict
+from inspectord.schemas.alert import Alert
 from inspectord.schemas.event import Event
 from inspectord.storage.db import Database
 from inspectord.storage.migrations import run_migrations
@@ -45,6 +54,24 @@ class Supervisor:
         self._procs: list[_WorkerProc] = []
         self._stop = threading.Event()
         self._listeners: list[Callable[[Event], None]] = []
+        # Build the rule engine.
+        python_rules = load_python_rules("inspectord.rules.starter_pack")
+        yaml_rules = []
+        pkg = files("inspectord.rules.starter_pack")
+        for entry in pkg.iterdir():
+            if entry.name.endswith(".yaml"):
+                yaml_rules.append(
+                    load_yaml_rule_from_dict(
+                        _yaml.safe_load(entry.read_text(encoding="utf-8")),
+                        source=entry.name,
+                    )
+                )
+        self._rule_engine = RuleEngine(
+            registry=Registry(yaml_rules=yaml_rules, python_rules=python_rules),
+            db_path=config.storage.db_path,
+            allowlist_entries=load_allowlist_file(),
+        )
+        self._alert_listeners: list[Callable[[Alert], None]] = []
 
     def start(self) -> None:
         self._db.connect()
@@ -55,6 +82,20 @@ class Supervisor:
 
     def attach_listener(self, fn: Callable[[Event], None]) -> None:
         self._listeners.append(fn)
+
+    def attach_alert_listener(self, fn: Callable[[Alert], None]) -> None:
+        self._alert_listeners.append(fn)
+
+    def _inject_for_test(self, ev: Event) -> None:
+        """Test hook: push an event through the same path workers' events take."""
+        ev = enrich(ev)
+        for alert in self._rule_engine.process(ev):
+            for fn in list(self._alert_listeners):
+                try:
+                    fn(alert)
+                except Exception as exc:
+                    log.warning("alert listener raised: %r", exc)
+        self._router.publish(ev)
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -136,6 +177,12 @@ class Supervisor:
                 payload = json.loads(stripped.decode("utf-8"))
                 ev = Event.model_validate(payload)
                 ev = enrich(ev)
+                for alert in self._rule_engine.process(ev):
+                    for fn in list(self._alert_listeners):
+                        try:
+                            fn(alert)
+                        except Exception as exc:
+                            log.warning("alert listener raised: %r", exc)
                 self._router.publish(ev)
             except Exception as exc:
                 log.error("worker %s emitted invalid event: %r", wp.spec.name, exc)
