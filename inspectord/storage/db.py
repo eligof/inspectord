@@ -16,8 +16,9 @@ import duckdb
 class Database:
     """A single-process DuckDB handle. Not thread-safe — use one per process."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, read_only: bool = False) -> None:
         self._path = Path(path)
+        self._read_only = read_only
         self._conn: duckdb.DuckDBPyConnection | None = None
 
     @property
@@ -26,7 +27,7 @@ class Database:
 
     def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = duckdb.connect(str(self._path))
+        self._conn = duckdb.connect(str(self._path), read_only=self._read_only)
 
     def close(self) -> None:
         if self._conn is not None:
