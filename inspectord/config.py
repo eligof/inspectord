@@ -38,6 +38,7 @@ class DaemonConfig(BaseModel):
     storage: StorageConfig
     ipc: IpcConfig
     workers: list[WorkerSpec] = Field(default_factory=list)
+    notifier_desktop_enabled: bool = False
 
 
 def load(path: Path) -> DaemonConfig:
