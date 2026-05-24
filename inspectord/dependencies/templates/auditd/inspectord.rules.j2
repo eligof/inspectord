@@ -1,0 +1,10 @@
+# inspectord audit rules — managed file, do not edit.
+-a always,exit -F arch=b64 -S execve -F key=inspectord_execve
+-a always,exit -F arch=b32 -S execve -F key=inspectord_execve
+-a always,exit -F arch=b64 -S ptrace -F key=inspectord_ptrace
+-a always,exit -F arch=b32 -S ptrace -F key=inspectord_ptrace
+-a always,exit -F arch=b64 -S finit_module -S init_module -S delete_module -F key=inspectord_module
+-w /etc/passwd -p wa -k inspectord_passwd
+-w /etc/shadow -p wa -k inspectord_shadow
+-w /etc/sudoers -p wa -k inspectord_sudoers
+-w /etc/sudoers.d -p wa -k inspectord_sudoers
