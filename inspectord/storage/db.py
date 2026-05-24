@@ -28,6 +28,9 @@ class Database:
     def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = duckdb.connect(str(self._path), read_only=self._read_only)
+        # Always interpret TIMESTAMP columns as UTC so naive datetimes returned
+        # by DuckDB are consistent across hosts regardless of the local timezone.
+        self._conn.execute("SET TimeZone='UTC'")
 
     def close(self) -> None:
         if self._conn is not None:
