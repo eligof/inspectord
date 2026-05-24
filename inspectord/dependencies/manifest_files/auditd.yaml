@@ -1,0 +1,36 @@
+version: 1.0.0
+name: auditd
+description: Linux audit daemon. Provides syscall/file-watch events when eBPF coverage is incomplete.
+required_when:
+  profiles: [minimal, standard]
+optional_when:
+  profiles: []
+distro_packages:
+  arch: [audit]
+  cachyos: [audit]
+minimum_version: "3.0.0"
+service:
+  systemd_unit: auditd.service
+  enable: true
+  start: true
+config:
+  strategy: sidecar
+  include_dir: /etc/audit/rules.d/
+  dropin:
+    filename: inspectord.rules
+    template: auditd/inspectord.rules.j2
+    owner: root
+    mode: "0640"
+  validate_cmd: ["augenrules", "--check"]
+permissions: null
+verify:
+  binary_paths: [/sbin/auditctl, /usr/sbin/auditctl]
+  version_cmd: ["auditctl", "--version"]
+  version_regex: "auditctl version (\\d+\\.\\d+\\.\\d+)"
+  health_probe:
+    kind: service_active
+    unit: auditd.service
+post_install_hooks: []
+rollback:
+  remove_dropin: true
+  reload_service: true

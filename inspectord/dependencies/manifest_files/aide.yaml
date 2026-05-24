@@ -1,0 +1,23 @@
+version: 1.0.0
+name: aide
+description: AIDE — file integrity database. We own its database under /var/lib/inspectord/aide/, no system config drop-in.
+required_when:
+  profiles: [minimal, standard]
+optional_when:
+  profiles: []
+distro_packages:
+  arch: [aide]
+  cachyos: [aide]
+minimum_version: "0.18"
+service: null
+config: null
+permissions: null
+verify:
+  binary_paths: [/usr/bin/aide]
+  version_cmd: ["aide", "--version"]
+  version_regex: "Aide (\\d+\\.\\d+)"
+  health_probe:
+    kind: binary_exists_and_runs
+post_install_hooks: []
+rollback:
+  remove_dropin: false

@@ -1,0 +1,23 @@
+version: 1.0.0
+name: yara
+description: YARA — pattern matching engine. We ship rulesets under /var/lib/inspectord/yara/.
+required_when:
+  profiles: [minimal, standard]
+optional_when:
+  profiles: []
+distro_packages:
+  arch: [yara]
+  cachyos: [yara]
+minimum_version: "4.0.0"
+service: null
+config: null
+permissions: null
+verify:
+  binary_paths: [/usr/bin/yara]
+  version_cmd: ["yara", "--version"]
+  version_regex: "(\\d+\\.\\d+\\.\\d+)"
+  health_probe:
+    kind: binary_exists_and_runs
+post_install_hooks: []
+rollback:
+  remove_dropin: false
