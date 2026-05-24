@@ -1,0 +1,5 @@
+[2026-05-24T14:23:10+0000] [ALPM] installed audit (3.1.5-1)
+[2026-05-24T14:23:11+0000] [ALPM] removed yara (4.5.0-1)
+[2026-05-24T14:23:12+0000] [ALPM] upgraded suricata (6.0.0-1 -> 7.0.0-1)
+[2026-05-24T14:23:13+0000] [ALPM] reinstalled libudev (250-1)
+[2026-05-24T14:23:14+0000] [PACMAN] Running 'pacman -S audit'
