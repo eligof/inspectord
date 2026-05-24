@@ -65,9 +65,11 @@ def _load_plan(db: Database, plan_id: str) -> tuple[str, str, list[DependencyPla
         raise PkgHelperError(f"plan status is {status!r}, expected 'pending'")
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at)
-    # DuckDB returns naive datetimes adjusted to local time; compare apples-to-apples.
-    now = datetime.now() if expires_at.tzinfo is None else datetime.now(UTC)
-    if expires_at < now:
+    if expires_at.tzinfo is None:
+        # DuckDB TIMESTAMP strips tz info on retrieval, but we always insert
+        # with datetime.now(UTC), so the stored value represents UTC.
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
         raise PkgHelperError(f"plan {plan_id} expired at {expires_at.isoformat()}")
     items = [DependencyPlanItem.model_validate(i) for i in json.loads(items_json)]
     return distro, pm, items
