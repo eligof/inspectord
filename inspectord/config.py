@@ -88,6 +88,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.fim_watcher",
                     "config": {},
                 },
+                {
+                    "name": "process_collector",
+                    "module": "inspectord.workers.process_collector",
+                    "config": {},
+                },
             ],
         }
     )
