@@ -24,6 +24,24 @@ jobs:
           pip install maturin
           pip install -e '.[dev]' --no-build-isolation
 
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cargo fmt
+        run: cargo fmt --check
+
+      - name: Cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo build
+        run: cargo build --workspace --all-targets
+
+      - name: Cargo test
+        run: cargo test --workspace --all-targets
+
       - name: Ruff check
         run: |
           if compgen -G "inspectord" > /dev/null || compgen -G "inspectorctl" > /dev/null || compgen -G "tests" > /dev/null; then
