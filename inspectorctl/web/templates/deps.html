@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Dependencies</h1>
+
+{% if dependencies %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Required by</th>
+      <th>Installed</th>
+      <th>Version</th>
+      <th>Drop-in</th>
+      <th>Last verify</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in dependencies %}
+    <tr>
+      <td class="mono">{{ d.name }}</td>
+      <td class="muted">{{ d.required_when_profiles | join(', ') }}</td>
+      <td>
+        {% if d.installed is sameas true %}
+          <span class="badge sev-info">yes</span>
+        {% elif d.installed is sameas false %}
+          <span class="badge sev-critical">no</span>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td class="mono">{{ d.installed_version or "" }}</td>
+      <td>
+        {% if d.dropin_present %}
+          <span class="badge sev-info">yes</span>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if d.last_verify_pass is sameas true %}
+          <span class="badge sev-info">pass</span>
+        {% elif d.last_verify_pass is sameas false %}
+          <span class="badge sev-critical">fail</span>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+        {% if d.last_verify_detail %}
+          <div class="muted" style="font-size: 12px;">{{ d.last_verify_detail }}</div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No dependencies declared.</div>
+{% endif %}
+{% endblock %}
