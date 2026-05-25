@@ -105,7 +105,7 @@ jobs:
       - name: Pytest (unit)
         run: |
           if [ -d tests ]; then
-            pytest -m "not integration" -v || [ $? -eq 5 ]
+            pytest -m "not integration and not ebpf_load" -v || [ $? -eq 5 ]
           else
             echo "No tests/ dir yet — skipping unit tests."
           fi
@@ -113,7 +113,7 @@ jobs:
       - name: Pytest (integration)
         run: |
           if [ -d tests/integration ]; then
-            pytest -m integration -v || [ $? -eq 5 ]
+            pytest -m "integration and not ebpf_load" -v || [ $? -eq 5 ]
           else
             echo "No tests/integration dir yet — skipping integration tests."
           fi

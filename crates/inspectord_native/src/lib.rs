@@ -1,23 +1,14 @@
 //! Rust extension module for inspectord.
-//!
-//! Phase 2 process_collector entry point. PR 6 adds the aya loader;
-//! the ring-buffer reader and structured records land in subsequent PRs.
 
 mod loader;
+mod records;
 
 use loader::LoadedProgram;
-use pyo3::exceptions::PyOSError;
+use pyo3::exceptions::{PyOSError, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use std::time::Duration;
 
-/// Python-visible handle for the loaded eBPF program.
-///
-/// Use as a context manager:
-///
-/// ```python
-/// from inspectord._native import ProcessExecStream
-/// with ProcessExecStream() as stream:
-///     pass
-/// ```
 #[pyclass(unsendable)]
 struct ProcessExecStream {
     program: Option<LoadedProgram>,
@@ -32,6 +23,29 @@ impl ProcessExecStream {
         Ok(Self {
             program: Some(program),
         })
+    }
+
+    /// Block for up to `timeout_ms` ms, then return all currently-available
+    /// records as a list of dicts. Empty list on timeout.
+    fn poll<'py>(&mut self, py: Python<'py>, timeout_ms: u64) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let program = self
+            .program
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("stream is closed"))?;
+        let records = program.poll(Duration::from_millis(timeout_ms));
+        let mut out = Vec::with_capacity(records.len());
+        for record in records {
+            let dict = PyDict::new(py);
+            dict.set_item("timestamp_ns", record.timestamp_ns)?;
+            dict.set_item("pid", record.pid)?;
+            dict.set_item("ppid", record.ppid)?;
+            dict.set_item("uid", record.uid)?;
+            dict.set_item("gid", record.gid)?;
+            dict.set_item("comm", record.comm_str())?;
+            dict.set_item("cmdline", record.cmdline_str())?;
+            out.push(dict);
+        }
+        Ok(out)
     }
 
     fn close(&mut self) {
