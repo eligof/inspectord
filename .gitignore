@@ -32,3 +32,8 @@ Thumbs.db
 
 # Rust
 target/
+Cargo.lock
+
+# Maturin compiled extension (built locally by maturin develop / pip install -e)
+*.abi3.so
+*.so

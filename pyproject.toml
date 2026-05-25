@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
 
 [project]
 name = "local-inspection"
@@ -42,13 +42,22 @@ inspectorctl = "inspectorctl.__main__:main"
 inspectorctl-tray = "inspectorctl.tray.__main__:main"
 inspectorctl-web = "inspectorctl.web.__main__:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["inspectord", "inspectorctl"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"inspectord/storage/migrations_data" = "inspectord/storage/migrations_data"
-"inspectord/dependencies/manifest_files" = "inspectord/dependencies/manifest_files"
-"inspectord/dependencies/templates" = "inspectord/dependencies/templates"
-"inspectord/rules/starter_pack" = "inspectord/rules/starter_pack"
-"inspectorctl/web/templates" = "inspectorctl/web/templates"
-"inspectorctl/web/static" = "inspectorctl/web/static"
+[tool.maturin]
+python-packages = ["inspectord", "inspectorctl"]
+manifest-path = "crates/inspectord_native/Cargo.toml"
+module-name = "inspectord._native"
+bindings = "pyo3"
+include = [
+    { path = "inspectord/storage/migrations_data/**/*", format = "sdist" },
+    { path = "inspectord/storage/migrations_data/**/*", format = "wheel" },
+    { path = "inspectord/dependencies/manifest_files/**/*", format = "sdist" },
+    { path = "inspectord/dependencies/manifest_files/**/*", format = "wheel" },
+    { path = "inspectord/dependencies/templates/**/*", format = "sdist" },
+    { path = "inspectord/dependencies/templates/**/*", format = "wheel" },
+    { path = "inspectord/rules/starter_pack/**/*", format = "sdist" },
+    { path = "inspectord/rules/starter_pack/**/*", format = "wheel" },
+    { path = "inspectorctl/web/templates/**/*", format = "sdist" },
+    { path = "inspectorctl/web/templates/**/*", format = "wheel" },
+    { path = "inspectorctl/web/static/**/*", format = "sdist" },
+    { path = "inspectorctl/web/static/**/*", format = "wheel" },
+]
