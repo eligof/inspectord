@@ -2,5 +2,26 @@
 resolver = "2"
 members = [
     "crates/inspectord_native",
-    # eBPF crates will be added here in subsequent PRs.
+    "crates/inspectord_native_bpf",
 ]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.74"
+
+[workspace.dependencies]
+aya = "0.13"
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+aya-build = "0.1"
+
+# BPF crate profiles — must live in the workspace root.
+# Per-package overrides keep these settings isolated to the BPF crate.
+[profile.dev.package.inspectord_native_bpf]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+
+[profile.release.package.inspectord_native_bpf]
+codegen-units = 1

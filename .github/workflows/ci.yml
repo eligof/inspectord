@@ -55,13 +55,17 @@ jobs:
         run: cargo fmt --check
 
       - name: Cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude inspectord_native_bpf -- -D warnings
 
       - name: Cargo build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --exclude inspectord_native_bpf
 
       - name: Cargo test
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --exclude inspectord_native_bpf
+
+      - name: Cargo build BPF crate
+        working-directory: crates/inspectord_native_bpf
+        run: cargo build --release --target bpfel-unknown-none
 
       - name: Ruff check
         run: |

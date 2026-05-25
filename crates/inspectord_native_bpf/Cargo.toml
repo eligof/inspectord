@@ -1,0 +1,14 @@
+[package]
+name = "inspectord_native_bpf"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "inspectord-bpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf.workspace = true
+aya-log-ebpf.workspace = true
