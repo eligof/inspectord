@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from inspectord._native import hello
+
 
 def test_native_hello_returns_expected_string() -> None:
-    from inspectord._native import hello
-
     assert hello() == "hello from inspectord_native"
