@@ -1,0 +1,11 @@
+{% macro severity_badge(value) -%}
+<span class="badge sev-{{ value }}">{{ value }}</span>
+{%- endmacro %}
+
+{% macro status_badge(value) -%}
+<span class="badge status-{{ value }}">{{ value }}</span>
+{%- endmacro %}
+
+{% macro nav_link(href, label, current) -%}
+<a href="{{ href }}" class="{{ 'active' if current == href else '' }}">{{ label }}</a>
+{%- endmacro %}

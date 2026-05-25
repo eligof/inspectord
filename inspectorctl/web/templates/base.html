@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ title or "inspectord" }}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  {%- from "_macros.html" import nav_link %}
+  <nav>
+    <strong>inspectord</strong>
+    {{ nav_link("/alerts", "Alerts", current_path) }}
+    {{ nav_link("/events", "Live events", current_path) }}
+    {{ nav_link("/health", "Health", current_path) }}
+    {{ nav_link("/deps", "Dependencies", current_path) }}
+  </nav>
+  <main>
+    {%- if error %}
+    <div class="error">⚠ {{ error }}</div>
+    {%- endif %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
