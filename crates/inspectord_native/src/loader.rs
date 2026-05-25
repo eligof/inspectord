@@ -1,16 +1,22 @@
-//! Loads the embedded BPF object into the kernel and attaches the
-//! `process_exec` tracepoint program. Dropping the LoadedProgram
-//! unloads everything from the kernel.
+//! Loads the embedded BPF object into the kernel, attaches the
+//! `process_exec` tracepoint program, and reads records from the
+//! ring buffer.
 
-use aya::{programs::TracePoint, Ebpf};
-use std::sync::Mutex;
+use aya::{
+    maps::{ring_buf::RingBuf, MapData},
+    programs::TracePoint,
+    Ebpf,
+};
+use std::os::fd::AsRawFd;
+use std::time::Duration;
 
-/// BPF object emitted by the build script. Embedded at compile time so
-/// the wheel ships with the program pre-compiled.
+use crate::records::ProcessExecRecord;
+
 const PROGRAM_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/inspectord-bpf"));
 
 pub struct LoadedProgram {
-    _inner: Mutex<Ebpf>,
+    _bpf: Ebpf,
+    ring: RingBuf<MapData>,
 }
 
 impl LoadedProgram {
@@ -25,9 +31,38 @@ impl LoadedProgram {
         program
             .attach("sched", "sched_process_exec")
             .map_err(LoadError::Program)?;
-        Ok(Self {
-            _inner: Mutex::new(bpf),
-        })
+
+        let map = bpf.take_map("EVENTS").ok_or(LoadError::MissingMap)?;
+        let ring = RingBuf::try_from(map).map_err(|e| LoadError::MapKind(format!("{e:?}")))?;
+
+        Ok(Self { _bpf: bpf, ring })
+    }
+
+    fn drain(&mut self) -> Vec<ProcessExecRecord> {
+        let mut out = Vec::new();
+        while let Some(item) = self.ring.next() {
+            if item.len() >= std::mem::size_of::<ProcessExecRecord>() {
+                out.push(ProcessExecRecord::from_bytes(&item));
+            }
+        }
+        out
+    }
+
+    /// Blocks for up to `timeout` waiting for at least one record, then
+    /// drains everything available. Returns empty Vec on timeout.
+    pub fn poll(&mut self, timeout: Duration) -> Vec<ProcessExecRecord> {
+        use libc::{poll, pollfd, POLLIN};
+        let mut fds = [pollfd {
+            fd: self.ring.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        }];
+        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let rc = unsafe { poll(fds.as_mut_ptr(), 1, timeout_ms) };
+        if rc <= 0 {
+            return Vec::new();
+        }
+        self.drain()
     }
 }
 
@@ -39,4 +74,8 @@ pub enum LoadError {
     Program(#[from] aya::programs::ProgramError),
     #[error("BPF program 'process_exec' not found in object")]
     MissingProgram,
+    #[error("BPF map 'EVENTS' not found in object")]
+    MissingMap,
+    #[error("map kind mismatch: {0}")]
+    MapKind(String),
 }

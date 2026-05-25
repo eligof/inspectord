@@ -42,6 +42,12 @@ inspectorctl = "inspectorctl.__main__:main"
 inspectorctl-tray = "inspectorctl.tray.__main__:main"
 inspectorctl-web = "inspectorctl.web.__main__:main"
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: integration tests (deselect with -m 'not integration')",
+    "ebpf_load: tests that load real eBPF programs (require CAP_BPF / root)",
+]
+
 [tool.maturin]
 python-packages = ["inspectord", "inspectorctl"]
 manifest-path = "crates/inspectord_native/Cargo.toml"
