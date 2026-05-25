@@ -21,6 +21,8 @@ dependencies = [
     "PyYAML>=6.0,<7",
     "Jinja2>=3.1,<4",
     "inotify_simple>=1.3,<2",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
 ]
 
 [project.optional-dependencies]
@@ -31,12 +33,14 @@ dev = [
     "mypy>=1.10,<2",
     "types-Pillow>=10.0,<13",
     "types-PyYAML",
+    "httpx>=0.27,<1",
 ]
 
 [project.scripts]
 inspectord = "inspectord.__main__:main"
 inspectorctl = "inspectorctl.__main__:main"
 inspectorctl-tray = "inspectorctl.tray.__main__:main"
+inspectorctl-web = "inspectorctl.web.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["inspectord", "inspectorctl"]
@@ -46,3 +50,5 @@ packages = ["inspectord", "inspectorctl"]
 "inspectord/dependencies/manifest_files" = "inspectord/dependencies/manifest_files"
 "inspectord/dependencies/templates" = "inspectord/dependencies/templates"
 "inspectord/rules/starter_pack" = "inspectord/rules/starter_pack"
+"inspectorctl/web/templates" = "inspectorctl/web/templates"
+"inspectorctl/web/static" = "inspectorctl/web/static"
