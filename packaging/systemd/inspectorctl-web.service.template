@@ -1,0 +1,15 @@
+# inspectorctl-web.service — installed to ~/.config/systemd/user/
+# Templated: @PYTHON@ substituted at install time.
+
+[Unit]
+Description=Local Inspection web dashboard
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@PYTHON@ -m inspectorctl.web --socket /run/inspectord/inspectord.sock --port 8765
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=graphical-session.target
