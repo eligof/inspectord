@@ -25,12 +25,8 @@ def test_poll_captures_subprocess_exec_with_cmdline() -> None:
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             records.extend(stream.poll(100))
-            if any(
-                r["comm"] == "true" and "marker-arg-xyz" in str(r["cmdline"])
-                for r in records
-            ):
+            if any(r["comm"] == "true" and "marker-arg-xyz" in str(r["cmdline"]) for r in records):
                 break
         assert any(
-            r["comm"] == "true" and "marker-arg-xyz" in str(r["cmdline"])
-            for r in records
+            r["comm"] == "true" and "marker-arg-xyz" in str(r["cmdline"]) for r in records
         ), f"did not observe true --marker-arg-xyz; records={records!r}"
