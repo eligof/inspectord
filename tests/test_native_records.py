@@ -12,7 +12,6 @@ import subprocess
 import time
 
 import pytest
-
 from inspectord._native import ProcessExecStream
 
 
