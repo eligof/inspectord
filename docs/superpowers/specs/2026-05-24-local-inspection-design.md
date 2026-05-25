@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| **Spec version** | `0.2.3` |
+| **Spec version** | `0.2.4` |
 | **Date** | 2026-05-24 |
 | **Status** | Draft — pending user review |
 | **Target OS** | Linux only (developed on CachyOS / Arch family; portable to other modern Linux distros with systemd) |
@@ -24,6 +24,7 @@
 | 0.2.1 | 2026-05-24 | dependency_manager subsystem implemented for PacmanBackend + minimal-profile v1 manifests (auditd, journald, aide, yara, libudev, ebpf_features). CLI: `inspectorctl deps {status\|plan\|install\|audit}`. Manual acceptance procedure documented under `docs/manual-acceptance/deps-acceptance.md`. Other distro backends (Apt/Dnf/Zypper) still pending per §31 Phase 4. |
 | 0.2.2 | 2026-05-24 | First real collector slice landed: log_tailer (journald + pacman + auth.log parsers), fim_watcher (inotify on /etc, /usr/bin, /usr/sbin, /boot, sudoers, shell rc files, XDG autostart), and the enrichment library (process / file / user enrichers integrated into the supervisor's publish pipeline). New IPC method `list_events`; new CLI `inspectorctl events tail/search`. No rule engine yet. Apt/Dnf/Zypper backends and auditd/nftables/iptables/ufw/kmsg parsers still pending. |
 | 0.2.3 | 2026-05-25 | Rule engine + allowlist + notifier landed. Starter rule pack: lolbin.bash_dev_tcp (Python), auth.ssh_brute_force (Python with 60s/5x window correlation), persistence.sudoers_modified (YAML), persistence.new_suid_file (YAML). File-based allowlist at /etc/inspectord/allowlist.yaml with scope evaluation (rule_id / entity / path_glob). DesktopSink via notify-send; Telegram/Signal still pending. IPC: list_alerts/get_alert/ack_alert/resolve_alert/suppress_alert. CLI: inspectorctl alerts {list, show, ack, resolve, suppress}. Sigma rule support still deferred. |
+| 0.2.4 | 2026-05-25 | Phase 1 dashboard slice landed: web/Alerts (inbox-zero triage with ack/resolve/suppress), web/Live Events (HTMX-polled feed), web/Health, web/Dependencies. FastAPI app bound to 127.0.0.1:8765, served by inspectorctl-web (also as a user-mode systemd unit template). 24 of 28 spec panels still pending; CSRF/sessions/TLS deferred to a future hardening pass. **Phase 1 of the design is now complete: collector → enrichment → rule engine → allowlist → notifier → CLI → web dashboard all working end-to-end.** |
 
 ---
 
