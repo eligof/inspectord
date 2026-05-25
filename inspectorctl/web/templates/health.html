@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Health</h1>
+
+<div class="detail">
+  <h2>Supervisor</h2>
+  <p>supervisor status: <span class="badge {{ 'sev-info' if supervisor == 'running' else 'sev-critical' }}">{{ supervisor }}</span></p>
+
+  <h2>Workers</h2>
+  {% if workers %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      {% for w in workers %}
+      <tr>
+        <td class="mono">{{ w.name }}</td>
+        <td>
+          {% if w.status == "up" %}
+            <span class="badge sev-info">up</span>
+          {% else %}
+            <span class="badge sev-critical">{{ w.status }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No workers reported.</div>
+  {% endif %}
+</div>
+{% endblock %}
