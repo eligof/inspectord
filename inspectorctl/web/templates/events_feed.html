@@ -1,0 +1,26 @@
+{% if events %}
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Severity</th>
+      <th>Module</th>
+      <th>Action</th>
+      <th>Message</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in events %}
+    <tr>
+      <td class="mono muted">{{ e.ts or '' }}</td>
+      <td><span class="badge sev-{{ e.severity }}">{{ e.severity }}</span></td>
+      <td class="mono">{{ e.module }}</td>
+      <td class="mono">{{ e.action }}</td>
+      <td>{{ e.message or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No events yet.</div>
+{% endif %}
