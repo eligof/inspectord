@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% from "_macros.html" import severity_badge, status_badge %}
+
+{% block content %}
+<h1>Alert {{ alert.alert_id[:8] }}…</h1>
+
+<div class="detail">
+  <p>
+    {{ severity_badge(alert.severity) }}
+    {{ status_badge(alert.status) }}
+    <span class="mono">{{ alert.rule.id }}</span>
+    {% if alert.rule.name %}
+    — <strong>{{ alert.rule.name }}</strong>
+    {% endif %}
+  </p>
+
+  <h2>Summary</h2>
+  <p>{{ alert.rendered.short }}</p>
+
+  <h2>Detail</h2>
+  <pre>{{ alert.rendered.detail }}</pre>
+
+  <h2>Why this rule</h2>
+  <p>{{ alert.rule.why or '—' }}</p>
+
+  {% if alert.rule.false_positives %}
+  <h2>Known false positives</h2>
+  <ul class="muted">
+    {% for fp in alert.rule.false_positives %}
+    <li>{{ fp }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <h2>Entities</h2>
+  <table>
+    <thead><tr><th>Kind</th><th>Key</th></tr></thead>
+    <tbody>
+      {% for e in alert.entities %}
+      <tr><td class="mono">{{ e.kind }}</td><td class="mono">{{ e.key }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Times</h2>
+  <p class="muted">First seen: {{ alert.first_seen_at }}<br>Last seen: {{ alert.last_seen_at }}<br>Dedup count: {{ alert.dedup_count }}</p>
+
+  {% if alert.status == "new" or alert.status == "acknowledged" %}
+  <div class="actions">
+    {% if alert.status == "new" %}
+    <form method="post" action="/alerts/{{ alert.alert_id }}/ack">
+      <button type="submit">Acknowledge</button>
+    </form>
+    {% endif %}
+    <form method="post" action="/alerts/{{ alert.alert_id }}/resolve">
+      <button type="submit">Resolve</button>
+    </form>
+    <form method="post" action="/alerts/{{ alert.alert_id }}/suppress">
+      <button type="submit">Suppress</button>
+    </form>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

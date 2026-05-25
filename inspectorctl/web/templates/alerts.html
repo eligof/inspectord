@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "_macros.html" import severity_badge, status_badge %}
+
+{% block content %}
+<h1>Alerts</h1>
+
+<form class="filter-bar" method="get" action="/alerts">
+  <label class="muted">Status:</label>
+  <select name="status">
+    <option value="" {{ 'selected' if not status else '' }}>any</option>
+    <option value="new" {{ 'selected' if status == 'new' else '' }}>new</option>
+    <option value="acknowledged" {{ 'selected' if status == 'acknowledged' else '' }}>acknowledged</option>
+    <option value="resolved" {{ 'selected' if status == 'resolved' else '' }}>resolved</option>
+    <option value="suppressed" {{ 'selected' if status == 'suppressed' else '' }}>suppressed</option>
+  </select>
+  <label class="muted">Severity:</label>
+  <select name="severity">
+    <option value="" {{ 'selected' if not severity else '' }}>any</option>
+    <option value="critical" {{ 'selected' if severity == 'critical' else '' }}>critical</option>
+    <option value="high" {{ 'selected' if severity == 'high' else '' }}>high</option>
+    <option value="medium" {{ 'selected' if severity == 'medium' else '' }}>medium</option>
+    <option value="low" {{ 'selected' if severity == 'low' else '' }}>low</option>
+    <option value="info" {{ 'selected' if severity == 'info' else '' }}>info</option>
+  </select>
+  <button type="submit">Filter</button>
+</form>
+
+{% if alerts %}
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Severity</th>
+      <th>Status</th>
+      <th>Rule</th>
+      <th>Dedup</th>
+      <th>Summary</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in alerts %}
+    <tr>
+      <td class="mono muted">{{ a.ts or '' }}</td>
+      <td>{{ severity_badge(a.severity) }}</td>
+      <td>{{ status_badge(a.status) }}</td>
+      <td class="mono">{{ a.rule_id }}</td>
+      <td>{{ a.dedup_count or 1 }}</td>
+      <td>{{ a.rendered_short or '' }}</td>
+      <td><a href="/alerts/{{ a.alert_id }}">open →</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Inbox zero. No alerts match the filter.</div>
+{% endif %}
+{% endblock %}
