@@ -24,17 +24,17 @@ jobs:
           pip install maturin
           pip install -e '.[dev]' --no-build-isolation
 
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-
       - name: Install nightly Rust (for bpf-linker)
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
           components: rust-src
+
+      - name: Install Rust toolchain (stable — default for cargo gates)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
 
       - name: Install LLVM + libelf + clang
         run: |
