@@ -1,0 +1,12 @@
+[package]
+name = "inspectord-native"
+version = "0.1.0"
+edition = "2021"
+description = "Rust extension module for inspectord (eBPF collectors land in subsequent PRs)"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = ">=0.22,<1", features = ["extension-module", "abi3-py312"] }

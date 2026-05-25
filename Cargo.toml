@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
-members = []
-
-# Phase 2 will add eBPF crates here under crates/.
+members = [
+    "crates/inspectord_native",
+    # eBPF crates will be added here in subsequent PRs.
+]
