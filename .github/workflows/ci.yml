@@ -30,6 +30,27 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
+      - name: Install nightly Rust (for bpf-linker)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Install LLVM + libelf + clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              llvm-18 llvm-18-dev libpolly-18-dev \
+              clang-18 lld-18 libelf-dev pkg-config
+
+      - name: Configure LLVM env
+        run: |
+          echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+          echo "/usr/lib/llvm-18/bin" >> $GITHUB_PATH
+
+      - name: Install bpf-linker
+        run: cargo install --locked bpf-linker
+
       - name: Cargo fmt
         run: cargo fmt --check
 
