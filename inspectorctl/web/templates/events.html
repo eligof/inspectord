@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Live events</h1>
+
+<form class="filter-bar" method="get" action="/events">
+  <label class="muted">Module:</label>
+  <input type="text" name="module" value="{{ module or '' }}" placeholder="any">
+  <button type="submit">Filter</button>
+</form>
+
+<div id="events-feed"
+     hx-get="/events/feed{% if module %}?module={{ module }}{% endif %}"
+     hx-target="#events-feed"
+     hx-trigger="load, every 2s">
+  <div class="empty">Loading…</div>
+</div>
+{% endblock %}
