@@ -14,7 +14,7 @@ use aya_ebpf::{
         gen::bpf_probe_read_user as raw_probe_read_user,
     },
     macros::{map, tracepoint},
-    maps::RingBuf,
+    maps::{Array, RingBuf},
     programs::TracePointContext,
 };
 
@@ -23,19 +23,22 @@ use records::{ProcessExecRecord, CMDLINE_LEN, COMM_LEN};
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
-// Hard-coded task_struct offsets for CachyOS kernel 7.0.10-1-cachyos-bore (x86_64).
-// A follow-up Phase 2 slice will replace these with CO-RE BTF relocations.
-// To re-derive on a different kernel:
-//   pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E 'real_parent|tgid|mm;'
-//   pahole -C mm_struct  /sys/kernel/btf/vmlinux | grep arg_start
-const TASK_REAL_PARENT_OFFSET: usize = 2880;
-const TASK_TGID_OFFSET: usize = 2868;
-const TASK_MM_OFFSET: usize = 2744;
-const MM_ARG_START_OFFSET: usize = 696;
-// arg_end is the next field after arg_start in mm_struct, regardless of
-// CONFIG-driven layout shifts, so we can derive it without re-deriving on
-// every kernel.
-const MM_ARG_END_OFFSET: usize = MM_ARG_START_OFFSET + 8;
+// Per-kernel struct field offsets, populated by the userspace loader at
+// startup from /sys/kernel/btf/vmlinux. Avoids the previous habit of
+// silently breaking on every CONFIG-driven kernel rebuild.
+//
+// Index layout — must match KernelOffsets in the userspace crate:
+//   0 = task_struct.real_parent
+//   1 = task_struct.tgid
+//   2 = task_struct.mm
+//   3 = mm_struct.arg_start  (arg_end is +8 by ABI; not stored)
+#[map]
+static OFFSETS: Array<u32> = Array::with_max_entries(4, 0);
+
+const OFF_TASK_REAL_PARENT: u32 = 0;
+const OFF_TASK_TGID: u32 = 1;
+const OFF_TASK_MM: u32 = 2;
+const OFF_MM_ARG_START: u32 = 3;
 
 #[tracepoint]
 pub fn process_exec(_ctx: TracePointContext) -> u32 {
@@ -44,6 +47,18 @@ pub fn process_exec(_ctx: TracePointContext) -> u32 {
 }
 
 fn try_process_exec() -> Result<(), i64> {
+    // Bail before reserving a ring-buffer slot if the loader never populated
+    // the offsets map — emitting events with garbage ppid/cmdline is worse
+    // than dropping them.
+    let real_parent_off = *OFFSETS.get(OFF_TASK_REAL_PARENT).ok_or(-1_i64)? as usize;
+    let tgid_off = *OFFSETS.get(OFF_TASK_TGID).ok_or(-1_i64)? as usize;
+    let mm_off = *OFFSETS.get(OFF_TASK_MM).ok_or(-1_i64)? as usize;
+    let arg_start_off = *OFFSETS.get(OFF_MM_ARG_START).ok_or(-1_i64)? as usize;
+    if real_parent_off == 0 || tgid_off == 0 || mm_off == 0 || arg_start_off == 0 {
+        return Err(-1);
+    }
+    let arg_end_off = arg_start_off + 8;
+
     let mut entry = EVENTS.reserve::<ProcessExecRecord>(0).ok_or(-1_i64)?;
     let record_ptr = entry.as_mut_ptr();
 
@@ -68,15 +83,13 @@ fn try_process_exec() -> Result<(), i64> {
         if !task.is_null() {
             // Read real_parent pointer from task_struct.
             let mut real_parent_bytes = [0u8; 8];
-            if bpf_probe_read_kernel_buf(task.add(TASK_REAL_PARENT_OFFSET), &mut real_parent_bytes)
-                .is_ok()
+            if bpf_probe_read_kernel_buf(task.add(real_parent_off), &mut real_parent_bytes).is_ok()
             {
                 let real_parent = usize::from_ne_bytes(real_parent_bytes) as *const u8;
                 if !real_parent.is_null() {
                     // Read tgid (u32) from real_parent task_struct.
                     let mut tgid_bytes = [0u8; 4];
-                    if bpf_probe_read_kernel_buf(real_parent.add(TASK_TGID_OFFSET), &mut tgid_bytes)
-                        .is_ok()
+                    if bpf_probe_read_kernel_buf(real_parent.add(tgid_off), &mut tgid_bytes).is_ok()
                     {
                         (*record_ptr).ppid = u32::from_ne_bytes(tgid_bytes);
                     }
@@ -85,7 +98,7 @@ fn try_process_exec() -> Result<(), i64> {
 
             // Read mm pointer from task_struct.
             let mut mm_bytes = [0u8; 8];
-            if bpf_probe_read_kernel_buf(task.add(TASK_MM_OFFSET), &mut mm_bytes).is_ok() {
+            if bpf_probe_read_kernel_buf(task.add(mm_off), &mut mm_bytes).is_ok() {
                 let mm = usize::from_ne_bytes(mm_bytes) as *const u8;
                 if !mm.is_null() {
                     // Read both arg_start + arg_end so we capture all
@@ -95,14 +108,11 @@ fn try_process_exec() -> Result<(), i64> {
                     // lives in argv[2] of an outer `bash -c '...'`.
                     let mut arg_start_bytes = [0u8; 8];
                     let mut arg_end_bytes = [0u8; 8];
-                    let s_ok = bpf_probe_read_kernel_buf(
-                        mm.add(MM_ARG_START_OFFSET),
-                        &mut arg_start_bytes,
-                    )
-                    .is_ok();
-                    let e_ok =
-                        bpf_probe_read_kernel_buf(mm.add(MM_ARG_END_OFFSET), &mut arg_end_bytes)
+                    let s_ok =
+                        bpf_probe_read_kernel_buf(mm.add(arg_start_off), &mut arg_start_bytes)
                             .is_ok();
+                    let e_ok =
+                        bpf_probe_read_kernel_buf(mm.add(arg_end_off), &mut arg_end_bytes).is_ok();
                     if s_ok && e_ok {
                         let arg_start = u64::from_ne_bytes(arg_start_bytes);
                         let arg_end = u64::from_ne_bytes(arg_end_bytes);

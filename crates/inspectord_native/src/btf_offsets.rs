@@ -9,11 +9,6 @@
 //!
 //! Reference: <https://www.kernel.org/doc/html/latest/bpf/btf.html>
 
-// The wiring that consumes these offsets lands in the follow-up PR; until
-// then the module is reachable only from tests, which the compiler flags
-// as dead.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::fs;
 use std::io;
