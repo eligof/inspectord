@@ -4,13 +4,14 @@
 
 use aya::{
     include_bytes_aligned,
-    maps::{ring_buf::RingBuf, MapData},
+    maps::{ring_buf::RingBuf, Array, MapData},
     programs::TracePoint,
     Ebpf,
 };
 use std::os::fd::AsRawFd;
 use std::time::Duration;
 
+use crate::btf_offsets::{BtfError, KernelOffsets};
 use crate::records::ProcessExecRecord;
 
 // `include_bytes!` only guarantees byte alignment, but aya's ELF parser
@@ -26,6 +27,26 @@ pub struct LoadedProgram {
 impl LoadedProgram {
     pub fn load_and_attach() -> Result<Self, LoadError> {
         let mut bpf = Ebpf::load(PROGRAM_BYTES).map_err(LoadError::Load)?;
+
+        // Resolve current-kernel struct offsets from BTF and pass them to
+        // the BPF program via the OFFSETS array map. Order matters: the
+        // program is loaded but not yet attached, so it can't fire with
+        // zero offsets before we populate.
+        let offsets = KernelOffsets::from_sys_fs().map_err(LoadError::BtfResolve)?;
+        let offsets_map = bpf.map_mut("OFFSETS").ok_or(LoadError::MissingOffsetsMap)?;
+        let mut offsets_arr: Array<_, u32> =
+            Array::try_from(offsets_map).map_err(|e| LoadError::MapKind(format!("{e:?}")))?;
+        for (idx, value) in [
+            (0u32, offsets.task_real_parent),
+            (1, offsets.task_tgid),
+            (2, offsets.task_mm),
+            (3, offsets.mm_arg_start),
+        ] {
+            offsets_arr
+                .set(idx, value, 0)
+                .map_err(|e| LoadError::MapWrite(format!("{e:?}")))?;
+        }
+
         let program: &mut TracePoint = bpf
             .program_mut("process_exec")
             .ok_or(LoadError::MissingProgram)?
@@ -80,6 +101,12 @@ pub enum LoadError {
     MissingProgram,
     #[error("BPF map 'EVENTS' not found in object")]
     MissingMap,
+    #[error("BPF map 'OFFSETS' not found in object")]
+    MissingOffsetsMap,
     #[error("map kind mismatch: {0}")]
     MapKind(String),
+    #[error("map write failed: {0}")]
+    MapWrite(String),
+    #[error("kernel BTF resolution failed: {0}")]
+    BtfResolve(#[from] BtfError),
 }
