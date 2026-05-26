@@ -14,8 +14,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// Byte offsets of the `task_struct` and `mm_struct` fields the BPF program
-/// reads to extract ppid, the argv buffer, and exit_code.
+/// Byte offsets of the kernel struct fields the BPF programs read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelOffsets {
     pub task_real_parent: u32,
@@ -23,6 +22,11 @@ pub struct KernelOffsets {
     pub task_mm: u32,
     pub mm_arg_start: u32,
     pub task_exit_code: u32,
+    pub sock_family: u32,
+    pub sock_dport: u32,
+    pub sock_num: u32,
+    pub sock_daddr: u32,
+    pub sock_rcv_saddr: u32,
 }
 
 impl KernelOffsets {
@@ -38,12 +42,19 @@ impl KernelOffsets {
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, BtfError> {
         let btf = Btf::parse(data)?;
+        // `struct sock` starts with `struct sock_common __sk_common`, so
+        // sock_common's field offsets are also `sock` offsets.
         Ok(Self {
             task_real_parent: btf.field_offset("task_struct", "real_parent")?,
             task_tgid: btf.field_offset("task_struct", "tgid")?,
             task_mm: btf.field_offset("task_struct", "mm")?,
             mm_arg_start: btf.field_offset("mm_struct", "arg_start")?,
             task_exit_code: btf.field_offset("task_struct", "exit_code")?,
+            sock_family: btf.field_offset("sock_common", "skc_family")?,
+            sock_dport: btf.field_offset("sock_common", "skc_dport")?,
+            sock_num: btf.field_offset("sock_common", "skc_num")?,
+            sock_daddr: btf.field_offset("sock_common", "skc_daddr")?,
+            sock_rcv_saddr: btf.field_offset("sock_common", "skc_rcv_saddr")?,
         })
     }
 }
@@ -459,15 +470,24 @@ mod tests {
         }
         let offsets = KernelOffsets::from_sys_fs().expect("read kernel BTF");
         eprintln!("kernel offsets: {offsets:?}");
+        // task_struct fields and sock_common port/family/saddr should all
+        // be > 0. skc_daddr happens to live at offset 0 in sock_common, so
+        // we exempt it from the >0 check.
         for v in [
             offsets.task_real_parent,
             offsets.task_tgid,
             offsets.task_mm,
             offsets.mm_arg_start,
             offsets.task_exit_code,
+            offsets.sock_family,
+            offsets.sock_dport,
+            offsets.sock_num,
+            offsets.sock_rcv_saddr,
         ] {
             assert!(v > 0, "offset is zero: {offsets:?}");
             assert!(v < 65_536, "offset suspiciously large: {offsets:?}");
         }
+        // skc_daddr is at the very start of sock_common.
+        assert_eq!(offsets.sock_daddr, 0, "{offsets:?}");
     }
 }

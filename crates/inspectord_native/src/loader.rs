@@ -14,7 +14,7 @@ use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use crate::btf_offsets::{BtfError, KernelOffsets};
-use crate::records::{ProcessExecRecord, ProcessExitRecord};
+use crate::records::{ConnectRecord, ProcessExecRecord, ProcessExitRecord};
 
 // `include_bytes!` only guarantees byte alignment, but aya's ELF parser
 // requires the program bytes to be aligned to the ELF header struct.
@@ -27,6 +27,11 @@ pub struct LoadedProgram {
 }
 
 pub struct LoadedExitProgram {
+    _bpf: Ebpf,
+    ring: RingBuf<MapData>,
+}
+
+pub struct LoadedConnectProgram {
     _bpf: Ebpf,
     ring: RingBuf<MapData>,
 }
@@ -51,6 +56,13 @@ fn load_and_populate_offsets() -> Result<(Ebpf, Btf), LoadError> {
         (2, offsets.task_mm),
         (3, offsets.mm_arg_start),
         (4, offsets.task_exit_code),
+        (5, offsets.sock_family),
+        (6, offsets.sock_dport),
+        (7, offsets.sock_num),
+        // sock_common.skc_daddr legitimately lives at offset 0; we still
+        // write it so the loader's BPF-side "populated" sentinel is family.
+        (8, offsets.sock_daddr),
+        (9, offsets.sock_rcv_saddr),
     ] {
         offsets_arr
             .set(idx, value, 0)
@@ -142,6 +154,34 @@ impl LoadedExitProgram {
     /// Blocks for up to `timeout` waiting for at least one record, then
     /// drains everything available. Returns empty Vec on timeout.
     pub fn poll(&mut self, timeout: Duration) -> Vec<ProcessExitRecord> {
+        if !poll_ring(&self.ring, timeout) {
+            return Vec::new();
+        }
+        self.drain()
+    }
+}
+
+impl LoadedConnectProgram {
+    pub fn load_and_attach() -> Result<Self, LoadError> {
+        let (mut bpf, btf) = load_and_populate_offsets()?;
+        attach_btf_tracepoint(&mut bpf, "outbound_connection", "inet_sock_set_state", &btf)?;
+        let ring = take_ring(&mut bpf, "CONNECT_EVENTS")?;
+        Ok(Self { _bpf: bpf, ring })
+    }
+
+    fn drain(&mut self) -> Vec<ConnectRecord> {
+        let mut out = Vec::new();
+        while let Some(item) = self.ring.next() {
+            if item.len() >= std::mem::size_of::<ConnectRecord>() {
+                out.push(ConnectRecord::from_bytes(&item));
+            }
+        }
+        out
+    }
+
+    /// Blocks for up to `timeout` waiting for at least one record, then
+    /// drains everything available. Returns empty Vec on timeout.
+    pub fn poll(&mut self, timeout: Duration) -> Vec<ConnectRecord> {
         if !poll_ring(&self.ring, timeout) {
             return Vec::new();
         }

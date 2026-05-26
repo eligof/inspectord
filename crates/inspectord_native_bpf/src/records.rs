@@ -61,3 +61,39 @@ impl ProcessExitRecord {
         }
     }
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ConnectRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub uid: u32,
+    pub comm: [u8; COMM_LEN],
+    pub family: u16,
+    pub sport: u16,
+    /// Destination port in network byte order (as the kernel stores
+    /// `sock_common.skc_dport`). Decoded on the userspace side.
+    pub dport_be: u16,
+    pub _padding: [u8; 2],
+    /// Source IPv4 in network byte order (kernel `skc_rcv_saddr`).
+    pub saddr_be: u32,
+    /// Destination IPv4 in network byte order (kernel `skc_daddr`).
+    pub daddr_be: u32,
+}
+
+impl ConnectRecord {
+    pub const fn zeroed() -> Self {
+        Self {
+            timestamp_ns: 0,
+            pid: 0,
+            uid: 0,
+            comm: [0; COMM_LEN],
+            family: 0,
+            sport: 0,
+            dport_be: 0,
+            _padding: [0; 2],
+            saddr_be: 0,
+            daddr_be: 0,
+        }
+    }
+}
