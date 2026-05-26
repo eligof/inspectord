@@ -98,6 +98,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.process_collector_exit",
                     "config": {},
                 },
+                {
+                    "name": "outbound_connection_tracker",
+                    "module": "inspectord.workers.outbound_connection_tracker",
+                    "config": {},
+                },
             ],
         }
     )
