@@ -17,11 +17,12 @@ import json
 import socket
 import sys
 import time
-import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
+
+from inspectord.parsers.base import build_event
 
 
 class _StreamProtocol(Protocol):
@@ -80,28 +81,27 @@ class ProcessCollectorWorker:
 
     def _record_to_event(self, record: dict[str, Any]) -> dict[str, Any]:
         ts_ns = int(record["timestamp_ns"]) + self._wall_offset_ns
-        observed_at = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC).isoformat()
-
-        return {
-            "event_id": str(uuid.uuid4()),
-            "observed_at": observed_at,
-            "module": "process_collector",
-            "action": "process_start",
-            "severity": "info",
-            "host": {"name": self._host_name},
-            "actor": {
-                "user": {
-                    "id": str(record["uid"]),
-                },
-            },
-            "process": {
-                "pid": int(record["pid"]),
-                "name": str(record["comm"]),
-                "command_line": str(record["cmdline"]),
-                "parent": {"pid": int(record["ppid"])} if record["ppid"] else {},
-            },
-            "raw": {"source": "ebpf:sched_process_exec"},
+        ts = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC)
+        process: dict[str, Any] = {
+            "pid": int(record["pid"]),
+            "name": str(record["comm"]),
+            "command_line": str(record["cmdline"]),
         }
+        if record["ppid"]:
+            process["parent"] = {"pid": int(record["ppid"])}
+        event = build_event(
+            module="process_collector",
+            action="process_start",
+            category=["process"],
+            type_=["start"],
+            severity="info",
+            ts=ts,
+            host={"name": self._host_name},
+            user={"id": str(record["uid"])},
+            process=process,
+            raw={"source": "ebpf:sched_process_exec"},
+        )
+        return event.model_dump(mode="json", exclude_none=True)
 
 
 def _open_sink(arg: str) -> IO[bytes]:
