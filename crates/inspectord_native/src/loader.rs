@@ -3,6 +3,7 @@
 //! ring buffer.
 
 use aya::{
+    include_bytes_aligned,
     maps::{ring_buf::RingBuf, MapData},
     programs::TracePoint,
     Ebpf,
@@ -12,7 +13,10 @@ use std::time::Duration;
 
 use crate::records::ProcessExecRecord;
 
-const PROGRAM_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/inspectord-bpf"));
+// `include_bytes!` only guarantees byte alignment, but aya's ELF parser
+// requires the program bytes to be aligned to the ELF header struct.
+// `aya::include_bytes_aligned!` wraps the bytes in a 32-byte-aligned struct.
+const PROGRAM_BYTES: &[u8] = include_bytes_aligned!(concat!(env!("OUT_DIR"), "/inspectord-bpf"));
 
 pub struct LoadedProgram {
     _bpf: Ebpf,
