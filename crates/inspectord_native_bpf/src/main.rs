@@ -23,15 +23,15 @@ use records::{ProcessExecRecord, CMDLINE_LEN, COMM_LEN};
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
-// Hard-coded task_struct offsets for Linux 6.x x86_64 (CachyOS).
+// Hard-coded task_struct offsets for CachyOS kernel 7.0.10-1-cachyos-bore (x86_64).
 // A follow-up Phase 2 slice will replace these with CO-RE BTF relocations.
 // To re-derive on a different kernel:
-//   bpftool btf dump file /sys/kernel/btf/vmlinux format c \
-//     | grep -A300 'struct task_struct '
-const TASK_REAL_PARENT_OFFSET: usize = 2272;
-const TASK_TGID_OFFSET: usize = 1352;
-const TASK_MM_OFFSET: usize = 2384;
-const MM_ARG_START_OFFSET: usize = 312;
+//   pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E 'real_parent|tgid|mm;'
+//   pahole -C mm_struct  /sys/kernel/btf/vmlinux | grep arg_start
+const TASK_REAL_PARENT_OFFSET: usize = 2880;
+const TASK_TGID_OFFSET: usize = 2868;
+const TASK_MM_OFFSET: usize = 2744;
+const MM_ARG_START_OFFSET: usize = 696;
 // arg_end is the next field after arg_start in mm_struct, regardless of
 // CONFIG-driven layout shifts, so we can derive it without re-deriving on
 // every kernel.
