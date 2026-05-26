@@ -93,6 +93,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.process_collector",
                     "config": {},
                 },
+                {
+                    "name": "process_collector_exit",
+                    "module": "inspectord.workers.process_collector_exit",
+                    "config": {},
+                },
             ],
         }
     )
