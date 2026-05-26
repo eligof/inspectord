@@ -111,14 +111,10 @@ fn try_process_exec() -> Result<(), i64> {
                             // Reading further would cross arg_end into envp or
                             // potentially unmapped pages, causing the helper
                             // to -EFAULT and write nothing.
-                            let argv_len =
-                                (arg_end - arg_start).min(CMDLINE_LEN as u64) as u32;
+                            let argv_len = (arg_end - arg_start).min(CMDLINE_LEN as u64) as u32;
                             let dst = (*record_ptr).cmdline.as_mut_ptr();
-                            let ret = raw_probe_read_user(
-                                dst as *mut _,
-                                argv_len,
-                                arg_start as *const _,
-                            );
+                            let ret =
+                                raw_probe_read_user(dst as *mut _, argv_len, arg_start as *const _);
                             if ret >= 0 {
                                 (*record_ptr).cmdline_len = argv_len as u16;
                             }
