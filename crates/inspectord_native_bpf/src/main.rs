@@ -17,10 +17,13 @@ use aya_ebpf::{
     programs::BtfTracePointContext,
 };
 
-use records::{ProcessExecRecord, CMDLINE_LEN, COMM_LEN};
+use records::{ProcessExecRecord, ProcessExitRecord, CMDLINE_LEN, COMM_LEN};
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
+
+#[map]
+static EXIT_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
 // Per-kernel struct field offsets, populated by the userspace loader at
 // startup from /sys/kernel/btf/vmlinux. Avoids the previous habit of
@@ -30,14 +33,16 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 //   0 = task_struct.real_parent
 //   1 = task_struct.tgid
 //   2 = task_struct.mm
-//   3 = mm_struct.arg_start  (arg_end is +8 by ABI; not stored)
+//   3 = mm_struct.arg_start   (arg_end is +8 by ABI; not stored)
+//   4 = task_struct.exit_code
 #[map]
-static OFFSETS: Array<u32> = Array::with_max_entries(4, 0);
+static OFFSETS: Array<u32> = Array::with_max_entries(5, 0);
 
 const OFF_TASK_REAL_PARENT: u32 = 0;
 const OFF_TASK_TGID: u32 = 1;
 const OFF_TASK_MM: u32 = 2;
 const OFF_MM_ARG_START: u32 = 3;
+const OFF_TASK_EXIT_CODE: u32 = 4;
 
 #[btf_tracepoint]
 pub fn process_exec(ctx: BtfTracePointContext) -> i32 {
@@ -140,6 +145,50 @@ fn try_process_exec(ctx: BtfTracePointContext) -> Result<(), i64> {
     }
 
     entry.submit(2u64); // BPF_RB_FORCE_WAKEUP
+    Ok(())
+}
+
+#[btf_tracepoint]
+pub fn process_exit(ctx: BtfTracePointContext) -> i32 {
+    let _ = try_process_exit(ctx);
+    0
+}
+
+fn try_process_exit(ctx: BtfTracePointContext) -> Result<(), i64> {
+    let exit_code_off = *OFFSETS.get(OFF_TASK_EXIT_CODE).ok_or(-1_i64)? as usize;
+    if exit_code_off == 0 {
+        return Err(-1);
+    }
+
+    let mut entry = EXIT_EVENTS.reserve::<ProcessExitRecord>(0).ok_or(-1_i64)?;
+    let record_ptr = entry.as_mut_ptr();
+
+    unsafe {
+        record_ptr.write(ProcessExitRecord::zeroed());
+        (*record_ptr).timestamp_ns = bpf_ktime_get_ns();
+        let pid_tgid = bpf_get_current_pid_tgid();
+        (*record_ptr).pid = (pid_tgid >> 32) as u32;
+
+        if let Ok(comm) = bpf_get_current_comm() {
+            let dst = &mut (*record_ptr).comm;
+            let n = core::cmp::min(comm.len(), COMM_LEN);
+            for i in 0..n {
+                dst[i] = comm[i];
+            }
+        }
+
+        // sched_process_exit's first BTF argument is the exiting task_struct
+        // pointer (kernel signature: `void(struct task_struct *p)`).
+        let task: *const u8 = ctx.arg(0);
+        if !task.is_null() {
+            let mut exit_code_bytes = [0u8; 4];
+            if bpf_probe_read_kernel_buf(task.add(exit_code_off), &mut exit_code_bytes).is_ok() {
+                (*record_ptr).exit_code = i32::from_ne_bytes(exit_code_bytes);
+            }
+        }
+    }
+
+    entry.submit(2u64);
     Ok(())
 }
 

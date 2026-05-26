@@ -61,3 +61,62 @@ impl ProcessExecRecord {
         String::from_utf8_lossy(&bytes).trim().to_string()
     }
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessExitRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    /// task->exit_code: low byte is the signal that killed (0 if normal),
+    /// the second byte is the wait-style exit status (`status >> 8`).
+    pub exit_code: i32,
+    pub comm: [u8; COMM_LEN],
+    pub _padding: [u8; 4],
+}
+
+impl ProcessExitRecord {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        assert!(bytes.len() >= std::mem::size_of::<Self>());
+        let mut out = Self {
+            timestamp_ns: 0,
+            pid: 0,
+            exit_code: 0,
+            comm: [0; COMM_LEN],
+            _padding: [0; 4],
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                &mut out as *mut Self as *mut u8,
+                std::mem::size_of::<Self>(),
+            );
+        }
+        out
+    }
+
+    pub fn comm_str(&self) -> String {
+        let n = self.comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        String::from_utf8_lossy(&self.comm[..n]).into_owned()
+    }
+
+    /// Exit status from a normal exit (None if the task was killed by a
+    /// signal).
+    pub fn exit_status(&self) -> Option<i32> {
+        let signal = self.exit_code & 0x7f;
+        if signal == 0 {
+            Some((self.exit_code >> 8) & 0xff)
+        } else {
+            None
+        }
+    }
+
+    /// Signal number that killed the task, if any.
+    pub fn killed_by_signal(&self) -> Option<i32> {
+        let signal = self.exit_code & 0x7f;
+        if signal != 0 {
+            Some(signal)
+        } else {
+            None
+        }
+    }
+}

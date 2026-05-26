@@ -1,6 +1,6 @@
-//! On-the-wire process_exec record schema shared between the BPF program
-//! and the userspace loader. C-compatible layout so we can transmute the
-//! ring-buffer byte slice on the userspace side (PR 8).
+//! On-the-wire record schemas shared between the BPF programs and the
+//! userspace loader. C-compatible layout so we can transmute ring-buffer
+//! byte slices on the userspace side.
 
 #![allow(dead_code)]
 
@@ -33,6 +33,31 @@ impl ProcessExecRecord {
             cmdline_len: 0,
             _padding: [0; 2],
             cmdline: [0; CMDLINE_LEN],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessExitRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    /// Kernel's task->exit_code. Encodes either an exit status (low byte
+    /// 0, high byte = status >> 8) or a fatal signal (low byte = signum,
+    /// high byte = core flag). Decoded on the userspace side.
+    pub exit_code: i32,
+    pub comm: [u8; COMM_LEN],
+    pub _padding: [u8; 4],
+}
+
+impl ProcessExitRecord {
+    pub const fn zeroed() -> Self {
+        Self {
+            timestamp_ns: 0,
+            pid: 0,
+            exit_code: 0,
+            comm: [0; COMM_LEN],
+            _padding: [0; 4],
         }
     }
 }
