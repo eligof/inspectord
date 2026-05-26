@@ -15,17 +15,18 @@ use std::io;
 use std::path::Path;
 
 /// Byte offsets of the `task_struct` and `mm_struct` fields the BPF program
-/// reads to extract ppid and the argv buffer.
+/// reads to extract ppid, the argv buffer, and exit_code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelOffsets {
     pub task_real_parent: u32,
     pub task_tgid: u32,
     pub task_mm: u32,
     pub mm_arg_start: u32,
+    pub task_exit_code: u32,
 }
 
 impl KernelOffsets {
-    /// Resolve all four offsets from `/sys/kernel/btf/vmlinux`.
+    /// Resolve every offset from `/sys/kernel/btf/vmlinux`.
     pub fn from_sys_fs() -> Result<Self, BtfError> {
         Self::from_path("/sys/kernel/btf/vmlinux")
     }
@@ -42,6 +43,7 @@ impl KernelOffsets {
             task_tgid: btf.field_offset("task_struct", "tgid")?,
             task_mm: btf.field_offset("task_struct", "mm")?,
             mm_arg_start: btf.field_offset("mm_struct", "arg_start")?,
+            task_exit_code: btf.field_offset("task_struct", "exit_code")?,
         })
     }
 }
@@ -462,6 +464,7 @@ mod tests {
             offsets.task_tgid,
             offsets.task_mm,
             offsets.mm_arg_start,
+            offsets.task_exit_code,
         ] {
             assert!(v > 0, "offset is zero: {offsets:?}");
             assert!(v < 65_536, "offset suspiciously large: {offsets:?}");

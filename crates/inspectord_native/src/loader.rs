@@ -1,6 +1,8 @@
 //! Loads the embedded BPF object into the kernel, attaches the
-//! `process_exec` tracepoint program, and reads records from the
-//! ring buffer.
+//! process_exec / process_exit tracepoint programs, and reads records from
+//! their ring buffers. Each `LoadedProgram` / `LoadedExitProgram` is meant
+//! to live in its own worker process — it owns its `Ebpf` instance and
+//! populates its own copy of the OFFSETS map at load time.
 
 use aya::{
     include_bytes_aligned,
@@ -12,7 +14,7 @@ use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use crate::btf_offsets::{BtfError, KernelOffsets};
-use crate::records::ProcessExecRecord;
+use crate::records::{ProcessExecRecord, ProcessExitRecord};
 
 // `include_bytes!` only guarantees byte alignment, but aya's ELF parser
 // requires the program bytes to be aligned to the ELF header struct.
@@ -24,43 +26,78 @@ pub struct LoadedProgram {
     ring: RingBuf<MapData>,
 }
 
+pub struct LoadedExitProgram {
+    _bpf: Ebpf,
+    ring: RingBuf<MapData>,
+}
+
+/// Load the embedded BPF object and populate the OFFSETS array map from
+/// `/sys/kernel/btf/vmlinux`. The returned `Ebpf` is loaded but has no
+/// attached programs yet — the caller picks which tracepoint(s) to attach
+/// and which ring-buffer map to take.
+fn load_and_populate_offsets() -> Result<(Ebpf, Btf), LoadError> {
+    let mut bpf = Ebpf::load(PROGRAM_BYTES).map_err(LoadError::Load)?;
+
+    // Resolve current-kernel struct offsets from BTF and pass them to the
+    // BPF program. Order matters: programs are loaded but not yet attached,
+    // so they can't fire with zero offsets before we populate.
+    let offsets = KernelOffsets::from_sys_fs().map_err(LoadError::BtfResolve)?;
+    let offsets_map = bpf.map_mut("OFFSETS").ok_or(LoadError::MissingOffsetsMap)?;
+    let mut offsets_arr: Array<_, u32> =
+        Array::try_from(offsets_map).map_err(|e| LoadError::MapKind(format!("{e:?}")))?;
+    for (idx, value) in [
+        (0u32, offsets.task_real_parent),
+        (1, offsets.task_tgid),
+        (2, offsets.task_mm),
+        (3, offsets.mm_arg_start),
+        (4, offsets.task_exit_code),
+    ] {
+        offsets_arr
+            .set(idx, value, 0)
+            .map_err(|e| LoadError::MapWrite(format!("{e:?}")))?;
+    }
+
+    let btf = Btf::from_sys_fs().map_err(LoadError::AyaBtf)?;
+    Ok((bpf, btf))
+}
+
+fn attach_btf_tracepoint(
+    bpf: &mut Ebpf,
+    program_name: &str,
+    tracepoint: &str,
+    btf: &Btf,
+) -> Result<(), LoadError> {
+    let program: &mut BtfTracePoint = bpf
+        .program_mut(program_name)
+        .ok_or(LoadError::MissingProgram)?
+        .try_into()
+        .map_err(LoadError::Program)?;
+    program.load(tracepoint, btf).map_err(LoadError::Program)?;
+    program.attach().map_err(LoadError::Program)?;
+    Ok(())
+}
+
+fn take_ring(bpf: &mut Ebpf, name: &str) -> Result<RingBuf<MapData>, LoadError> {
+    let map = bpf.take_map(name).ok_or(LoadError::MissingMap)?;
+    RingBuf::try_from(map).map_err(|e| LoadError::MapKind(format!("{e:?}")))
+}
+
+fn poll_ring(ring: &RingBuf<MapData>, timeout: Duration) -> bool {
+    use libc::{poll, pollfd, POLLIN};
+    let mut fds = [pollfd {
+        fd: ring.as_raw_fd(),
+        events: POLLIN,
+        revents: 0,
+    }];
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    unsafe { poll(fds.as_mut_ptr(), 1, timeout_ms) > 0 }
+}
+
 impl LoadedProgram {
     pub fn load_and_attach() -> Result<Self, LoadError> {
-        let mut bpf = Ebpf::load(PROGRAM_BYTES).map_err(LoadError::Load)?;
-
-        // Resolve current-kernel struct offsets from BTF and pass them to
-        // the BPF program via the OFFSETS array map. Order matters: the
-        // program is loaded but not yet attached, so it can't fire with
-        // zero offsets before we populate.
-        let offsets = KernelOffsets::from_sys_fs().map_err(LoadError::BtfResolve)?;
-        let offsets_map = bpf.map_mut("OFFSETS").ok_or(LoadError::MissingOffsetsMap)?;
-        let mut offsets_arr: Array<_, u32> =
-            Array::try_from(offsets_map).map_err(|e| LoadError::MapKind(format!("{e:?}")))?;
-        for (idx, value) in [
-            (0u32, offsets.task_real_parent),
-            (1, offsets.task_tgid),
-            (2, offsets.task_mm),
-            (3, offsets.mm_arg_start),
-        ] {
-            offsets_arr
-                .set(idx, value, 0)
-                .map_err(|e| LoadError::MapWrite(format!("{e:?}")))?;
-        }
-
-        let btf = Btf::from_sys_fs().map_err(LoadError::AyaBtf)?;
-        let program: &mut BtfTracePoint = bpf
-            .program_mut("process_exec")
-            .ok_or(LoadError::MissingProgram)?
-            .try_into()
-            .map_err(LoadError::Program)?;
-        program
-            .load("sched_process_exec", &btf)
-            .map_err(LoadError::Program)?;
-        program.attach().map_err(LoadError::Program)?;
-
-        let map = bpf.take_map("EVENTS").ok_or(LoadError::MissingMap)?;
-        let ring = RingBuf::try_from(map).map_err(|e| LoadError::MapKind(format!("{e:?}")))?;
-
+        let (mut bpf, btf) = load_and_populate_offsets()?;
+        attach_btf_tracepoint(&mut bpf, "process_exec", "sched_process_exec", &btf)?;
+        let ring = take_ring(&mut bpf, "EVENTS")?;
         Ok(Self { _bpf: bpf, ring })
     }
 
@@ -77,15 +114,35 @@ impl LoadedProgram {
     /// Blocks for up to `timeout` waiting for at least one record, then
     /// drains everything available. Returns empty Vec on timeout.
     pub fn poll(&mut self, timeout: Duration) -> Vec<ProcessExecRecord> {
-        use libc::{poll, pollfd, POLLIN};
-        let mut fds = [pollfd {
-            fd: self.ring.as_raw_fd(),
-            events: POLLIN,
-            revents: 0,
-        }];
-        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-        let rc = unsafe { poll(fds.as_mut_ptr(), 1, timeout_ms) };
-        if rc <= 0 {
+        if !poll_ring(&self.ring, timeout) {
+            return Vec::new();
+        }
+        self.drain()
+    }
+}
+
+impl LoadedExitProgram {
+    pub fn load_and_attach() -> Result<Self, LoadError> {
+        let (mut bpf, btf) = load_and_populate_offsets()?;
+        attach_btf_tracepoint(&mut bpf, "process_exit", "sched_process_exit", &btf)?;
+        let ring = take_ring(&mut bpf, "EXIT_EVENTS")?;
+        Ok(Self { _bpf: bpf, ring })
+    }
+
+    fn drain(&mut self) -> Vec<ProcessExitRecord> {
+        let mut out = Vec::new();
+        while let Some(item) = self.ring.next() {
+            if item.len() >= std::mem::size_of::<ProcessExitRecord>() {
+                out.push(ProcessExitRecord::from_bytes(&item));
+            }
+        }
+        out
+    }
+
+    /// Blocks for up to `timeout` waiting for at least one record, then
+    /// drains everything available. Returns empty Vec on timeout.
+    pub fn poll(&mut self, timeout: Duration) -> Vec<ProcessExitRecord> {
+        if !poll_ring(&self.ring, timeout) {
             return Vec::new();
         }
         self.drain()
