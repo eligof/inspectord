@@ -1,5 +1,6 @@
 //! Rust extension module for inspectord.
 
+mod btf_offsets;
 mod loader;
 mod records;
 
