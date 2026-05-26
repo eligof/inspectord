@@ -9,13 +9,12 @@ mod records;
 
 use aya_ebpf::{
     helpers::{
-        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task,
-        bpf_get_current_uid_gid, bpf_ktime_get_ns, bpf_probe_read_kernel_buf,
-        gen::bpf_probe_read_user as raw_probe_read_user,
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
+        bpf_probe_read_kernel_buf, gen::bpf_probe_read_user as raw_probe_read_user,
     },
-    macros::{map, tracepoint},
+    macros::{btf_tracepoint, map},
     maps::{Array, RingBuf},
-    programs::TracePointContext,
+    programs::BtfTracePointContext,
 };
 
 use records::{ProcessExecRecord, CMDLINE_LEN, COMM_LEN};
@@ -40,13 +39,13 @@ const OFF_TASK_TGID: u32 = 1;
 const OFF_TASK_MM: u32 = 2;
 const OFF_MM_ARG_START: u32 = 3;
 
-#[tracepoint]
-pub fn process_exec(_ctx: TracePointContext) -> u32 {
-    let _ = try_process_exec();
+#[btf_tracepoint]
+pub fn process_exec(ctx: BtfTracePointContext) -> i32 {
+    let _ = try_process_exec(ctx);
     0
 }
 
-fn try_process_exec() -> Result<(), i64> {
+fn try_process_exec(ctx: BtfTracePointContext) -> Result<(), i64> {
     // Bail before reserving a ring-buffer slot if the loader never populated
     // the offsets map — emitting events with garbage ppid/cmdline is worse
     // than dropping them.
@@ -79,7 +78,12 @@ fn try_process_exec() -> Result<(), i64> {
             }
         }
 
-        let task = bpf_get_current_task() as *const u8;
+        // sched_process_exec's first BTF argument is the new task_struct
+        // pointer (kernel signature:
+        // `void(struct task_struct *p, pid_t old_pid, struct linux_binprm *bprm)`).
+        // Using it directly avoids an extra bpf_get_current_task helper call
+        // and is more explicit about which task we mean.
+        let task: *const u8 = ctx.arg(0);
         if !task.is_null() {
             // Read real_parent pointer from task_struct.
             let mut real_parent_bytes = [0u8; 8];

@@ -5,8 +5,8 @@
 use aya::{
     include_bytes_aligned,
     maps::{ring_buf::RingBuf, Array, MapData},
-    programs::TracePoint,
-    Ebpf,
+    programs::BtfTracePoint,
+    Btf, Ebpf,
 };
 use std::os::fd::AsRawFd;
 use std::time::Duration;
@@ -47,15 +47,16 @@ impl LoadedProgram {
                 .map_err(|e| LoadError::MapWrite(format!("{e:?}")))?;
         }
 
-        let program: &mut TracePoint = bpf
+        let btf = Btf::from_sys_fs().map_err(LoadError::AyaBtf)?;
+        let program: &mut BtfTracePoint = bpf
             .program_mut("process_exec")
             .ok_or(LoadError::MissingProgram)?
             .try_into()
             .map_err(LoadError::Program)?;
-        program.load().map_err(LoadError::Program)?;
         program
-            .attach("sched", "sched_process_exec")
+            .load("sched_process_exec", &btf)
             .map_err(LoadError::Program)?;
+        program.attach().map_err(LoadError::Program)?;
 
         let map = bpf.take_map("EVENTS").ok_or(LoadError::MissingMap)?;
         let ring = RingBuf::try_from(map).map_err(|e| LoadError::MapKind(format!("{e:?}")))?;
@@ -109,4 +110,6 @@ pub enum LoadError {
     MapWrite(String),
     #[error("kernel BTF resolution failed: {0}")]
     BtfResolve(#[from] BtfError),
+    #[error("aya BTF error: {0}")]
+    AyaBtf(#[from] aya::BtfError),
 }
