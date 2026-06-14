@@ -30,6 +30,11 @@ RestrictNamespaces=true
 MemoryDenyWriteExecute=true
 ReadWritePaths=/var/lib/inspectord /var/log/inspectord /run/inspectord
 
+# Runtime dir for the IPC socket; daemon further sets it root:inspectord 0750
+# when ipc.socket_group is configured.
+RuntimeDirectory=inspectord
+RuntimeDirectoryMode=0750
+
 # Phase 0 budget — tightened in §22.
 MemoryMax=500M
 CPUQuota=50%

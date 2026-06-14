@@ -6,6 +6,7 @@ expand in later phases (profiles, retention, notifier sinks, etc.).
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -43,8 +44,13 @@ class DaemonConfig(BaseModel):
 
 
 def load(path: Path) -> DaemonConfig:
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
+    path = Path(path)
+    if path.suffix == ".json":
+        with open(path) as f:
+            data = json.load(f)
+    else:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
     return DaemonConfig.model_validate(data)
 
 

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# inspectord setup helper — run once after installation to enable group-based
+# IPC socket access for a non-root user.
+# Templated: @PYTHON@ and @CONFIG_EXAMPLE@ substituted at install time.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 1. Require root
+# ---------------------------------------------------------------------------
+if [[ $EUID -ne 0 ]]; then
+    echo "error: this script must be run as root (e.g. via sudo)" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Determine the target non-root user
+# ---------------------------------------------------------------------------
+user="${SUDO_USER:-${1:-}}"
+if [[ -z "$user" ]]; then
+    echo "error: cannot determine target user." >&2
+    echo "       Run via 'sudo $0' or pass the username as the first argument." >&2
+    exit 1
+fi
+if [[ "$user" == "root" ]]; then
+    echo "error: target user must not be root" >&2
+    exit 1
+fi
+uid=$(id -u "$user" 2>/dev/null) || {
+    echo "error: user '$user' does not exist" >&2
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# 3. Ensure the 'inspectord' system group exists (idempotent)
+# ---------------------------------------------------------------------------
+if getent group inspectord > /dev/null 2>&1; then
+    echo "info: group 'inspectord' already exists, skipping creation"
+elif command -v systemd-sysusers > /dev/null 2>&1; then
+    echo "info: creating group 'inspectord' via systemd-sysusers"
+    systemd-sysusers /usr/lib/sysusers.d/inspectord.conf
+else
+    echo "info: creating group 'inspectord' via groupadd"
+    groupadd -r inspectord
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Add the target user to the 'inspectord' group (idempotent)
+# ---------------------------------------------------------------------------
+if id -nG "$user" | tr ' ' '\n' | grep -qx inspectord; then
+    echo "info: '$user' is already a member of 'inspectord', skipping"
+else
+    echo "info: adding '$user' to group 'inspectord'"
+    usermod -aG inspectord "$user"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Generate config if absent
+# ---------------------------------------------------------------------------
+config_path="${INSPECTORD_CONFIG:-/etc/inspectord/config.json}"
+if [[ -e "$config_path" ]]; then
+    echo "info: config already exists at '$config_path', skipping generation"
+else
+    echo "info: generating config at '$config_path'"
+    mkdir -p "$(dirname "$config_path")"
+    cp @CONFIG_EXAMPLE@ "$config_path"
+    # Patch ipc.allowed_uids to include the target user's UID
+    @PYTHON@ -c "
+import json, sys
+path = sys.argv[1]
+uid = int(sys.argv[2])
+with open(path) as f:
+    cfg = json.load(f)
+cfg['ipc']['allowed_uids'] = [uid]
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+" "$config_path" "$uid"
+    echo "info: set ipc.allowed_uids = [$uid] for user '$user'"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Final notice
+# ---------------------------------------------------------------------------
+echo ""
+echo "Setup complete."
+echo ""
+echo "IMPORTANT: '$user' must log out and back in (or run 'newgrp inspectord')"
+echo "           for the new group membership to take effect in running sessions."

@@ -1,0 +1,67 @@
+{
+  "version": "1.0.0",
+  "storage": {
+    "db_path": "/var/lib/inspectord/inspectord.duckdb",
+    "journal_dir": "/var/lib/inspectord/journal"
+  },
+  "ipc": {
+    "socket_path": "/run/inspectord/inspectord.sock",
+    "socket_group": "inspectord",
+    "allowed_uids": []
+  },
+  "workers": [
+    {
+      "name": "healthcheck",
+      "module": "inspectord.workers.healthcheck",
+      "config": {"interval_s": 1.0}
+    },
+    {
+      "name": "dependency_manager",
+      "module": "inspectord.workers.dependency_manager",
+      "config": {"interval_s": 30.0}
+    },
+    {
+      "name": "log_tailer",
+      "module": "inspectord.workers.log_tailer",
+      "config": {
+        "pacman_log_path": "/var/log/pacman.log",
+        "auth_log_path": "/var/log/auth.log"
+      }
+    },
+    {
+      "name": "fim_watcher",
+      "module": "inspectord.workers.fim_watcher",
+      "config": {}
+    },
+    {
+      "name": "process_collector",
+      "module": "inspectord.workers.process_collector",
+      "config": {}
+    },
+    {
+      "name": "process_collector_exit",
+      "module": "inspectord.workers.process_collector_exit",
+      "config": {}
+    },
+    {
+      "name": "outbound_connection_tracker",
+      "module": "inspectord.workers.outbound_connection_tracker",
+      "config": {}
+    },
+    {
+      "name": "outbound_connection_tracker6",
+      "module": "inspectord.workers.outbound_connection_tracker6",
+      "config": {}
+    },
+    {
+      "name": "kmod_watcher",
+      "module": "inspectord.workers.kmod_watcher",
+      "config": {}
+    },
+    {
+      "name": "listening_socket_snapshotter",
+      "module": "inspectord.workers.listening_socket_snapshotter",
+      "config": {}
+    }
+  ]
+}
