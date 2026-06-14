@@ -5,6 +5,7 @@ All tests inject a ``reader`` callable so they never touch the real filesystem.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from inspectord.workers.kmod_watcher.source import (
@@ -70,7 +71,7 @@ def test_diff_modules_identical_returns_empty() -> None:
     assert diff_modules(snap, snap) == []
 
 
-def test_diff_modules_sort_order_stable() -> None:
+def test_diff_modules_action_name_sort_order() -> None:
     prev = {"b_mod": {"size": 1, "refcount": 0}}
     curr = {"a_mod": {"size": 2, "refcount": 1}}
     result = diff_modules(prev, curr)
@@ -86,7 +87,7 @@ def test_diff_modules_sort_order_stable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_reader(*snapshots: str):
+def _make_reader(*snapshots: str) -> Callable[[], str]:
     """Return a callable that yields each snapshot in turn."""
     seq = list(snapshots)
     idx = 0
@@ -143,3 +144,32 @@ def test_source_close_sets_flag_and_is_idempotent() -> None:
     assert src._closed is True
     src.close()  # must not raise
     assert src._closed is True
+
+
+def test_source_poll_raises_after_close() -> None:
+    """poll() must raise RuntimeError after close() has been called."""
+    reader = _make_reader(_SNAP_A, _SNAP_A)
+    src = ProcModulesSource(reader=reader)
+    src.close()
+    try:
+        src.poll(timeout_ms=0)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "closed" in str(exc)
+
+
+def test_source_two_consecutive_polls() -> None:
+    """Each poll advances the internal snapshot so diffs are relative to the previous call."""
+    # baseline=A, poll1 reads B (overlay loaded), poll2 reads C (nf_tables unloaded)
+    reader = _make_reader(_SNAP_A, _SNAP_B, _SNAP_C)
+    src = ProcModulesSource(reader=reader)
+
+    result1 = src.poll(timeout_ms=0)
+    assert len(result1) == 1
+    assert result1[0]["action"] == "loaded"
+    assert result1[0]["name"] == "overlay"
+
+    result2 = src.poll(timeout_ms=0)
+    assert len(result2) == 1
+    assert result2[0]["action"] == "unloaded"
+    assert result2[0]["name"] == "nf_tables"

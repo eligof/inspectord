@@ -9,7 +9,7 @@ from typing import Any
 
 def _read_proc_modules() -> str:
     """Read and return the raw text of /proc/modules."""
-    with open("/proc/modules") as fh:
+    with open("/proc/modules", encoding="ascii") as fh:
         return fh.read()
 
 
@@ -94,6 +94,8 @@ class ProcModulesSource:
 
     def poll(self, timeout_ms: int) -> list[dict[str, Any]]:
         """Sleep for *timeout_ms* ms, read /proc/modules, and return diff records."""
+        if self._closed:
+            raise RuntimeError("source is closed")
         time.sleep(timeout_ms / 1000)
         curr = parse_proc_modules(self._reader())
         records = diff_modules(self._snapshot, curr)
