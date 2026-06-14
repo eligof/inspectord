@@ -28,9 +28,12 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: python
-          # security-and-quality adds maintainability/quality queries on top
-          # of the default security set.
-          queries: security-and-quality
+          # security-extended is security-focused (broader than the default
+          # security suite). We deliberately avoid security-and-quality: its
+          # maintainability/quality queries flag idiomatic code (e.g. `...`
+          # Protocol stubs, intentional best-effort `except ...: pass`),
+          # burying real security findings in note-level noise.
+          queries: security-extended
 
       # Python is interpreted — no build step needed before analysis.
       - name: Perform CodeQL analysis
