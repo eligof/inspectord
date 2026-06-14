@@ -103,6 +103,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.outbound_connection_tracker",
                     "config": {},
                 },
+                {
+                    "name": "outbound_connection_tracker6",
+                    "module": "inspectord.workers.outbound_connection_tracker6",
+                    "config": {},
+                },
             ],
         }
     )
