@@ -1,0 +1,35 @@
+name: Cargo Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 04:27 UTC.
+    - cron: "27 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: RustSec advisory check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Audits Cargo.lock against the RustSec advisory DB. Exits non-zero on
+      # vulnerabilities; unmaintained/yanked crates are reported as warnings
+      # only (not failing) so the gate stays signal, not noise.
+      - name: Run cargo audit
+        run: cargo audit
