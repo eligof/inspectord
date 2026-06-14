@@ -58,9 +58,10 @@ def _decode_ipv6(hexip: str) -> str:
 def _decode_local_addr(hexaddr: str) -> tuple[str, int]:
     """Split ``"HEXIP:HEXPORT"`` and decode the IP and port.
 
-    The IP length determines the address family:
-    - 8 hex chars → IPv4 (``_decode_ipv4``)
-    - 32 hex chars → IPv6 (``_decode_ipv6``)
+    The IP hex length determines the address family:
+    - 8 hex chars → IPv4, decoded via ``_decode_ipv4``.
+    - Anything else → passed to ``_decode_ipv6``; raises ``ValueError`` on
+      invalid hex input.
 
     Returns:
         ``(ip_string, port_int)``

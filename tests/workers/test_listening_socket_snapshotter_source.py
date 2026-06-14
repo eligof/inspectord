@@ -10,6 +10,7 @@ from collections.abc import Callable
 import pytest
 
 from inspectord.workers.listening_socket_snapshotter.source import (
+    _PROTOS,
     ListeningSocketSource,
     _decode_ipv4,
     _decode_ipv6,
@@ -81,11 +82,14 @@ def test_parse_listeners_tcp_returns_only_listen_state() -> None:
     assert result[key] == {"proto": "tcp", "ip": "0.0.0.0", "port": 22}
 
 
-def test_parse_listeners_tcp_excludes_established() -> None:
-    result = parse_listeners(_TCP_SAMPLE, "tcp")
-    # The ESTABLISHED row (port 35554, 0x8AE2) must not appear
-    for _proto, _ip, port in result:
-        assert port != 0x8AE2
+def test_parse_listeners_tcp_two_listen_rows() -> None:
+    # Two LISTEN rows (0.0.0.0:22 and 0.0.0.0:443) must both appear in the result
+    row_443 = "   2: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 99999 1 0000000000000000 100 0 0 10 0"  # noqa: E501
+    two_listen_text = f"{_TCP_HDR}\n{_TCP_ROW0}\n{row_443}\n"
+    result = parse_listeners(two_listen_text, "tcp")
+    assert len(result) == 2
+    assert ("tcp", "0.0.0.0", 22) in result
+    assert ("tcp", "0.0.0.0", 443) in result
 
 
 # ---------------------------------------------------------------------------
@@ -141,13 +145,16 @@ def test_parse_listeners_ignores_header_line() -> None:
     assert all(isinstance(k[2], int) for k in result)
 
 
-def test_parse_listeners_skips_malformed_rows() -> None:
-    text = "  sl  local_address rem_address   st\n   0: GARBAGE\n"
+def test_parse_listeners_skips_invalid_hex_address() -> None:
+    # Row has 4+ fields so it passes the length guard, but the address hex is
+    # invalid — this exercises the ``except (ValueError, IndexError)`` path.
+    text = "  sl  local_address rem_address   st\n   0: XXXXXXXX:XXXX YYYYYYYY:YYYY 0A extra\n"
     result = parse_listeners(text, "tcp")
     assert result == {}
 
 
 def test_parse_listeners_too_few_fields_skipped() -> None:
+    # Row with fewer than 4 whitespace-split fields is dropped by the length guard.
     text = "  sl  local_address rem_address   st\n   0: incomplete_row\n"
     result = parse_listeners(text, "tcp")
     assert result == {}
@@ -197,7 +204,10 @@ _LISTEN_80_ROW = "   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:0000
 _LISTEN_22_TCP = f"{_TCP_HDR}\n{_LISTEN_22_ROW}\n"
 _LISTEN_80_TCP = f"{_TCP_HDR}\n{_LISTEN_80_ROW}\n"
 
-_PROTOS = ("tcp", "tcp6", "udp", "udp6")
+# udp6: ::1 bound on port 5353 (mDNS), remote 0 → included
+_TCP6_HDR = "  sl  local_address                         remote_address                        st"
+_LISTEN_5353_UDP6_ROW = "   0: 00000000000000000000000001000000:14E9 00000000000000000000000000000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 55555 2 0000000000000000 0"  # noqa: E501
+_LISTEN_5353_UDP6 = f"{_TCP6_HDR}\n{_LISTEN_5353_UDP6_ROW}\n"
 
 
 def _make_reader(
@@ -303,3 +313,23 @@ def test_source_two_consecutive_polls() -> None:
     ports = {r["port"] for r in result2}
     assert actions == {"listener_added", "listener_removed"}
     assert ports == {22, 80}
+
+
+def test_source_multi_proto_listeners_emitted() -> None:
+    """A tcp listener AND a udp6 listener added after baseline are both emitted."""
+    reader = _make_reader(
+        {},  # baseline: all protos empty
+        {"tcp": _LISTEN_22_TCP, "udp6": _LISTEN_5353_UDP6},  # poll 1: two protos active
+    )
+    src = ListeningSocketSource(reader=reader)
+    result = src.poll(timeout_ms=0)
+
+    added = [r for r in result if r["action"] == "listener_added"]
+    assert len(added) == 2
+
+    by_proto = {r["proto"]: r for r in added}
+    assert "tcp" in by_proto
+    assert by_proto["tcp"]["port"] == 22
+
+    assert "udp6" in by_proto
+    assert by_proto["udp6"]["port"] == 0x14E9  # 5353
