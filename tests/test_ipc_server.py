@@ -135,6 +135,8 @@ def test_socket_group_sets_group_and_mode(tmp_path: Path) -> None:
         mode = stat.S_IMODE(st.st_mode)
         assert mode == 0o660, f"expected 0o660, got {oct(mode)}"
         assert st.st_gid == own_gid, f"expected gid={own_gid}, got {st.st_gid}"
+        parent_mode = stat.S_IMODE(os.stat(sock_path.parent).st_mode)
+        assert parent_mode == 0o750, f"expected parent 0o750, got {oct(parent_mode)}"
     finally:
         server.stop()
 
@@ -160,8 +162,8 @@ def test_unknown_socket_group_falls_back_to_owner_only(tmp_path: Path) -> None:
 
 def test_ipc_config_socket_group_field() -> None:
     """IpcConfig must accept socket_group and default to None."""
-    cfg_default = IpcConfig(socket_path="/run/inspectord/ipc.sock")
+    cfg_default = IpcConfig(socket_path=Path("/run/inspectord/ipc.sock"))
     assert cfg_default.socket_group is None
 
-    cfg_set = IpcConfig(socket_path="/run/inspectord/ipc.sock", socket_group="mygroup")
+    cfg_set = IpcConfig(socket_path=Path("/run/inspectord/ipc.sock"), socket_group="mygroup")
     assert cfg_set.socket_group == "mygroup"

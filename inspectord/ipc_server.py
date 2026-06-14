@@ -116,19 +116,24 @@ class IpcServer:
             self._path.unlink()
         parent.mkdir(parents=True, exist_ok=True)
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        # Bind under a restrictive umask so the socket is born 0o600,
-        # eliminating the race window between bind and chmod.
-        old_umask = os.umask(0o177)
         try:
-            s.bind(str(self._path))
-        finally:
-            os.umask(old_umask)
+            # Bind under a restrictive umask so the socket is born 0o600,
+            # eliminating the race window between bind and chmod.
+            old_umask = os.umask(0o177)
+            try:
+                s.bind(str(self._path))
+            finally:
+                os.umask(old_umask)
 
-        # Apply final permissions after a successful bind.
-        if self._socket_group is not None:
-            self._apply_group_permissions(parent)
-        else:
-            os.chmod(self._path, 0o600)
+            # Apply final permissions after a successful bind.
+            if self._socket_group is not None:
+                self._apply_group_permissions(parent)
+            else:
+                os.chmod(self._path, 0o600)
+        except Exception:
+            with contextlib.suppress(OSError):
+                s.close()
+            raise
 
         s.listen(16)
         self._sock = s
@@ -152,12 +157,13 @@ class IpcServer:
             )
             return
 
+        original_parent_gid = os.stat(parent).st_gid
         try:
             os.chown(self._path, -1, gid)
             os.chmod(self._path, 0o660)
             os.chown(parent, -1, gid)
             os.chmod(parent, 0o750)
-        except (PermissionError, OSError) as exc:
+        except OSError as exc:
             log.warning(
                 "ipc: could not apply group permissions for %r (%s); "
                 "socket left at 0o600 (owner-only)",
@@ -167,6 +173,8 @@ class IpcServer:
             # Revert to owner-only so we don't leave a partially-applied state.
             with contextlib.suppress(OSError):
                 os.chmod(self._path, 0o600)
+            with contextlib.suppress(OSError):
+                os.chown(parent, -1, original_parent_gid)
 
     def stop(self) -> None:
         self._stop.set()
