@@ -59,3 +59,7 @@ module = "inspectord.workers.listening_socket_snapshotter"
 [[workers]]
 name = "firewall_inspector"
 module = "inspectord.workers.firewall_inspector"
+
+[[workers]]
+name = "services_monitor"
+module = "inspectord.workers.services_monitor"

@@ -125,6 +125,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.firewall_inspector",
                     "config": {},
                 },
+                {
+                    "name": "services_monitor",
+                    "module": "inspectord.workers.services_monitor",
+                    "config": {},
+                },
             ],
         }
     )
