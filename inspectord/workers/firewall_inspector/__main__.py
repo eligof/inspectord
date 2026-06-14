@@ -78,6 +78,9 @@ class FirewallInspectorWorker:
             self._stream = None
 
     def _record_to_event(self, record: dict[str, Any]) -> dict[str, Any]:
+        # FirewallSource emits a single action, so it's hardcoded below rather
+        # than dispatched from record["action"]; assert to keep that explicit.
+        assert record["action"] == "firewall_ruleset_changed"
         event = build_event(
             module="firewall_inspector",
             action="firewall_ruleset_changed",
@@ -128,9 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=2000,
         help=(
-            "Poll interval per iteration in milliseconds (default: 2000; higher "
-            "than other workers since firewall changes are rare and each poll "
-            "shells out to nft/iptables)"
+            "Poll interval per iteration in milliseconds (default: 2000; firewall "
+            "changes are rare and each poll shells out to nft/iptables)"
         ),
     )
     args = parser.parse_args(argv)
