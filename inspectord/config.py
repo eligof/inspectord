@@ -30,6 +30,7 @@ class IpcConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     socket_path: Path
     allowed_uids: list[int] = Field(default_factory=list)
+    socket_group: str | None = None
 
 
 class DaemonConfig(BaseModel):
