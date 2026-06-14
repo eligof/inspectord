@@ -123,14 +123,12 @@ class FirewallSource:
         new_digest = _digest(new_text)
 
         if new_digest == self._digest:
-            # No change — update stored state (cheap) and return early.
+            # No change — only the backend label can differ; text/digest are identical.
             self._backend = new_backend
-            self._text = new_text
-            self._digest = new_digest
             return []
 
-        # Silently adopt if either side is "none" / empty.
-        prev_is_none = self._backend == "none" or not self._text
+        # Silently adopt if either side is "none" (firewall unreadable).
+        prev_is_none = self._backend == "none"
         new_is_none = new_backend == "none"
         if prev_is_none or new_is_none:
             self._backend = new_backend

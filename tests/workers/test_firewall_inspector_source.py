@@ -49,9 +49,9 @@ _NEW_RULES = "table inet filter {\n  chain input { accept }\n  chain forward { d
 
 def test_diff_summary_counts_added_and_removed() -> None:
     result = _diff_summary(_OLD_RULES, _NEW_RULES)
-    # "drop" line is removed, "accept" and "chain forward { drop }" are added
-    assert result["removed"] >= 1
-    assert result["added"] >= 1
+    # "drop" line is removed; "accept" and "chain forward { drop }" are added
+    assert result["removed"] == 1
+    assert result["added"] == 2
     assert isinstance(result["diff"], str)
     assert len(result["diff"]) > 0
 
@@ -215,8 +215,8 @@ def test_source_rule_change_emits_record() -> None:
     assert rec["backend"] == "nftables"
     assert rec["previous_digest"] == _digest(_NFT_A[1])
     assert rec["digest"] == _digest(_NFT_B[1])
-    assert rec["added"] >= 1
-    assert rec["removed"] >= 1
+    assert rec["added"] == 1
+    assert rec["removed"] == 1
     assert isinstance(rec["diff"], str)
 
 
@@ -247,11 +247,8 @@ def test_source_readable_to_none_emits_nothing() -> None:
 def test_source_close_is_idempotent() -> None:
     capture = _make_capture(_NFT_A)
     src = FirewallSource(capture=capture)
-    assert src._closed is False
     src.close()
-    assert src._closed is True
     src.close()  # must not raise
-    assert src._closed is True
 
 
 def test_source_poll_raises_after_close() -> None:
@@ -273,6 +270,20 @@ def test_source_snapshot_advances_after_change() -> None:
     # Second poll: same ruleset as first poll result — no change
     result2 = src.poll(timeout_ms=0)
     assert result2 == []
+
+
+def test_source_empty_then_populated_ruleset_emits() -> None:
+    """An empty-but-readable baseline must NOT be treated as a none-transition.
+
+    nftables installed with zero rules yields backend='nftables', text=''.
+    When rules later appear the change must be emitted, not silently swallowed.
+    """
+    _NFT_EMPTY = ("nftables", "")
+    capture = _make_capture(_NFT_EMPTY, _NFT_A)
+    src = FirewallSource(capture=capture)
+    result = src.poll(timeout_ms=0)
+    assert len(result) == 1
+    assert result[0]["action"] == "firewall_ruleset_changed"
 
 
 def test_source_iptables_backend_change_emits_record() -> None:
