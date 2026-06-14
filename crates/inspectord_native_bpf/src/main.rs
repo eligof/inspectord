@@ -17,7 +17,9 @@ use aya_ebpf::{
     programs::BtfTracePointContext,
 };
 
-use records::{ConnectRecord, ProcessExecRecord, ProcessExitRecord, CMDLINE_LEN, COMM_LEN};
+use records::{
+    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, CMDLINE_LEN, COMM_LEN,
+};
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
@@ -27,6 +29,9 @@ static EXIT_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
 #[map]
 static CONNECT_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
+
+#[map]
+static CONNECT6_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
 // Per-kernel struct field offsets, populated by the userspace loader at
 // startup from /sys/kernel/btf/vmlinux. Avoids the previous habit of
@@ -43,8 +48,10 @@ static CONNECT_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 //   7 = sock_common.skc_num
 //   8 = sock_common.skc_daddr     (typically 0)
 //   9 = sock_common.skc_rcv_saddr
+//  10 = sock_common.skc_v6_daddr
+//  11 = sock_common.skc_v6_rcv_saddr
 #[map]
-static OFFSETS: Array<u32> = Array::with_max_entries(10, 0);
+static OFFSETS: Array<u32> = Array::with_max_entries(12, 0);
 
 const OFF_TASK_REAL_PARENT: u32 = 0;
 const OFF_TASK_TGID: u32 = 1;
@@ -56,8 +63,11 @@ const OFF_SOCK_DPORT: u32 = 6;
 const OFF_SOCK_NUM: u32 = 7;
 const OFF_SOCK_DADDR: u32 = 8;
 const OFF_SOCK_RCV_SADDR: u32 = 9;
+const OFF_SOCK_V6_DADDR: u32 = 10;
+const OFF_SOCK_V6_RCV_SADDR: u32 = 11;
 
 const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
 const TCP_ESTABLISHED: i32 = 1;
 const TCP_SYN_SENT: i32 = 2;
 
@@ -284,6 +294,83 @@ fn try_outbound_connection(ctx: BtfTracePointContext) -> Result<(), i64> {
         if bpf_probe_read_kernel_buf(sk.add(rcv_saddr_off), &mut saddr_bytes).is_ok() {
             (*record_ptr).saddr_be = u32::from_ne_bytes(saddr_bytes);
         }
+    }
+
+    entry.submit(2u64);
+    Ok(())
+}
+
+#[btf_tracepoint]
+pub fn outbound_connection6(ctx: BtfTracePointContext) -> i32 {
+    let _ = try_outbound_connection6(ctx);
+    0
+}
+
+fn try_outbound_connection6(ctx: BtfTracePointContext) -> Result<(), i64> {
+    // Same tracepoint as the IPv4 path. Both programs fire on every
+    // inet_sock_set_state; each keeps only its own address family so the
+    // verifier sees two simple programs instead of one branchy one.
+    let oldstate: i32 = unsafe { ctx.arg(1) };
+    let newstate: i32 = unsafe { ctx.arg(2) };
+    if oldstate != TCP_SYN_SENT || newstate != TCP_ESTABLISHED {
+        return Err(0);
+    }
+
+    let sk: *const u8 = unsafe { ctx.arg(0) };
+    if sk.is_null() {
+        return Err(-1);
+    }
+
+    let family_off = *OFFSETS.get(OFF_SOCK_FAMILY).ok_or(-1_i64)? as usize;
+    let dport_off = *OFFSETS.get(OFF_SOCK_DPORT).ok_or(-1_i64)? as usize;
+    let num_off = *OFFSETS.get(OFF_SOCK_NUM).ok_or(-1_i64)? as usize;
+    let v6_daddr_off = *OFFSETS.get(OFF_SOCK_V6_DADDR).ok_or(-1_i64)? as usize;
+    let v6_saddr_off = *OFFSETS.get(OFF_SOCK_V6_RCV_SADDR).ok_or(-1_i64)? as usize;
+    // family and the v6 address fields all live past offset 0 in sock_common,
+    // so zero means the loader never populated the map.
+    if family_off == 0 || v6_daddr_off == 0 || v6_saddr_off == 0 {
+        return Err(-1);
+    }
+
+    let mut family_bytes = [0u8; 2];
+    if unsafe { bpf_probe_read_kernel_buf(sk.add(family_off), &mut family_bytes) }.is_err() {
+        return Err(-1);
+    }
+    let family = u16::from_ne_bytes(family_bytes);
+    if family != AF_INET6 {
+        return Err(0);
+    }
+
+    let mut entry = CONNECT6_EVENTS.reserve::<ConnectRecord6>(0).ok_or(-1_i64)?;
+    let record_ptr = entry.as_mut_ptr();
+
+    unsafe {
+        record_ptr.write(ConnectRecord6::zeroed());
+        (*record_ptr).timestamp_ns = bpf_ktime_get_ns();
+        let pid_tgid = bpf_get_current_pid_tgid();
+        (*record_ptr).pid = (pid_tgid >> 32) as u32;
+        let uid_gid = bpf_get_current_uid_gid();
+        (*record_ptr).uid = uid_gid as u32;
+        (*record_ptr).family = family;
+
+        if let Ok(comm) = bpf_get_current_comm() {
+            let dst = &mut (*record_ptr).comm;
+            let n = core::cmp::min(comm.len(), COMM_LEN);
+            for i in 0..n {
+                dst[i] = comm[i];
+            }
+        }
+
+        let mut dport_bytes = [0u8; 2];
+        if bpf_probe_read_kernel_buf(sk.add(dport_off), &mut dport_bytes).is_ok() {
+            (*record_ptr).dport_be = u16::from_ne_bytes(dport_bytes);
+        }
+        let mut num_bytes = [0u8; 2];
+        if bpf_probe_read_kernel_buf(sk.add(num_off), &mut num_bytes).is_ok() {
+            (*record_ptr).sport = u16::from_ne_bytes(num_bytes);
+        }
+        let _ = bpf_probe_read_kernel_buf(sk.add(v6_saddr_off), &mut (*record_ptr).saddr);
+        let _ = bpf_probe_read_kernel_buf(sk.add(v6_daddr_off), &mut (*record_ptr).daddr);
     }
 
     entry.submit(2u64);

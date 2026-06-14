@@ -97,3 +97,41 @@ impl ConnectRecord {
         }
     }
 }
+
+/// IPv6 sibling of `ConnectRecord`: 16-byte `in6_addr` source/destination
+/// in place of the 4-byte IPv4 addresses. Same leading fields so the
+/// userspace decode stays a straight mirror.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ConnectRecord6 {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub uid: u32,
+    pub comm: [u8; COMM_LEN],
+    pub family: u16,
+    pub sport: u16,
+    /// Destination port in network byte order (kernel `skc_dport`).
+    pub dport_be: u16,
+    pub _padding: [u8; 2],
+    /// Source IPv6 in network byte order (kernel `skc_v6_rcv_saddr`).
+    pub saddr: [u8; 16],
+    /// Destination IPv6 in network byte order (kernel `skc_v6_daddr`).
+    pub daddr: [u8; 16],
+}
+
+impl ConnectRecord6 {
+    pub const fn zeroed() -> Self {
+        Self {
+            timestamp_ns: 0,
+            pid: 0,
+            uid: 0,
+            comm: [0; COMM_LEN],
+            family: 0,
+            sport: 0,
+            dport_be: 0,
+            _padding: [0; 2],
+            saddr: [0; 16],
+            daddr: [0; 16],
+        }
+    }
+}
