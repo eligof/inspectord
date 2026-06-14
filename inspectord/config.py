@@ -120,6 +120,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.listening_socket_snapshotter",
                     "config": {},
                 },
+                {
+                    "name": "firewall_inspector",
+                    "module": "inspectord.workers.firewall_inspector",
+                    "config": {},
+                },
             ],
         }
     )

@@ -14,9 +14,10 @@ TimeoutStopSec=60
 Restart=on-failure
 RestartSec=5s
 
-# BPF capabilities required by process_collector eBPF worker
-AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
-CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
+# BPF capabilities required by process_collector eBPF worker; CAP_NET_ADMIN
+# required by firewall_inspector to read the firewall ruleset via nft/iptables
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_NET_ADMIN
 
 # Hardening (Phase 0 baseline; tightened in later phases)
 NoNewPrivileges=true
