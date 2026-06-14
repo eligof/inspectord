@@ -113,6 +113,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.kmod_watcher",
                     "config": {},
                 },
+                {
+                    "name": "listening_socket_snapshotter",
+                    "module": "inspectord.workers.listening_socket_snapshotter",
+                    "config": {},
+                },
             ],
         }
     )
