@@ -188,6 +188,7 @@ def main() -> None:
         socket_path=cfg.ipc.socket_path,
         methods=_ipc_methods(sup, cfg),
         allowed_uids=cfg.ipc.allowed_uids,
+        socket_group=cfg.ipc.socket_group,
     )
     ipc.start()
     log.info("inspectord ready; socket=%s", cfg.ipc.socket_path)

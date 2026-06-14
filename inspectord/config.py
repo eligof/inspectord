@@ -30,6 +30,7 @@ class IpcConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     socket_path: Path
     allowed_uids: list[int] = Field(default_factory=list)
+    socket_group: str | None = None
 
 
 class DaemonConfig(BaseModel):
@@ -42,6 +43,7 @@ class DaemonConfig(BaseModel):
 
 
 def load(path: Path) -> DaemonConfig:
+    path = Path(path)
     with open(path, "rb") as f:
         data = tomllib.load(f)
     return DaemonConfig.model_validate(data)
