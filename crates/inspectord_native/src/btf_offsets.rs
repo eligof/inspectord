@@ -27,6 +27,8 @@ pub struct KernelOffsets {
     pub sock_num: u32,
     pub sock_daddr: u32,
     pub sock_rcv_saddr: u32,
+    pub sock_v6_daddr: u32,
+    pub sock_v6_rcv_saddr: u32,
 }
 
 impl KernelOffsets {
@@ -55,6 +57,8 @@ impl KernelOffsets {
             sock_num: btf.field_offset("sock_common", "skc_num")?,
             sock_daddr: btf.field_offset("sock_common", "skc_daddr")?,
             sock_rcv_saddr: btf.field_offset("sock_common", "skc_rcv_saddr")?,
+            sock_v6_daddr: btf.field_offset("sock_common", "skc_v6_daddr")?,
+            sock_v6_rcv_saddr: btf.field_offset("sock_common", "skc_v6_rcv_saddr")?,
         })
     }
 }
@@ -483,6 +487,9 @@ mod tests {
             offsets.sock_dport,
             offsets.sock_num,
             offsets.sock_rcv_saddr,
+            // IPv6 address fields sit well past offset 0 in sock_common.
+            offsets.sock_v6_daddr,
+            offsets.sock_v6_rcv_saddr,
         ] {
             assert!(v > 0, "offset is zero: {offsets:?}");
             assert!(v < 65_536, "offset suspiciously large: {offsets:?}");
