@@ -1,4 +1,4 @@
-"""Tests for packaging/config.example.json.
+"""Tests for packaging/config.example.toml.
 
 Asserts that the example config is valid and documents the IPC hardening.
 Guards against worker list drift relative to dev_config().
@@ -12,7 +12,7 @@ from inspectord.config import DaemonConfig, dev_config, load
 
 # Resolve the example config relative to this test file's location in the repo.
 _REPO_ROOT = Path(__file__).parent.parent
-_EXAMPLE_CONFIG = _REPO_ROOT / "packaging" / "config.example.json"
+_EXAMPLE_CONFIG = _REPO_ROOT / "packaging" / "config.example.toml"
 
 
 def test_example_config_exists() -> None:

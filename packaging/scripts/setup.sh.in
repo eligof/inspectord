@@ -56,7 +56,7 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Generate config if absent
 # ---------------------------------------------------------------------------
-config_path="${INSPECTORD_CONFIG:-/etc/inspectord/config.json}"
+config_path="${INSPECTORD_CONFIG:-/etc/inspectord/config.toml}"
 if [[ -e "$config_path" ]]; then
     echo "info: config already exists at '$config_path', skipping generation"
 else
@@ -64,17 +64,7 @@ else
     mkdir -p "$(dirname "$config_path")"
     cp @CONFIG_EXAMPLE@ "$config_path"
     # Patch ipc.allowed_uids to include the target user's UID
-    @PYTHON@ -c "
-import json, sys
-path = sys.argv[1]
-uid = int(sys.argv[2])
-with open(path) as f:
-    cfg = json.load(f)
-cfg['ipc']['allowed_uids'] = [uid]
-with open(path, 'w') as f:
-    json.dump(cfg, f, indent=2)
-    f.write('\n')
-" "$config_path" "$uid"
+    sed -i "s/^allowed_uids = .*/allowed_uids = [$uid]/" "$config_path"
     echo "info: set ipc.allowed_uids = [$uid] for user '$user'"
 fi
 
