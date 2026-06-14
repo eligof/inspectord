@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = ">=0.22,<1", features = ["extension-module", "abi3-py312"] }
 aya.workspace = true
-thiserror = "1"
+thiserror = "2"
 libc = "0.2"
 
 [build-dependencies]
