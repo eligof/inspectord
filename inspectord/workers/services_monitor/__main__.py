@@ -87,15 +87,9 @@ class ServicesMonitorWorker:
             active: str = record["active"]
             sub: str = record["sub"]
             load: str = record["load"]
-            event = build_event(
-                module="services_monitor",
+            kwargs: dict[str, Any] = dict(
                 action="service_added",
-                category=["configuration"],
                 type_=["installation"],
-                severity="info",
-                ts=datetime.now(tz=UTC),
-                host={"name": self._host_name},
-                labels=["service"],
                 service={"name": unit, "state": active},
                 message=f"service {unit} appeared (active={active}, sub={sub}, load={load})",
                 raw={"source": "systemctl", "active": active, "sub": sub, "load": load},
@@ -104,15 +98,9 @@ class ServicesMonitorWorker:
             previous_active: str = record["previous_active"]
             previous_sub: str = record["previous_sub"]
             previous_load: str = record["previous_load"]
-            event = build_event(
-                module="services_monitor",
+            kwargs = dict(
                 action="service_removed",
-                category=["configuration"],
                 type_=["deletion"],
-                severity="info",
-                ts=datetime.now(tz=UTC),
-                host={"name": self._host_name},
-                labels=["service"],
                 service={"name": unit, "state": previous_active},
                 message=(
                     f"service {unit} disappeared (was active={previous_active}, sub={previous_sub})"
@@ -131,15 +119,9 @@ class ServicesMonitorWorker:
             previous_active = record["previous_active"]
             previous_sub = record["previous_sub"]
             previous_load = record["previous_load"]
-            event = build_event(
-                module="services_monitor",
+            kwargs = dict(
                 action="service_state_changed",
-                category=["configuration"],
                 type_=["change"],
-                severity="info",
-                ts=datetime.now(tz=UTC),
-                host={"name": self._host_name},
-                labels=["service"],
                 service={"name": unit, "state": active},
                 message=(
                     f"service {unit} changed: {previous_active}/{previous_sub} -> {active}/{sub}"
@@ -157,6 +139,15 @@ class ServicesMonitorWorker:
         else:
             raise ValueError(f"unknown action: {action!r}")
 
+        event = build_event(
+            module="services_monitor",
+            category=["configuration"],
+            severity="info",
+            ts=datetime.now(tz=UTC),
+            host={"name": self._host_name},
+            labels=["service"],
+            **kwargs,
+        )
         return event.model_dump(mode="json", exclude_none=True)
 
 
@@ -184,9 +175,9 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=5000,
         help=(
-            "Poll interval per iteration in milliseconds (default: 5000; a typical"
-            " host runs hundreds of services and their state changes frequently, so"
-            " polling less aggressively reduces unnecessary systemctl invocations)"
+            "Poll interval per iteration in milliseconds (default: 5000; there are"
+            " many services and each poll shells out to systemctl, so poll less often"
+            " than the /proc collectors)"
         ),
     )
     args = parser.parse_args(argv)

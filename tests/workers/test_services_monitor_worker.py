@@ -10,6 +10,8 @@ import json
 from io import BytesIO
 from typing import Any
 
+import pytest
+
 from inspectord.workers.services_monitor.__main__ import ServicesMonitorWorker
 
 
@@ -167,8 +169,10 @@ def test_worker_emits_service_removed_event() -> None:
     assert ev["service"]["name"] == "cups.service"
     assert ev["service"]["state"] == "inactive"
 
-    # message contains the unit name
+    # message contains the unit name, "disappeared" keyword, and previous_active value
     assert "cups.service" in ev["message"]
+    assert "disappeared" in ev["message"]
+    assert "inactive" in ev["message"]
 
     # raw fields
     assert ev["raw"]["source"] == "systemctl"
@@ -214,9 +218,10 @@ def test_worker_emits_service_state_changed_event() -> None:
     assert ev["service"]["name"] == "nginx.service"
     assert ev["service"]["state"] == "failed"
 
-    # message shows the transition
+    # message shows the transition arrow and both sides
     assert "nginx.service" in ev["message"]
-    assert "active" in ev["message"]
+    assert "->" in ev["message"]
+    assert "running" in ev["message"]
     assert "failed" in ev["message"]
 
     # raw has both new and previous fields
@@ -254,3 +259,18 @@ def test_worker_closes_stream_on_stop() -> None:
     worker.start()
     worker.stop()
     assert stream._closed is True
+
+
+def test_worker_raises_on_unknown_action() -> None:
+    sink = BytesIO()
+    record: dict[str, Any] = {"action": "service_exploded", "unit": "foo.service"}
+    stream = FakeStream([[record]])
+    worker = ServicesMonitorWorker(
+        stream_factory=lambda: stream,
+        sink=sink,
+        host_name="test-host",
+    )
+    worker.start()
+    with pytest.raises(ValueError, match="unknown action"):
+        worker.step(poll_timeout_ms=10)
+    worker.stop()
