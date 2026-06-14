@@ -108,6 +108,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.outbound_connection_tracker6",
                     "config": {},
                 },
+                {
+                    "name": "kmod_watcher",
+                    "module": "inspectord.workers.kmod_watcher",
+                    "config": {},
+                },
             ],
         }
     )
