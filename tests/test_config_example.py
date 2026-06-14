@@ -34,6 +34,12 @@ def test_example_config_ipc_socket_path() -> None:
     assert cfg.ipc.socket_path == Path("/run/inspectord/inspectord.sock")
 
 
+def test_example_config_ipc_allowed_uids_is_empty() -> None:
+    """setup.sh patches allowed_uids per-install via a `sed` on the empty list."""
+    cfg = load(_EXAMPLE_CONFIG)
+    assert cfg.ipc.allowed_uids == []
+
+
 def test_example_config_worker_names_match_dev_config(tmp_path: Path) -> None:
     """Worker names in the example must exactly match those from dev_config()."""
     example_cfg = load(_EXAMPLE_CONFIG)

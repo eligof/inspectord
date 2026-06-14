@@ -21,14 +21,14 @@ if [[ -z "$user" ]]; then
     echo "       Run via 'sudo $0' or pass the username as the first argument." >&2
     exit 1
 fi
-if [[ "$user" == "root" ]]; then
-    echo "error: target user must not be root" >&2
-    exit 1
-fi
 uid=$(id -u "$user" 2>/dev/null) || {
     echo "error: user '$user' does not exist" >&2
     exit 1
 }
+if [[ "$uid" -eq 0 ]]; then
+    echo "error: target user must not be root (uid 0)" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Ensure the 'inspectord' system group exists (idempotent)
@@ -61,8 +61,8 @@ if [[ -e "$config_path" ]]; then
     echo "info: config already exists at '$config_path', skipping generation"
 else
     echo "info: generating config at '$config_path'"
-    mkdir -p "$(dirname "$config_path")"
-    cp @CONFIG_EXAMPLE@ "$config_path"
+    mkdir -p -m 750 "$(dirname "$config_path")"
+    cp "@CONFIG_EXAMPLE@" "$config_path"
     # Patch ipc.allowed_uids to include the target user's UID
     sed -i "s/^allowed_uids = .*/allowed_uids = [$uid]/" "$config_path"
     echo "info: set ipc.allowed_uids = [$uid] for user '$user'"
