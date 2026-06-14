@@ -70,6 +70,7 @@ def test_worker_emits_listener_added_event() -> None:
     assert ev["network"]["transport"] == "tcp"
     assert ev["network"]["direction"] == "ingress"
     assert ev["raw"]["source"] == "/proc/net/tcp"
+    assert ev["labels"] == ["listener"]
     assert "0.0.0.0" in ev["message"]
     assert "22" in ev["message"]
 
@@ -108,6 +109,7 @@ def test_worker_emits_listener_removed_event() -> None:
     assert ev["network"]["transport"] == "udp"
     assert ev["network"]["direction"] == "ingress"
     assert ev["raw"]["source"] == "/proc/net/udp6"
+    assert ev["labels"] == ["listener"]
     assert "::1" in ev["message"]
     assert "5353" in ev["message"]
 

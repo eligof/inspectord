@@ -136,7 +136,10 @@ def main(argv: list[str] | None = None) -> int:
         "--poll-timeout-ms",
         type=int,
         default=1000,
-        help="Poll interval per iteration in milliseconds (default: 1000)",
+        help=(
+            "Poll interval per iteration in milliseconds (default: 1000; /proc/net "
+            "is a snapshot, not an event stream, so listeners change slowly)"
+        ),
     )
     args = parser.parse_args(argv)
 
