@@ -88,7 +88,7 @@ def diff_units(
 
     - **service_added**: unit present in *curr* but not *prev*.
     - **service_removed**: unit present in *prev* but not *curr*.
-    - **service_state_changed**: unit in both, but ``(active, sub)`` differ.
+    - **service_state_changed**: unit in both, but ``(active, sub, load)`` differ.
 
     The result list is sorted deterministically by ``(action, unit)``.
     """
@@ -112,21 +112,28 @@ def diff_units(
                     "unit": unit,
                     "previous_active": info["active"],
                     "previous_sub": info["sub"],
+                    "previous_load": info["load"],
                 }
             )
     for unit, curr_info in curr.items():
         if unit not in prev:
             continue
         prev_info = prev[unit]
-        if (curr_info["active"], curr_info["sub"]) != (prev_info["active"], prev_info["sub"]):
+        if (curr_info["active"], curr_info["sub"], curr_info["load"]) != (
+            prev_info["active"],
+            prev_info["sub"],
+            prev_info["load"],
+        ):
             records.append(
                 {
                     "action": "service_state_changed",
                     "unit": unit,
                     "active": curr_info["active"],
                     "sub": curr_info["sub"],
+                    "load": curr_info["load"],
                     "previous_active": prev_info["active"],
                     "previous_sub": prev_info["sub"],
+                    "previous_load": prev_info["load"],
                 }
             )
     records.sort(key=lambda r: (r["action"], r["unit"]))
@@ -178,7 +185,9 @@ class ServicesSource:
             return []
         curr = parse_units(text)
         if not curr:
-            # Parsed to nothing (e.g. valid JSON empty array with no services).
+            # Empty parse — either a valid "[]" (no services) or unparseable output.
+            # Preserve the baseline rather than flooding service_removed; an actual
+            # mass-removal is implausible on a real host and not worth the false-positive risk.
             return []
         if not self._units:
             # Baseline not yet established — adopt silently to avoid a flood.

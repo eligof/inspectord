@@ -43,19 +43,21 @@ def _fail(stdout: str = "") -> subprocess.CompletedProcess[str]:
 
 
 def _make_runner(
-    outcome: Any,
+    outcome: subprocess.CompletedProcess[str] | BaseException,
 ) -> Callable[..., subprocess.CompletedProcess[str]]:
-    """Return a fake runner that always produces *outcome* (or raises it)."""
+    """Return a fake runner that always produces *outcome* (or raises it).
+
+    Pass a ``CompletedProcess`` to simulate a successful/failed subprocess, or
+    an exception *instance* to simulate a raise.
+    """
 
     def runner(
         _cmd: list[str],
         **_kwargs: Any,
     ) -> subprocess.CompletedProcess[str]:
-        if isinstance(outcome, BaseException) or (
-            isinstance(outcome, type) and issubclass(outcome, BaseException)
-        ):
+        if isinstance(outcome, BaseException):
             raise outcome
-        return outcome  # type: ignore[return-value]
+        return outcome
 
     return runner
 
@@ -192,6 +194,7 @@ def test_diff_units_service_removed() -> None:
     assert removed[0]["unit"] == "cronie.service"
     assert removed[0]["previous_active"] == "inactive"
     assert removed[0]["previous_sub"] == "dead"
+    assert removed[0]["previous_load"] == "loaded"
 
 
 def test_diff_units_service_state_changed_active() -> None:
@@ -206,8 +209,10 @@ def test_diff_units_service_state_changed_active() -> None:
     assert rec["unit"] == "sshd.service"
     assert rec["active"] == "inactive"
     assert rec["sub"] == "dead"
+    assert rec["load"] == "loaded"
     assert rec["previous_active"] == "active"
     assert rec["previous_sub"] == "running"
+    assert rec["previous_load"] == "loaded"
 
 
 def test_diff_units_service_state_changed_sub_only() -> None:
@@ -222,6 +227,32 @@ def test_diff_units_service_state_changed_sub_only() -> None:
     rec = changed[0]
     assert rec["unit"] == "sshd.service"
     assert rec["sub"] == "exited"
+    assert rec["previous_sub"] == "running"
+    assert rec["load"] == "loaded"
+    assert rec["previous_load"] == "loaded"
+
+
+def test_diff_units_service_state_changed_load_only() -> None:
+    """A change in load alone (active and sub unchanged) is detected.
+
+    A ``"loaded"`` → ``"masked"`` transition is a persistence/evasion indicator
+    and must not be silently dropped.
+    """
+    curr = {
+        "sshd.service": {"active": "active", "sub": "running", "load": "masked"},
+        "cronie.service": _PREV["cronie.service"],
+    }
+    records = diff_units(_PREV, curr)
+    changed = [r for r in records if r["action"] == "service_state_changed"]
+    assert len(changed) == 1
+    rec = changed[0]
+    assert rec["unit"] == "sshd.service"
+    assert rec["load"] == "masked"
+    assert rec["previous_load"] == "loaded"
+    # active and sub are unchanged
+    assert rec["active"] == "active"
+    assert rec["sub"] == "running"
+    assert rec["previous_active"] == "active"
     assert rec["previous_sub"] == "running"
 
 
@@ -286,6 +317,7 @@ def test_source_service_removed() -> None:
     assert result[0]["unit"] == "cronie.service"
     assert result[0]["previous_active"] == "inactive"
     assert result[0]["previous_sub"] == "dead"
+    assert result[0]["previous_load"] == "loaded"
 
 
 def test_source_service_state_changed() -> None:
@@ -304,8 +336,10 @@ def test_source_service_state_changed() -> None:
     assert rec["unit"] == "sshd.service"
     assert rec["active"] == "inactive"
     assert rec["sub"] == "dead"
+    assert rec["load"] == "loaded"
     assert rec["previous_active"] == "active"
     assert rec["previous_sub"] == "running"
+    assert rec["previous_load"] == "loaded"
 
 
 def test_source_transient_failure_preserves_baseline() -> None:
@@ -339,10 +373,53 @@ def test_source_transient_failure_preserves_baseline() -> None:
     assert state_changed[0]["unit"] == "sshd.service"
 
 
+def test_source_empty_list_preserves_baseline() -> None:
+    """A poll whose capture() returns '[]' (valid empty array) must return []
+    AND must NOT wipe the baseline.
+
+    A subsequent normal poll must diff against the original snapshot — i.e. no
+    spurious ``service_removed`` flood, and real changes are still detected.
+    """
+    changed_json = (
+        '[{"unit":"sshd.service","load":"loaded","active":"inactive","sub":"dead",'
+        '"description":"OpenSSH Daemon"},'
+        '{"unit":"cronie.service","load":"loaded","active":"inactive","sub":"dead",'
+        '"description":"Periodic Command Scheduler"}]'
+    )
+    # seq: baseline, empty-list guard trigger, real change
+    capture = _make_capture(_SAMPLE_JSON, "[]", changed_json)
+    src = ServicesSource(capture=capture)
+
+    # Poll 1: empty-list parse — guard fires, baseline preserved
+    result1 = src.poll(timeout_ms=0)
+    assert result1 == []
+
+    # Poll 2: real change detected against ORIGINAL baseline, not the empty set
+    result2 = src.poll(timeout_ms=0)
+    service_removed = [r for r in result2 if r["action"] == "service_removed"]
+    assert service_removed == []  # no spurious removes
+    state_changed = [r for r in result2 if r["action"] == "service_state_changed"]
+    assert len(state_changed) == 1
+    assert state_changed[0]["unit"] == "sshd.service"
+
+
 def test_source_first_capture_failed_then_readable_adopts_silently() -> None:
     """If the initial capture failed (empty baseline), the first successful poll
-    must adopt the snapshot silently — no ``service_added`` flood."""
-    capture = _make_capture("", _SAMPLE_JSON, _SAMPLE_JSON)
+    must adopt the snapshot silently — no ``service_added`` flood.
+
+    A third poll with a mutated snapshot proves the adopted baseline is actually
+    stored and used for diffing (i.e. self._units was set correctly).
+    """
+    # sshd changes active→inactive/dead; cronie added; baseline is _SAMPLE_JSON
+    mutated_json = (
+        '[{"unit":"sshd.service","load":"loaded","active":"inactive","sub":"dead",'
+        '"description":"OpenSSH Daemon"},'
+        '{"unit":"cronie.service","load":"loaded","active":"inactive","sub":"dead",'
+        '"description":"Periodic Command Scheduler"},'
+        '{"unit":"newapp.service","load":"loaded","active":"active","sub":"running",'
+        '"description":"New App"}]'
+    )
+    capture = _make_capture("", _SAMPLE_JSON, _SAMPLE_JSON, mutated_json)
     src = ServicesSource(capture=capture)
 
     # Poll 1: baseline was empty; adopt silently
@@ -352,6 +429,20 @@ def test_source_first_capture_failed_then_readable_adopts_silently() -> None:
     # Poll 2: same snapshot as adopted — no changes
     result2 = src.poll(timeout_ms=0)
     assert result2 == []
+
+    # Poll 3: mutated snapshot — diffs against the adopted baseline (_SAMPLE_JSON)
+    result3 = src.poll(timeout_ms=0)
+    actions = {r["action"] for r in result3}
+    # sshd changed state AND newapp was added; NO spurious service_removed
+    assert "service_state_changed" in actions
+    assert "service_added" in actions
+    assert "service_removed" not in actions
+    state_changed = [r for r in result3 if r["action"] == "service_state_changed"]
+    assert len(state_changed) == 1
+    assert state_changed[0]["unit"] == "sshd.service"
+    added = [r for r in result3 if r["action"] == "service_added"]
+    assert len(added) == 1
+    assert added[0]["unit"] == "newapp.service"
 
 
 def test_source_close_is_idempotent() -> None:
