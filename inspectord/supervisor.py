@@ -32,6 +32,8 @@ from inspectord.rules.registry import Registry
 from inspectord.rules.yaml_loader import load_yaml_rule_from_dict
 from inspectord.schemas.alert import Alert
 from inspectord.schemas.event import Event
+from inspectord.state.projector import project
+from inspectord.state.reconcile import current_boot_id, reconcile_processes
 from inspectord.storage.db import Database
 from inspectord.storage.migrations import run_migrations
 from inspectord.workers.notifier.__main__ import NotifierWorker
@@ -77,6 +79,11 @@ class Supervisor:
     def start(self) -> None:
         self._db.connect()
         run_migrations(self._db)
+        # suppress(OSError) guards the /proc/sys/kernel/random/boot_id read on hosts
+        # where it is unreadable (e.g. some CI sandboxes); migrations above have
+        # already created process_state, so the reconcile UPDATE itself won't raise here.
+        with contextlib.suppress(OSError):
+            reconcile_processes(self._db, current_boot_id())
         self._subscribe_storage()
         for spec in self._cfg.workers:
             self._spawn_worker(spec)
@@ -149,6 +156,7 @@ class Supervisor:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [ev.event_id, ev.ts, ev.kind.value, ev.module, ev.action, ev.severity.value, payload],
         )
+        project(ev, self._db)
 
     def _spawn_worker(self, spec: WorkerSpec) -> None:
         cmd = [sys.executable, "-m", spec.module]
