@@ -63,3 +63,7 @@ module = "inspectord.workers.firewall_inspector"
 [[workers]]
 name = "services_monitor"
 module = "inspectord.workers.services_monitor"
+
+[[workers]]
+name = "udev_monitor"
+module = "inspectord.workers.udev_monitor"
