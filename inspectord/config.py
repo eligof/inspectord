@@ -130,6 +130,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.services_monitor",
                     "config": {},
                 },
+                {
+                    "name": "udev_monitor",
+                    "module": "inspectord.workers.udev_monitor",
+                    "config": {},
+                },
             ],
         }
     )
