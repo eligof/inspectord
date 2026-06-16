@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Services</h1>
+
+<form method="post" action="/services/capture-baseline" class="filter-bar">
+  <button type="submit">Capture baseline</button>
+  <span class="muted">Snapshots current services as the diff reference.</span>
+</form>
+
+<div id="services-feed"
+     hx-get="/services/feed"
+     hx-target="#services-feed"
+     hx-trigger="load, every 5s">
+  <div class="empty">Loading…</div>
+</div>
+{% endblock %}
