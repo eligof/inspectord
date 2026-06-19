@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from inspectord.state.baseline import capture_baseline
-from inspectord.state.ipc_handlers import handle_capture_baseline, handle_list_services
+from inspectord.state.ipc_handlers import (
+    handle_capture_baseline,
+    handle_list_devices,
+    handle_list_services,
+)
 from inspectord.storage.db import Database
 from inspectord.storage.migrations import run_migrations
 
@@ -28,6 +32,50 @@ def _seed_service(db_path: Path, unit: str, active: str) -> None:
             "ON CONFLICT (unit) DO UPDATE SET active_state = excluded.active_state",
             [unit, active],
         )
+
+
+def _seed_device(db_path: Path, dev_key: str, status: str) -> None:
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO device_state (dev_key, vendor, product, serial, subsystem, devnode, "
+            "status, first_seen, last_seen, last_event_id) VALUES "
+            "(?, '1d6b', '0002', 'ser', 'usb', '/dev/usb1', ?, "
+            "TIMESTAMP '2026-06-16 00:00:00', TIMESTAMP '2026-06-16 00:00:00', 'd1') "
+            "ON CONFLICT (dev_key) DO UPDATE SET status = excluded.status",
+            [dev_key, status],
+        )
+
+
+def test_list_devices_returns_rows(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_device(db_path, "1d6b:0002:ser", "present")
+    result = handle_list_devices(params={}, db_path=db_path)
+    keys = [d["dev_key"] for d in result["devices"]]
+    assert keys == ["1d6b:0002:ser"]
+    row = result["devices"][0]
+    assert row["vendor"] == "1d6b"
+    assert row["product"] == "0002"
+    assert row["serial"] == "ser"
+    assert row["subsystem"] == "usb"
+    assert row["devnode"] == "/dev/usb1"
+    assert row["status"] == "present"
+    assert "diff_status" not in row
+
+
+def test_list_devices_status_filter(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_device(db_path, "a:b:c", "present")
+    _seed_device(db_path, "d:e:f", "removed")
+    result = handle_list_devices(params={"status": "removed"}, db_path=db_path)
+    keys = [d["dev_key"] for d in result["devices"]]
+    assert keys == ["d:e:f"]
+
+
+def test_list_devices_first_seen_is_iso_string(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_device(db_path, "a:b:c", "present")
+    result = handle_list_devices(params={}, db_path=db_path)
+    assert result["devices"][0]["first_seen"] == "2026-06-16T00:00:00"
 
 
 def test_list_services_returns_rows(tmp_path: Path) -> None:

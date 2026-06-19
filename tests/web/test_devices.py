@@ -1,0 +1,71 @@
+"""Tests for the /devices panel."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from inspectorctl.web.app import create_app
+from inspectord.ipc_server import Method
+
+
+def _list_devices() -> Method:
+    def handler(params: dict[str, object]) -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "devices": [
+                {
+                    "dev_key": "usb:0x1234:0x5678:ABC123",
+                    "vendor": "Acme Corp",
+                    "product": "Widget Drive",
+                    "serial": "ABC123",
+                    "subsystem": "usb",
+                    "devnode": "/dev/sdb",
+                    "status": "present",
+                    "first_seen": "2026-06-16T00:00:00+00:00",
+                },
+            ],
+        }
+
+    return Method(name="list_devices", handler=handler, mutates=False)
+
+
+def test_devices_shell_renders(ipc_factory) -> None:
+    client = ipc_factory([_list_devices()])
+    response = client.get("/devices")
+    assert response.status_code == 200
+    assert "hx-get" in response.text
+    assert "/devices/feed" in response.text
+    assert "devices-feed" in response.text
+
+
+def test_devices_feed_renders_rows(ipc_factory) -> None:
+    client = ipc_factory([_list_devices()])
+    response = client.get("/devices/feed")
+    assert response.status_code == 200
+    assert "Acme Corp" in response.text
+    assert "Widget Drive" in response.text
+    assert "ABC123" in response.text
+    assert "/dev/sdb" in response.text  # devnode column
+    assert "present" in response.text  # status column
+    assert "<nav>" not in response.text
+
+
+def test_devices_feed_empty_state(ipc_factory) -> None:
+    def handler(params: dict) -> dict:
+        return {"schema_version": "1.0.0", "devices": []}
+
+    client = ipc_factory([Method(name="list_devices", handler=handler, mutates=False)])
+    response = client.get("/devices/feed")
+    assert response.status_code == 200
+    assert "No devices observed" in response.text
+
+
+def test_devices_feed_daemon_unreachable(tmp_path: Path) -> None:
+    # No server is listening on this socket, so the IPC call fails.
+    app = create_app(socket_path=tmp_path / "no.sock")
+    client = TestClient(app)
+    response = client.get("/devices/feed")
+    assert response.status_code == 200
+    assert "daemon unreachable" in response.text

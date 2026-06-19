@@ -35,7 +35,11 @@ from inspectord.dependencies.pacman_backend import PacmanBackend
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.log import configure as configure_log
 from inspectord.log import get
-from inspectord.state.ipc_handlers import handle_capture_baseline, handle_list_services
+from inspectord.state.ipc_handlers import (
+    handle_capture_baseline,
+    handle_list_devices,
+    handle_list_services,
+)
 from inspectord.storage.db import Database
 from inspectord.supervisor import Supervisor
 
@@ -166,6 +170,11 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
         Method(
             name="list_services",
             handler=lambda params: handle_list_services(params=params, db_path=cfg.storage.db_path),
+            mutates=False,
+        ),
+        Method(
+            name="list_devices",
+            handler=lambda params: handle_list_devices(params=params, db_path=cfg.storage.db_path),
             mutates=False,
         ),
         Method(

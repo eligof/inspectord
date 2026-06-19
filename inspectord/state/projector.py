@@ -14,6 +14,8 @@ from inspectord.storage.db import Database
 def project(event: Event, db: Database) -> None:
     if event.module == "services_monitor":
         _project_service(event, db)
+    elif event.module == "udev_monitor":
+        _project_device(event, db)
 
 
 def _project_service(event: Event, db: Database) -> None:
@@ -43,6 +45,63 @@ def _project_service(event: Event, db: Database) -> None:
             raw.get("active"),
             raw.get("sub"),
             raw.get("load"),
+            event.ts,
+            event.ts,
+            event.event_id,
+        ],
+    )
+
+
+def _device_key(event: Event) -> str | None:
+    device = event.device or {}
+    raw = event.raw or {}
+    vendor = device.get("vendor")
+    product = device.get("product")
+    serial = device.get("serial")
+    if vendor or product or serial:
+        return f"{vendor or ''}:{product or ''}:{serial or ''}"
+    # No vendor/product/serial: fall back to stable identifiers.
+    return raw.get("DEVPATH") or device.get("name") or None
+
+
+def _project_device(event: Event, db: Database) -> None:
+    dev_key = _device_key(event)
+    if not dev_key:
+        return
+    if event.action == "device_removed":
+        # Removed devices are retained with status='removed' (spec §4) so the
+        # panel can surface a disappearance rather than silently dropping it.
+        db.execute(
+            "UPDATE device_state SET status='removed', last_seen=?, last_event_id=? "
+            "WHERE dev_key=?",
+            [event.ts, event.event_id, dev_key],
+        )
+        return
+    device = event.device or {}
+    raw = event.raw or {}
+    db.execute(
+        """
+        INSERT INTO device_state
+            (dev_key, vendor, product, serial, subsystem, devnode,
+             status, first_seen, last_seen, last_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, 'present', ?, ?, ?)
+        ON CONFLICT (dev_key) DO UPDATE SET
+            vendor        = excluded.vendor,
+            product       = excluded.product,
+            serial        = excluded.serial,
+            subsystem     = excluded.subsystem,
+            devnode       = excluded.devnode,
+            status        = excluded.status,
+            last_seen     = excluded.last_seen,
+            last_event_id = excluded.last_event_id
+        """,
+        [
+            dev_key,
+            device.get("vendor"),
+            device.get("product"),
+            device.get("serial"),
+            raw.get("SUBSYSTEM"),
+            raw.get("DEVNAME"),
             event.ts,
             event.ts,
             event.event_id,
