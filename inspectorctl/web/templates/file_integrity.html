@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>File integrity</h1>
+
+<div id="file-integrity-feed"
+     hx-get="/file-integrity/feed"
+     hx-target="#file-integrity-feed"
+     hx-trigger="load, every 5s">
+  <div class="empty">Loading…</div>
+</div>
+{% endblock %}
