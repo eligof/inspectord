@@ -38,6 +38,7 @@ from inspectord.log import get
 from inspectord.state.ipc_handlers import (
     handle_capture_baseline,
     handle_list_devices,
+    handle_list_processes,
     handle_list_services,
 )
 from inspectord.storage.db import Database
@@ -175,6 +176,13 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
         Method(
             name="list_devices",
             handler=lambda params: handle_list_devices(params=params, db_path=cfg.storage.db_path),
+            mutates=False,
+        ),
+        Method(
+            name="list_processes",
+            handler=lambda params: handle_list_processes(
+                params=params, db_path=cfg.storage.db_path
+            ),
             mutates=False,
         ),
         Method(

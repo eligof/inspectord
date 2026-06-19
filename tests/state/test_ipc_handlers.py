@@ -8,6 +8,7 @@ from inspectord.state.baseline import capture_baseline
 from inspectord.state.ipc_handlers import (
     handle_capture_baseline,
     handle_list_devices,
+    handle_list_processes,
     handle_list_services,
 )
 from inspectord.storage.db import Database
@@ -44,6 +45,61 @@ def _seed_device(db_path: Path, dev_key: str, status: str) -> None:
             "ON CONFLICT (dev_key) DO UPDATE SET status = excluded.status",
             [dev_key, status],
         )
+
+
+def _seed_process(
+    db_path: Path,
+    pid: int,
+    *,
+    boot_id: str = "b1",
+    comm: str = "bash",
+    ppid: int = 1,
+    uid: int = 1000,
+    status: str = "running",
+    cmdline: str = "bash -i",
+    last_seen: str = "2026-06-16 00:00:00",
+) -> None:
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO process_state (pid, boot_id, ppid, comm, uid, cmdline, status, "
+            "first_seen, last_seen, last_event_id) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, TIMESTAMP '2026-06-16 00:00:00', "
+            f"TIMESTAMP '{last_seen}', 'p1')",
+            [pid, boot_id, ppid, comm, uid, cmdline, status],
+        )
+
+
+def test_list_processes_returns_rows_newest_last_seen_first(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_process(db_path, 100, last_seen="2026-06-16 00:00:00")
+    _seed_process(db_path, 200, last_seen="2026-06-16 02:00:00")
+    _seed_process(db_path, 300, last_seen="2026-06-16 01:00:00")
+    result = handle_list_processes(params={}, db_path=db_path)
+    pids = [p["pid"] for p in result["processes"]]
+    assert pids == [200, 300, 100]
+    row = result["processes"][0]
+    assert row["comm"] == "bash"
+    assert row["ppid"] == 1
+    assert row["uid"] == 1000
+    assert row["status"] == "running"
+    assert row["cmdline"] == "bash -i"
+    assert "diff_status" not in row
+
+
+def test_list_processes_status_filter(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_process(db_path, 100, status="running")
+    _seed_process(db_path, 200, status="exited")
+    result = handle_list_processes(params={"status": "exited"}, db_path=db_path)
+    pids = [p["pid"] for p in result["processes"]]
+    assert pids == [200]
+
+
+def test_list_processes_first_seen_is_iso_string(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_process(db_path, 100)
+    result = handle_list_processes(params={}, db_path=db_path)
+    assert result["processes"][0]["first_seen"] == "2026-06-16T00:00:00"
 
 
 def test_list_devices_returns_rows(tmp_path: Path) -> None:

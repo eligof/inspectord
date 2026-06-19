@@ -56,6 +56,7 @@ class Supervisor:
         self._db = Database(config.storage.db_path)
         self._procs: list[_WorkerProc] = []
         self._stop = threading.Event()
+        self._boot_id: str | None = None
         self._listeners: list[Callable[[Event], None]] = []
         # Build the rule engine.
         python_rules = load_python_rules("inspectord.rules.starter_pack")
@@ -83,7 +84,8 @@ class Supervisor:
         # where it is unreadable (e.g. some CI sandboxes); migrations above have
         # already created process_state, so the reconcile UPDATE itself won't raise here.
         with contextlib.suppress(OSError):
-            reconcile_processes(self._db, current_boot_id())
+            self._boot_id = current_boot_id()
+            reconcile_processes(self._db, self._boot_id)
         self._subscribe_storage()
         for spec in self._cfg.workers:
             self._spawn_worker(spec)
@@ -156,7 +158,7 @@ class Supervisor:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [ev.event_id, ev.ts, ev.kind.value, ev.module, ev.action, ev.severity.value, payload],
         )
-        project(ev, self._db)
+        project(ev, self._db, boot_id=self._boot_id)
 
     def _spawn_worker(self, spec: WorkerSpec) -> None:
         cmd = [sys.executable, "-m", spec.module]

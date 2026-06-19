@@ -108,6 +108,34 @@ def handle_list_devices(*, params: dict[str, Any], db_path: Path) -> dict[str, A
     return {"schema_version": "1.0.0", "devices": devices}
 
 
+def handle_list_processes(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    limit = int(params.get("limit", 200))
+    status = params.get("status")
+    sql = "SELECT pid, comm, ppid, uid, status, cmdline, first_seen FROM process_state "
+    args: list[Any] = []
+    if status is not None:
+        sql += "WHERE status = ? "
+        args.append(status)
+    sql += "ORDER BY last_seen DESC LIMIT ?"
+    args.append(limit)
+    with Database(db_path) as db:
+        rows = db.query(sql, args).fetchall()
+
+    processes: list[dict[str, Any]] = [
+        {
+            "pid": pid,
+            "comm": comm,
+            "ppid": ppid,
+            "uid": uid,
+            "status": status_,
+            "cmdline": cmdline,
+            "first_seen": _iso(first_seen),
+        }
+        for pid, comm, ppid, uid, status_, cmdline, first_seen in rows
+    ]
+    return {"schema_version": "1.0.0", "processes": processes}
+
+
 def handle_capture_baseline(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
     kind = str(params.get("kind", "service"))
     with Database(db_path) as db:
