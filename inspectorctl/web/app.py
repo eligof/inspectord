@@ -12,7 +12,15 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from inspectorctl.web.routes import alerts, deps, devices, events, health, services
+from inspectorctl.web.routes import (
+    alerts,
+    deps,
+    devices,
+    events,
+    health,
+    processes,
+    services,
+)
 
 
 def create_app(*, socket_path: Path) -> FastAPI:
@@ -48,6 +56,7 @@ def create_app(*, socket_path: Path) -> FastAPI:
     app.include_router(deps.router)
     app.include_router(events.router)
     app.include_router(alerts.router)
+    app.include_router(processes.router)
     app.include_router(services.router)
     app.include_router(devices.router)
 
