@@ -1,0 +1,32 @@
+{% if error %}
+<div class="error">⚠ {{ error }}</div>
+{% elif processes %}
+<table>
+  <thead>
+    <tr>
+      <th>PID</th>
+      <th>Comm</th>
+      <th>PPID</th>
+      <th>UID</th>
+      <th>Status</th>
+      <th>Cmdline</th>
+      <th>First seen</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in processes %}
+    <tr>
+      <td class="mono">{{ p.pid }}</td>
+      <td>{{ p.comm or '' }}</td>
+      <td class="mono">{{ p.ppid }}</td>
+      <td class="mono">{{ p.uid }}</td>
+      <td>{{ p.status or '' }}</td>
+      <td class="mono muted">{{ p.cmdline or '' }}</td>
+      <td class="mono muted">{{ p.first_seen or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No processes observed yet.</div>
+{% endif %}

@@ -157,3 +157,36 @@ def test_supervisor_persist_projects_service_state(tmp_path: Path) -> None:
         assert rows == [("active",)]
     finally:
         sup.stop(timeout=5.0)
+
+
+def test_supervisor_persist_projects_process_state(tmp_path: Path) -> None:
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []  # no subprocesses; we inject directly
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        ev = Event(
+            ts=datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+            event_id="proc-1",
+            kind=EventKind.event,
+            category=["process"],
+            type=["start"],
+            action="process_start",
+            severity=Severity.info,
+            module="process_collector",
+            process={"pid": 4242, "name": "bash", "command_line": "bash -i"},
+            user={"id": "1000"},
+            raw={"source": "ebpf"},
+        )
+        sup._inject_for_test(ev)
+        deadline = time.monotonic() + 2.0
+        rows: list = []
+        while time.monotonic() < deadline:
+            with Database(cfg.storage.db_path) as db:
+                rows = db.query("SELECT status FROM process_state WHERE pid=4242").fetchall()
+            if rows:
+                break
+            time.sleep(0.05)
+        assert rows == [("running",)]
+    finally:
+        sup.stop(timeout=5.0)

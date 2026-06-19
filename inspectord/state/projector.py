@@ -11,11 +11,16 @@ from inspectord.schemas.event import Event
 from inspectord.storage.db import Database
 
 
-def project(event: Event, db: Database) -> None:
+def project(event: Event, db: Database, *, boot_id: str | None = None) -> None:
     if event.module == "services_monitor":
         _project_service(event, db)
     elif event.module == "udev_monitor":
         _project_device(event, db)
+    elif event.module in ("process_collector", "process_collector_exit") and boot_id is not None:
+        # Process rows are boot-scoped (spec §14.1). Without the current boot_id
+        # we cannot form the (pid, boot_id) PK, so skip silently (boot_id is None)
+        # — mirroring the supervisor's suppress(OSError) around the boot_id read.
+        _project_process(event, db, boot_id)
 
 
 def _project_service(event: Event, db: Database) -> None:
@@ -45,6 +50,79 @@ def _project_service(event: Event, db: Database) -> None:
             raw.get("active"),
             raw.get("sub"),
             raw.get("load"),
+            event.ts,
+            event.ts,
+            event.event_id,
+        ],
+    )
+
+
+def _parse_uid(user: dict[str, object] | None) -> int | None:
+    raw_uid = (user or {}).get("id")
+    if isinstance(raw_uid, str) and raw_uid.isdigit():
+        return int(raw_uid)
+    if isinstance(raw_uid, int):
+        return raw_uid
+    return None
+
+
+def _project_process(event: Event, db: Database, boot_id: str) -> None:
+    process = event.process or {}
+    pid = process.get("pid")
+    if pid is None:
+        return
+    comm = process.get("name")
+    if event.action == "process_exit":
+        # One statement covers both the running→exited flip and the missed-exec
+        # insert (an exit with no prior start row).
+        db.execute(
+            """
+            INSERT INTO process_state
+                (pid, boot_id, comm, status, exit_code,
+                 first_seen, last_seen, last_event_id)
+            VALUES (?, ?, ?, 'exited', ?, ?, ?, ?)
+            ON CONFLICT (pid, boot_id) DO UPDATE SET
+                status        = 'exited',
+                exit_code     = excluded.exit_code,
+                last_seen     = excluded.last_seen,
+                last_event_id = excluded.last_event_id
+            """,
+            [
+                pid,
+                boot_id,
+                comm,
+                process.get("exit_code"),
+                event.ts,
+                event.ts,
+                event.event_id,
+            ],
+        )
+        return
+    # process_start is the only other action these two modules emit, so the
+    # fallthrough handles it: upsert a running row, preserving first_seen on conflict.
+    ppid = (process.get("parent") or {}).get("pid")
+    db.execute(
+        """
+        INSERT INTO process_state
+            (pid, boot_id, ppid, comm, uid, cmdline, status,
+             first_seen, last_seen, last_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+        ON CONFLICT (pid, boot_id) DO UPDATE SET
+            ppid          = excluded.ppid,
+            comm          = excluded.comm,
+            uid           = excluded.uid,
+            cmdline       = excluded.cmdline,
+            last_seen     = excluded.last_seen,
+            last_event_id = excluded.last_event_id,
+            status        = 'running'
+        """,
+        [
+            pid,
+            boot_id,
+            ppid,
+            comm,
+            _parse_uid(event.user),
+            process.get("command_line"),
             event.ts,
             event.ts,
             event.event_id,

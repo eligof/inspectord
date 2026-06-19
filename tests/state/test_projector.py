@@ -78,6 +78,137 @@ def _device_event(
     )
 
 
+def _process_event(
+    *,
+    module: str = "process_collector",
+    action: str = "process_start",
+    event_id: str,
+    pid: int | None = 1234,
+    ppid: int | None = 1,
+    name: str | None = "bash",
+    cmdline: str | None = "bash -i",
+    uid: str | None = "1000",
+    exit_code: int | None = None,
+    ts: datetime = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+) -> Event:
+    process: dict[str, object] = {}
+    if pid is not None:
+        process["pid"] = pid
+    if name is not None:
+        process["name"] = name
+    if cmdline is not None:
+        process["command_line"] = cmdline
+    if ppid is not None:
+        process["parent"] = {"pid": ppid}
+    if exit_code is not None:
+        process["exit_code"] = exit_code
+    user = {"id": uid} if uid is not None else None
+    return Event(
+        ts=ts,
+        event_id=event_id,
+        kind=EventKind.event,
+        category=["process"],
+        type=["start"] if action == "process_start" else ["end"],
+        action=action,
+        severity=Severity.info,
+        module=module,
+        process=process or None,
+        user=user,
+        raw={"source": "ebpf"},
+    )
+
+
+def test_process_start_inserts_running_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_process_event(event_id="p1"), db, boot_id="b1")
+    rows = db.query(
+        "SELECT pid, boot_id, ppid, comm, uid, cmdline, status, last_event_id "
+        "FROM process_state WHERE pid=1234 AND boot_id='b1'"
+    ).fetchall()
+    assert rows == [(1234, "b1", 1, "bash", 1000, "bash -i", "running", "p1")]
+    db.close()
+
+
+def test_process_start_no_pid_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_process_event(event_id="p1", pid=None), db, boot_id="b1")
+    assert db.query("SELECT COUNT(*) FROM process_state").fetchall()[0][0] == 0
+    db.close()
+
+
+def test_process_event_with_no_boot_id_is_skipped(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_process_event(event_id="p1"), db)  # boot_id defaults to None
+    assert db.query("SELECT COUNT(*) FROM process_state").fetchall()[0][0] == 0
+    db.close()
+
+
+def test_process_exit_flips_running_to_exited_preserves_first_seen(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    start_ts = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
+    exit_ts = datetime(2026, 6, 16, 12, 5, 0, tzinfo=UTC)
+    project(_process_event(event_id="p1", ts=start_ts), db, boot_id="b1")
+    first_seen_before = db.query(
+        "SELECT first_seen FROM process_state WHERE pid=1234 AND boot_id='b1'"
+    ).fetchall()[0][0]
+    project(
+        _process_event(
+            module="process_collector_exit",
+            action="process_exit",
+            event_id="p2",
+            exit_code=137,
+            ts=exit_ts,
+        ),
+        db,
+        boot_id="b1",
+    )
+    rows = db.query(
+        "SELECT status, exit_code, first_seen, last_seen, last_event_id "
+        "FROM process_state WHERE pid=1234 AND boot_id='b1'"
+    ).fetchall()
+    assert rows[0][0] == "exited"
+    assert rows[0][1] == 137
+    assert rows[0][2] == first_seen_before  # first_seen preserved
+    assert rows[0][3] != first_seen_before  # last_seen advanced
+    assert rows[0][4] == "p2"
+    db.close()
+
+
+def test_process_exit_without_prior_row_inserts_exited(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(
+        _process_event(
+            module="process_collector_exit",
+            action="process_exit",
+            event_id="p2",
+            exit_code=0,
+        ),
+        db,
+        boot_id="b1",
+    )
+    rows = db.query(
+        "SELECT status, exit_code, comm FROM process_state WHERE pid=1234 AND boot_id='b1'"
+    ).fetchall()
+    assert rows == [("exited", 0, "bash")]
+    db.close()
+
+
+def test_process_start_non_numeric_uid_is_null(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_process_event(event_id="p1", uid="root"), db, boot_id="b1")  # must not raise
+    rows = db.query("SELECT uid FROM process_state WHERE pid=1234 AND boot_id='b1'").fetchall()
+    assert rows == [(None,)]
+    db.close()
+
+
+def test_process_start_missing_uid_is_null(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_process_event(event_id="p1", uid=None), db, boot_id="b1")
+    rows = db.query("SELECT uid FROM process_state WHERE pid=1234 AND boot_id='b1'").fetchall()
+    assert rows == [(None,)]
+    db.close()
+
+
 def test_device_added_inserts_row(tmp_path: Path) -> None:
     db = _db(tmp_path)
     project(_device_event("device_added", event_id="d1"), db)
