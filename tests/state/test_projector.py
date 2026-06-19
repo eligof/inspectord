@@ -40,6 +40,131 @@ def _service_event(
     )
 
 
+def _device_event(
+    action: str,
+    *,
+    event_id: str,
+    vendor: str = "1d6b",
+    product: str = "0002",
+    serial: str = "0000:00:14.0",
+    name: str = "usb1",
+    subsystem: str = "usb",
+    devnode: str = "/dev/bus/usb/001/001",
+    devpath: str = "/devices/pci0000:00/usb1",
+    ts: datetime = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+) -> Event:
+    return Event(
+        ts=ts,
+        event_id=event_id,
+        kind=EventKind.event,
+        category=["host"],
+        type=["change"],
+        action=action,
+        severity=Severity.info,
+        module="udev_monitor",
+        device={
+            "name": name,
+            "kind": subsystem,
+            "vendor": vendor,
+            "product": product,
+            "serial": serial,
+        },
+        raw={
+            "source": "udevadm",
+            "SUBSYSTEM": subsystem,
+            "DEVNAME": devnode,
+            "DEVPATH": devpath,
+        },
+    )
+
+
+def test_device_added_inserts_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_device_event("device_added", event_id="d1"), db)
+    rows = db.query(
+        "SELECT vendor, product, serial, subsystem, devnode, status, last_event_id "
+        "FROM device_state WHERE dev_key='1d6b:0002:0000:00:14.0'"
+    ).fetchall()
+    assert rows == [
+        ("1d6b", "0002", "0000:00:14.0", "usb", "/dev/bus/usb/001/001", "present", "d1")
+    ]
+    db.close()
+
+
+def test_device_changed_updates_attrs_preserves_first_seen(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    added_ts = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
+    changed_ts = datetime(2026, 6, 16, 13, 30, 0, tzinfo=UTC)
+    project(_device_event("device_added", event_id="d1", ts=added_ts), db)
+    first_seen_before = db.query(
+        "SELECT first_seen FROM device_state WHERE dev_key='1d6b:0002:0000:00:14.0'"
+    ).fetchall()[0][0]
+    project(
+        _device_event(
+            "device_changed", event_id="d2", devnode="/dev/bus/usb/001/002", ts=changed_ts
+        ),
+        db,
+    )
+    rows = db.query(
+        "SELECT devnode, status, first_seen, last_seen, last_event_id FROM device_state "
+        "WHERE dev_key='1d6b:0002:0000:00:14.0'"
+    ).fetchall()
+    assert rows[0][0] == "/dev/bus/usb/001/002"
+    assert rows[0][1] == "present"
+    assert rows[0][2] == first_seen_before  # first_seen preserved
+    assert rows[0][3] != first_seen_before  # last_seen advanced
+    assert rows[0][4] == "d2"
+    db.close()
+
+
+def test_device_removed_keeps_row_with_removed_status(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_device_event("device_added", event_id="d1"), db)
+    project(_device_event("device_removed", event_id="d2"), db)
+    rows = db.query(
+        "SELECT status, last_event_id FROM device_state WHERE dev_key='1d6b:0002:0000:00:14.0'"
+    ).fetchall()
+    assert rows == [("removed", "d2")]  # row kept, NOT deleted
+    db.close()
+
+
+def test_device_empty_ids_fall_back_to_devpath_key(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(
+        _device_event(
+            "device_added",
+            event_id="d1",
+            vendor="",
+            product="",
+            serial="",
+            devpath="/devices/virtual/tty/tty0",
+        ),
+        db,
+    )
+    rows = db.query("SELECT dev_key, status FROM device_state").fetchall()
+    assert rows == [("/devices/virtual/tty/tty0", "present")]
+    db.close()
+
+
+def test_device_with_no_usable_key_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    ev = Event(
+        ts=datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+        event_id="d9",
+        kind=EventKind.event,
+        category=["host"],
+        type=["change"],
+        action="device_added",
+        severity=Severity.info,
+        module="udev_monitor",
+        device={"name": "", "kind": "", "vendor": "", "product": "", "serial": ""},
+        raw={"source": "udevadm"},
+    )
+    project(ev, db)  # must not raise
+    assert db.query("SELECT COUNT(*) FROM device_state").fetchall()[0][0] == 0
+    db.close()
+
+
 def test_service_added_inserts_row(tmp_path: Path) -> None:
     db = _db(tmp_path)
     project(_service_event("service_added", "sshd.service", "active", event_id="e1"), db)

@@ -76,6 +76,38 @@ def handle_list_services(*, params: dict[str, Any], db_path: Path) -> dict[str, 
     return {"schema_version": "1.0.0", "services": services}
 
 
+def handle_list_devices(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    limit = int(params.get("limit", 200))
+    status = params.get("status")
+    sql = (
+        "SELECT dev_key, vendor, product, serial, subsystem, devnode, status, first_seen "
+        "FROM device_state "
+    )
+    args: list[Any] = []
+    if status is not None:
+        sql += "WHERE status = ? "
+        args.append(status)
+    sql += "ORDER BY dev_key LIMIT ?"
+    args.append(limit)
+    with Database(db_path) as db:
+        rows = db.query(sql, args).fetchall()
+
+    devices: list[dict[str, Any]] = [
+        {
+            "dev_key": dev_key,
+            "vendor": vendor,
+            "product": product,
+            "serial": serial,
+            "subsystem": subsystem,
+            "devnode": devnode,
+            "status": status_,
+            "first_seen": _iso(first_seen),
+        }
+        for dev_key, vendor, product, serial, subsystem, devnode, status_, first_seen in rows
+    ]
+    return {"schema_version": "1.0.0", "devices": devices}
+
+
 def handle_capture_baseline(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
     kind = str(params.get("kind", "service"))
     with Database(db_path) as db:
