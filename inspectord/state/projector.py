@@ -21,6 +21,95 @@ def project(event: Event, db: Database, *, boot_id: str | None = None) -> None:
         # we cannot form the (pid, boot_id) PK, so skip silently (boot_id is None)
         # — mirroring the supervisor's suppress(OSError) around the boot_id read.
         _project_process(event, db, boot_id)
+    elif event.module in ("outbound_connection_tracker", "outbound_connection_tracker6"):
+        _project_connection(event, db)
+    elif event.module == "listening_socket_snapshotter":
+        _project_listener(event, db)
+
+
+def _family(addr: str) -> str:
+    # The network workers emit canonical (ipaddress-normalized) address strings, so
+    # a colon reliably distinguishes IPv6 from dotted-quad IPv4.
+    return "ipv6" if ":" in addr else "ipv4"
+
+
+def _project_connection(event: Event, db: Database) -> None:
+    process = event.process or {}
+    source = event.source or {}
+    destination = event.destination or {}
+    network = event.network or {}
+    pid = process.get("pid")
+    daddr = destination.get("ip")
+    if pid is None or daddr is None:
+        return
+    proto = network.get("transport")
+    dport = destination.get("port")
+    conn_key = f"{pid}:{daddr}:{dport}:{proto}"
+    family = _family(daddr)
+    db.execute(
+        """
+        INSERT INTO connection_state
+            (conn_key, pid, comm, saddr, sport, daddr, dport, proto, family,
+             status, first_seen, last_seen, last_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'observed', ?, ?, ?)
+        ON CONFLICT (conn_key) DO UPDATE SET
+            comm          = excluded.comm,
+            saddr         = excluded.saddr,
+            sport         = excluded.sport,
+            daddr         = excluded.daddr,
+            dport         = excluded.dport,
+            proto         = excluded.proto,
+            family        = excluded.family,
+            last_seen     = excluded.last_seen,
+            last_event_id = excluded.last_event_id
+        """,
+        [
+            conn_key,
+            pid,
+            process.get("name"),
+            source.get("ip"),
+            source.get("port"),
+            daddr,
+            dport,
+            proto,
+            family,
+            event.ts,
+            event.ts,
+            event.event_id,
+        ],
+    )
+
+
+def _project_listener(event: Event, db: Database) -> None:
+    source = event.source or {}
+    network = event.network or {}
+    addr = source.get("ip")
+    port = source.get("port")
+    proto = network.get("transport")
+    if addr is None or port is None or proto is None:
+        return
+    if event.action == "listener_removed":
+        # The snapshotter emits per-listener deltas, so a removal deletes the
+        # one (addr, port, proto) row (mirroring service_removed's short-circuit).
+        db.execute(
+            "DELETE FROM listener_state WHERE addr=? AND port=? AND proto=?",
+            [addr, port, proto],
+        )
+        return
+    family = _family(addr)
+    snapshot_gen = int(event.ts.timestamp())
+    db.execute(
+        """
+        INSERT INTO listener_state
+            (addr, port, proto, family, first_seen, last_seen, snapshot_gen)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (addr, port, proto) DO UPDATE SET
+            family       = excluded.family,
+            last_seen    = excluded.last_seen,
+            snapshot_gen = excluded.snapshot_gen
+        """,
+        [addr, port, proto, family, event.ts, event.ts, snapshot_gen],
+    )
 
 
 def _project_service(event: Event, db: Database) -> None:
