@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from inspectord.config import dev_config
 from inspectord.parsers.base import build_event
+from inspectord.schemas.event import Event, EventKind, Severity
 from inspectord.storage.db import Database
 from inspectord.supervisor import Supervisor
 
@@ -119,5 +121,39 @@ def test_supervisor_fires_rule_and_notifies_listener(tmp_path: Path) -> None:
         while time.monotonic() < deadline and not alerts_seen:
             time.sleep(0.05)
         assert alerts_seen, "rule did not fire after synthetic event"
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def test_supervisor_persist_projects_service_state(tmp_path: Path) -> None:
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []  # no subprocesses; we inject directly
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        ev = Event(
+            ts=datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+            event_id="svc-1",
+            kind=EventKind.event,
+            category=["configuration"],
+            type=["change"],
+            action="service_added",
+            severity=Severity.info,
+            module="services_monitor",
+            service={"name": "cron.service", "state": "active"},
+            raw={"source": "systemctl", "active": "active", "sub": "running", "load": "loaded"},
+        )
+        sup._inject_for_test(ev)
+        deadline = time.monotonic() + 2.0
+        rows: list = []
+        while time.monotonic() < deadline:
+            with Database(cfg.storage.db_path) as db:
+                rows = db.query(
+                    "SELECT active_state FROM service_state WHERE unit='cron.service'"
+                ).fetchall()
+            if rows:
+                break
+            time.sleep(0.05)
+        assert rows == [("active",)]
     finally:
         sup.stop(timeout=5.0)

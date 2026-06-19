@@ -55,6 +55,9 @@ td.mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
 .status-acknowledged { background: rgba(121,192,255,0.15); color: var(--medium); }
 .status-resolved { background: rgba(46,160,67,0.15); color: var(--ok); }
 .status-suppressed { background: rgba(139,148,158,0.15); color: var(--muted); }
+.status-removed { background: rgba(255,107,107,0.15); color: var(--critical); }
+.status-re-enabled { background: rgba(255,166,87,0.15); color: var(--high); }
+.status-unchanged { background: rgba(139,148,158,0.15); color: var(--muted); }
 .muted { color: var(--muted); }
 .bad { color: var(--bad); }
 .ok { color: var(--ok); }

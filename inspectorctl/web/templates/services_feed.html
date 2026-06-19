@@ -1,0 +1,31 @@
+{% from "_macros.html" import status_badge %}
+{% if error %}
+<div class="error">⚠ {{ error }}</div>
+{% elif services %}
+<table>
+  <thead>
+    <tr>
+      <th>Unit</th>
+      <th>Active</th>
+      <th>Sub</th>
+      <th>Load</th>
+      <th>Diff</th>
+      <th>Last seen</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in services %}
+    <tr>
+      <td class="mono">{{ s.unit }}</td>
+      <td>{{ s.active_state or '' }}</td>
+      <td class="mono muted">{{ s.sub_state or '' }}</td>
+      <td class="mono muted">{{ s.load_state or '' }}</td>
+      <td>{{ status_badge(s.diff_status) if s.diff_status else '' }}</td>
+      <td class="mono muted">{{ s.last_seen or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No services observed yet. Capture a baseline once services appear.</div>
+{% endif %}
