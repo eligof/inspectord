@@ -25,6 +25,8 @@ def project(event: Event, db: Database, *, boot_id: str | None = None) -> None:
         _project_connection(event, db)
     elif event.module == "listening_socket_snapshotter":
         _project_listener(event, db)
+    elif event.module == "fim_watcher":
+        _project_file(event, db)
 
 
 def _family(addr: str) -> str:
@@ -143,6 +145,28 @@ def _project_service(event: Event, db: Database) -> None:
             event.ts,
             event.event_id,
         ],
+    )
+
+
+def _project_file(event: Event, db: Database) -> None:
+    path = (event.file or {}).get("path")
+    if path is None:
+        return
+    # Recent-changes log ("what changed"), not "what exists now": a file_deleted
+    # is upserted with change_type='deleted' and the row is KEPT — there is no
+    # DELETE branch here (contrast _project_listener).
+    change_type = event.action.removeprefix("file_")
+    db.execute(
+        """
+        INSERT INTO file_state
+            (path, change_type, first_seen, last_seen, last_event_id)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (path) DO UPDATE SET
+            change_type   = excluded.change_type,
+            last_seen     = excluded.last_seen,
+            last_event_id = excluded.last_event_id
+        """,
+        [path, change_type, event.ts, event.ts, event.event_id],
     )
 
 

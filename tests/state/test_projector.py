@@ -196,6 +196,85 @@ def _listener_event(
     )
 
 
+def _file_event(
+    action: str,
+    path: str | None,
+    *,
+    event_id: str,
+    ts: datetime = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+) -> Event:
+    return Event(
+        ts=ts,
+        event_id=event_id,
+        kind=EventKind.event,
+        category=["file"],
+        type=["change"],
+        action=action,
+        severity=Severity.info,
+        module="fim_watcher",
+        file={"path": path} if path is not None else None,
+        raw={"source": "inotify"},
+    )
+
+
+def test_file_created_inserts_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_file_event("file_created", "/etc/passwd", event_id="f1"), db)
+    rows = db.query(
+        "SELECT path, change_type, last_event_id FROM file_state WHERE path='/etc/passwd'"
+    ).fetchall()
+    assert rows == [("/etc/passwd", "created", "f1")]
+    db.close()
+
+
+def test_file_modified_updates_preserves_first_seen(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    created_ts = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
+    modified_ts = datetime(2026, 6, 16, 13, 30, 0, tzinfo=UTC)
+    project(_file_event("file_created", "/etc/passwd", event_id="f1", ts=created_ts), db)
+    first_seen_before = db.query(
+        "SELECT first_seen FROM file_state WHERE path='/etc/passwd'"
+    ).fetchall()[0][0]
+    project(_file_event("file_modified", "/etc/passwd", event_id="f2", ts=modified_ts), db)
+    rows = db.query(
+        "SELECT change_type, first_seen, last_seen, last_event_id FROM file_state "
+        "WHERE path='/etc/passwd'"
+    ).fetchall()
+    assert rows[0][0] == "modified"
+    assert rows[0][1] == first_seen_before  # first_seen preserved
+    assert rows[0][2] != first_seen_before  # last_seen advanced
+    assert rows[0][3] == "f2"
+    db.close()
+
+
+def test_file_deleted_upserts_deleted_and_keeps_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_file_event("file_created", "/tmp/scratch", event_id="f1"), db)
+    project(_file_event("file_deleted", "/tmp/scratch", event_id="f2"), db)
+    rows = db.query(
+        "SELECT change_type, last_event_id FROM file_state WHERE path='/tmp/scratch'"
+    ).fetchall()
+    assert rows == [("deleted", "f2")]  # row KEPT with change_type='deleted', NOT removed
+    db.close()
+
+
+def test_file_attributes_changed_strips_only_file_prefix(tmp_path: Path) -> None:
+    # "attributes_changed" still contains an underscore, so this pins removeprefix
+    # (not a split on "_") as the change_type derivation.
+    db = _db(tmp_path)
+    project(_file_event("file_attributes_changed", "/etc/shadow", event_id="f1"), db)
+    rows = db.query("SELECT change_type FROM file_state WHERE path='/etc/shadow'").fetchall()
+    assert rows == [("attributes_changed",)]
+    db.close()
+
+
+def test_fim_event_with_no_path_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_file_event("file_created", None, event_id="f1"), db)  # must not raise
+    assert db.query("SELECT COUNT(*) FROM file_state").fetchall()[0][0] == 0
+    db.close()
+
+
 def test_outbound_connection_inserts_observed_row(tmp_path: Path) -> None:
     db = _db(tmp_path)
     project(_connection_event(event_id="c1"), db)
