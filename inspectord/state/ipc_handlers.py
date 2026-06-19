@@ -211,6 +211,27 @@ def handle_list_listeners(*, params: dict[str, Any], db_path: Path) -> dict[str,
     return {"schema_version": "1.0.0", "listeners": listeners}
 
 
+def handle_list_file_changes(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    limit = int(params.get("limit", 200))
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT path, change_type, first_seen, last_seen FROM file_state "
+            "ORDER BY last_seen DESC LIMIT ?",
+            [limit],
+        ).fetchall()
+
+    files: list[dict[str, Any]] = [
+        {
+            "path": path,
+            "change_type": change_type,
+            "first_seen": _iso(first_seen),
+            "last_seen": _iso(last_seen),
+        }
+        for path, change_type, first_seen, last_seen in rows
+    ]
+    return {"schema_version": "1.0.0", "files": files}
+
+
 def handle_capture_baseline(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
     kind = str(params.get("kind", "service"))
     with Database(db_path) as db:

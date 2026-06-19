@@ -1,0 +1,24 @@
+{% if error %}
+<div class="error">⚠ {{ error }}</div>
+{% elif files %}
+<table>
+  <thead>
+    <tr>
+      <th>Path</th>
+      <th>Change</th>
+      <th>Last seen</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for f in files %}
+    <tr>
+      <td class="mono">{{ f.path or '' }}</td>
+      <td>{{ f.change_type or '' }}</td>
+      <td class="mono muted">{{ f.last_seen or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No file changes observed yet.</div>
+{% endif %}

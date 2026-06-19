@@ -17,6 +17,7 @@ from inspectorctl.web.routes import (
     deps,
     devices,
     events,
+    file_integrity,
     health,
     network,
     processes,
@@ -61,5 +62,6 @@ def create_app(*, socket_path: Path) -> FastAPI:
     app.include_router(services.router)
     app.include_router(network.router)
     app.include_router(devices.router)
+    app.include_router(file_integrity.router)
 
     return app

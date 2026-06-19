@@ -10,6 +10,7 @@ from inspectord.state.ipc_handlers import (
     handle_capture_baseline,
     handle_list_connections,
     handle_list_devices,
+    handle_list_file_changes,
     handle_list_listeners,
     handle_list_processes,
     handle_list_services,
@@ -133,6 +134,44 @@ def _seed_listener(
             "(?, ?, ?, ?, TIMESTAMP '2026-06-16 00:00:00', TIMESTAMP '2026-06-16 00:00:00', 17)",
             [addr, port, proto, family],
         )
+
+
+def _seed_file(
+    db_path: Path,
+    path: str,
+    *,
+    change_type: str = "modified",
+    last_seen: str = "2026-06-16 00:00:00",
+) -> None:
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO file_state (path, change_type, first_seen, last_seen, last_event_id) "
+            "VALUES (?, ?, TIMESTAMP '2026-06-16 00:00:00', "
+            f"TIMESTAMP '{last_seen}', 'f1')",
+            [path, change_type],
+        )
+
+
+def test_list_file_changes_returns_rows_newest_last_seen_first(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_file(db_path, "/a", last_seen="2026-06-16 00:00:00")
+    _seed_file(db_path, "/b", last_seen="2026-06-16 02:00:00")
+    _seed_file(db_path, "/c", last_seen="2026-06-16 01:00:00")
+    result = handle_list_file_changes(params={}, db_path=db_path)
+    paths = [f["path"] for f in result["files"]]
+    assert paths == ["/b", "/c", "/a"]
+    row = result["files"][0]
+    assert row["change_type"] == "modified"
+    assert "diff_status" not in row
+
+
+def test_list_file_changes_iso_timestamps(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_file(db_path, "/a")
+    result = handle_list_file_changes(params={}, db_path=db_path)
+    row = result["files"][0]
+    assert row["first_seen"] == "2026-06-16T00:00:00"
+    assert row["last_seen"] == "2026-06-16T00:00:00"
 
 
 def test_list_connections_returns_rows_newest_last_seen_first(tmp_path: Path) -> None:
