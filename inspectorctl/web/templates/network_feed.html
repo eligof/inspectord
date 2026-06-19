@@ -1,0 +1,69 @@
+{% if error %}
+<div class="error">⚠ {{ error }}</div>
+{% else %}
+<h2>Connections</h2>
+{% if connections %}
+<table>
+  <thead>
+    <tr>
+      <th>PID</th>
+      <th>Comm</th>
+      <th>Source</th>
+      <th>Dest</th>
+      <th>Proto</th>
+      <th>Family</th>
+      <th>Active</th>
+      <th>Last seen</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in connections %}
+    <tr>
+      <td class="mono">{{ c.pid }}</td>
+      <td>{{ c.comm }}</td>
+      <td class="mono">{{ c.saddr }}:{{ c.sport }}</td>
+      <td class="mono">{{ c.daddr }}:{{ c.dport }}</td>
+      <td>{{ c.proto }}</td>
+      <td>{{ c.family }}</td>
+      <td>{{ '●' if c.active else '○' }}</td>
+      <td class="mono muted">{{ c.last_seen }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No connections observed yet.</div>
+{% endif %}
+
+<h2>Listeners</h2>
+{% if listeners %}
+<table>
+  <thead>
+    <tr>
+      <th>Address</th>
+      <th>Port</th>
+      <th>Proto</th>
+      <th>Family</th>
+      <th>PID</th>
+      <th>Comm</th>
+      <th>First seen</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for l in listeners %}
+    <tr>
+      <td class="mono">{{ l.addr }}</td>
+      <td class="mono">{{ l.port }}</td>
+      <td>{{ l.proto }}</td>
+      <td>{{ l.family }}</td>
+      <td class="mono">{{ l.pid or '' }}</td>
+      <td>{{ l.comm or '' }}</td>
+      <td class="mono muted">{{ l.first_seen }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No listeners observed yet.</div>
+{% endif %}
+{% endif %}
