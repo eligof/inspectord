@@ -1,0 +1,32 @@
+{% if error %}
+<div class="error">⚠ {{ error }}</div>
+{% elif devices %}
+<table>
+  <thead>
+    <tr>
+      <th>Vendor</th>
+      <th>Product</th>
+      <th>Serial</th>
+      <th>Subsystem</th>
+      <th>Devnode</th>
+      <th>Status</th>
+      <th>First seen</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in devices %}
+    <tr>
+      <td>{{ d.vendor or '' }}</td>
+      <td>{{ d.product or '' }}</td>
+      <td class="mono muted">{{ d.serial or '' }}</td>
+      <td class="mono muted">{{ d.subsystem or '' }}</td>
+      <td class="mono">{{ d.devnode or '' }}</td>
+      <td>{{ d.status or '' }}</td>
+      <td class="mono muted">{{ d.first_seen or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No devices observed yet.</div>
+{% endif %}

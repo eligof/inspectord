@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Devices</h1>
+
+<div id="devices-feed"
+     hx-get="/devices/feed"
+     hx-target="#devices-feed"
+     hx-trigger="load, every 5s">
+  <div class="empty">Loading…</div>
+</div>
+{% endblock %}
