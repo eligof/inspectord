@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +135,80 @@ def handle_list_processes(*, params: dict[str, Any], db_path: Path) -> dict[str,
         for pid, comm, ppid, uid, status_, cmdline, first_seen in rows
     ]
     return {"schema_version": "1.0.0", "processes": processes}
+
+
+def handle_list_connections(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    active_within_s = int(params.get("active_within_s", 300))
+    limit = int(params.get("limit", 200))
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT conn_key, pid, comm, saddr, sport, daddr, dport, proto, family, "
+            "status, first_seen, last_seen FROM connection_state "
+            "ORDER BY last_seen DESC LIMIT ?",
+            [limit],
+        ).fetchall()
+
+    # DuckDB returns naive datetimes; compare against a naive UTC "now" so we
+    # never subtract an aware datetime from a naive one (which raises).
+    now = datetime.now(tz=UTC).replace(tzinfo=None)
+    connections: list[dict[str, Any]] = []
+    for (
+        conn_key,
+        pid,
+        comm,
+        saddr,
+        sport,
+        daddr,
+        dport,
+        proto,
+        family,
+        status_,
+        first_seen,
+        last_seen,
+    ) in rows:
+        active = last_seen is not None and (now - last_seen).total_seconds() <= active_within_s
+        connections.append(
+            {
+                "conn_key": conn_key,
+                "pid": pid,
+                "comm": comm,
+                "saddr": saddr,
+                "sport": sport,
+                "daddr": daddr,
+                "dport": dport,
+                "proto": proto,
+                "family": family,
+                "status": status_,
+                "first_seen": _iso(first_seen),
+                "last_seen": _iso(last_seen),
+                "active": active,
+            }
+        )
+    return {"schema_version": "1.0.0", "connections": connections}
+
+
+def handle_list_listeners(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    limit = int(params.get("limit", 200))
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT addr, port, proto, family, pid, comm, first_seen FROM listener_state "
+            "ORDER BY addr, port LIMIT ?",
+            [limit],
+        ).fetchall()
+
+    listeners: list[dict[str, Any]] = [
+        {
+            "addr": addr,
+            "port": port,
+            "proto": proto,
+            "family": family,
+            "pid": pid,
+            "comm": comm,
+            "first_seen": _iso(first_seen),
+        }
+        for addr, port, proto, family, pid, comm, first_seen in rows
+    ]
+    return {"schema_version": "1.0.0", "listeners": listeners}
 
 
 def handle_capture_baseline(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:

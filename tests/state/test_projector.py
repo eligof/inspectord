@@ -118,6 +118,212 @@ def _process_event(
     )
 
 
+def _connection_event(
+    *,
+    module: str = "outbound_connection_tracker",
+    event_id: str,
+    pid: int | None = 4321,
+    comm: str | None = "curl",
+    saddr: str | None = "192.168.1.10",
+    sport: int | None = 54321,
+    daddr: str | None = "93.184.216.34",
+    dport: int | None = 443,
+    transport: str = "tcp",
+    ts: datetime = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+) -> Event:
+    process: dict[str, object] = {}
+    if pid is not None:
+        process["pid"] = pid
+    if comm is not None:
+        process["name"] = comm
+    source: dict[str, object] = {}
+    if saddr is not None:
+        source["ip"] = saddr
+    if sport is not None:
+        source["port"] = sport
+    destination: dict[str, object] = {}
+    if daddr is not None:
+        destination["ip"] = daddr
+    if dport is not None:
+        destination["port"] = dport
+    return Event(
+        ts=ts,
+        event_id=event_id,
+        kind=EventKind.event,
+        category=["network"],
+        type=["connection", "start"],
+        action="outbound_connection",
+        severity=Severity.info,
+        module=module,
+        process=process or None,
+        source=source or None,
+        destination=destination or None,
+        network={"transport": transport, "direction": "egress"},
+        raw={"source": "ebpf:inet_sock_set_state"},
+    )
+
+
+def _listener_event(
+    action: str,
+    *,
+    event_id: str,
+    addr: str | None = "0.0.0.0",
+    port: int | None = 22,
+    transport: str | None = "tcp",
+    ts: datetime = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+) -> Event:
+    source: dict[str, object] = {}
+    if addr is not None:
+        source["ip"] = addr
+    if port is not None:
+        source["port"] = port
+    network: dict[str, object] = {"direction": "ingress"}
+    if transport is not None:
+        network["transport"] = transport
+    return Event(
+        ts=ts,
+        event_id=event_id,
+        kind=EventKind.event,
+        category=["network"],
+        type=["start"] if action == "listener_added" else ["end"],
+        action=action,
+        severity=Severity.info,
+        module="listening_socket_snapshotter",
+        source=source or None,
+        network=network,
+        labels=["listener"],
+        raw={"source": "/proc/net/tcp"},
+    )
+
+
+def test_outbound_connection_inserts_observed_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_connection_event(event_id="c1"), db)
+    rows = db.query(
+        "SELECT conn_key, pid, comm, saddr, sport, daddr, dport, proto, family, "
+        "status, last_event_id FROM connection_state"
+    ).fetchall()
+    assert rows == [
+        (
+            "4321:93.184.216.34:443:tcp",
+            4321,
+            "curl",
+            "192.168.1.10",
+            54321,
+            "93.184.216.34",
+            443,
+            "tcp",
+            "ipv4",
+            "observed",
+            "c1",
+        )
+    ]
+    db.close()
+
+
+def test_outbound_connection_v6_daddr_yields_ipv6_family(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_connection_event(event_id="c1", daddr="2606:2800:220:1:248:1893:25c8:1946"), db)
+    rows = db.query("SELECT family FROM connection_state").fetchall()
+    assert rows == [("ipv6",)]
+    db.close()
+
+
+def test_outbound_connection_tracker6_module_routes_through_same_branch(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(
+        _connection_event(
+            module="outbound_connection_tracker6",
+            event_id="c1",
+            daddr="2606:2800:220:1:248:1893:25c8:1946",
+        ),
+        db,
+    )
+    rows = db.query("SELECT family, status FROM connection_state").fetchall()
+    assert rows == [("ipv6", "observed")]
+    db.close()
+
+
+def test_outbound_connection_reobserve_preserves_first_seen(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    first_ts = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
+    later_ts = datetime(2026, 6, 16, 12, 5, 0, tzinfo=UTC)
+    project(_connection_event(event_id="c1", ts=first_ts), db)
+    first_seen_before = db.query("SELECT first_seen FROM connection_state").fetchall()[0][0]
+    project(_connection_event(event_id="c2", ts=later_ts), db)
+    rows = db.query("SELECT first_seen, last_seen, last_event_id FROM connection_state").fetchall()
+    assert rows[0][0] == first_seen_before  # first_seen preserved
+    assert rows[0][1] != first_seen_before  # last_seen advanced
+    assert rows[0][2] == "c2"
+    db.close()
+
+
+def test_outbound_connection_missing_pid_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_connection_event(event_id="c1", pid=None), db)
+    assert db.query("SELECT COUNT(*) FROM connection_state").fetchall()[0][0] == 0
+    db.close()
+
+
+def test_outbound_connection_missing_daddr_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_connection_event(event_id="c1", daddr=None), db)
+    assert db.query("SELECT COUNT(*) FROM connection_state").fetchall()[0][0] == 0
+    db.close()
+
+
+def test_listener_added_inserts_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_listener_event("listener_added", event_id="l1"), db)
+    rows = db.query(
+        "SELECT addr, port, proto, family, pid, comm, snapshot_gen FROM listener_state"
+    ).fetchall()
+    assert rows[0][0] == "0.0.0.0"
+    assert rows[0][1] == 22
+    assert rows[0][2] == "tcp"
+    assert rows[0][3] == "ipv4"
+    assert rows[0][4] is None  # pid stays NULL
+    assert rows[0][5] is None  # comm stays NULL
+    assert rows[0][6] is not None  # snapshot_gen populated
+    db.close()
+
+
+def test_listener_added_v6_addr_yields_ipv6_family(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_listener_event("listener_added", event_id="l1", addr="::"), db)
+    rows = db.query("SELECT family FROM listener_state").fetchall()
+    assert rows == [("ipv6",)]
+    db.close()
+
+
+def test_listener_removed_deletes_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_listener_event("listener_added", event_id="l1"), db)
+    project(_listener_event("listener_removed", event_id="l2"), db)
+    assert db.query("SELECT COUNT(*) FROM listener_state").fetchall()[0][0] == 0
+    db.close()
+
+
+def test_listener_readd_preserves_first_seen(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    first_ts = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
+    later_ts = datetime(2026, 6, 16, 12, 5, 0, tzinfo=UTC)
+    project(_listener_event("listener_added", event_id="l1", ts=first_ts), db)
+    first_seen_before = db.query("SELECT first_seen FROM listener_state").fetchall()[0][0]
+    project(_listener_event("listener_added", event_id="l2", ts=later_ts), db)
+    rows = db.query("SELECT first_seen, last_seen FROM listener_state").fetchall()
+    assert rows[0][0] == first_seen_before  # first_seen preserved
+    assert rows[0][1] != first_seen_before  # last_seen advanced
+    db.close()
+
+
+def test_listener_missing_proto_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_listener_event("listener_added", event_id="l1", transport=None), db)
+    assert db.query("SELECT COUNT(*) FROM listener_state").fetchall()[0][0] == 0
+    db.close()
+
+
 def test_process_start_inserts_running_row(tmp_path: Path) -> None:
     db = _db(tmp_path)
     project(_process_event(event_id="p1"), db, boot_id="b1")

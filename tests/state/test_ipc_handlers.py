@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from inspectord.state.baseline import capture_baseline
 from inspectord.state.ipc_handlers import (
     handle_capture_baseline,
+    handle_list_connections,
     handle_list_devices,
+    handle_list_listeners,
     handle_list_processes,
     handle_list_services,
 )
@@ -67,6 +70,132 @@ def _seed_process(
             f"TIMESTAMP '{last_seen}', 'p1')",
             [pid, boot_id, ppid, comm, uid, cmdline, status],
         )
+
+
+def _seed_connection(
+    db_path: Path,
+    conn_key: str,
+    *,
+    pid: int = 4321,
+    comm: str = "curl",
+    saddr: str = "192.168.1.10",
+    sport: int = 54321,
+    daddr: str = "93.184.216.34",
+    dport: int = 443,
+    proto: str = "tcp",
+    family: str = "ipv4",
+    status: str = "observed",
+    last_seen: str | None = "2026-06-16 00:00:00",
+    last_seen_dt: datetime | None = None,
+) -> None:
+    with Database(db_path) as db:
+        if last_seen_dt is not None:
+            db.execute(
+                "INSERT INTO connection_state (conn_key, pid, comm, saddr, sport, daddr, dport, "
+                "proto, family, status, first_seen, last_seen, last_event_id) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TIMESTAMP '2026-06-16 00:00:00', ?, 'c1')",
+                [
+                    conn_key,
+                    pid,
+                    comm,
+                    saddr,
+                    sport,
+                    daddr,
+                    dport,
+                    proto,
+                    family,
+                    status,
+                    last_seen_dt,
+                ],
+            )
+        else:
+            db.execute(
+                "INSERT INTO connection_state (conn_key, pid, comm, saddr, sport, daddr, dport, "
+                "proto, family, status, first_seen, last_seen, last_event_id) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TIMESTAMP '2026-06-16 00:00:00', "
+                f"TIMESTAMP '{last_seen}', 'c1')",
+                [conn_key, pid, comm, saddr, sport, daddr, dport, proto, family, status],
+            )
+
+
+def _seed_listener(
+    db_path: Path,
+    addr: str,
+    port: int,
+    *,
+    proto: str = "tcp",
+    family: str = "ipv4",
+) -> None:
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO listener_state (addr, port, proto, family, first_seen, last_seen, "
+            "snapshot_gen) VALUES "
+            "(?, ?, ?, ?, TIMESTAMP '2026-06-16 00:00:00', TIMESTAMP '2026-06-16 00:00:00', 17)",
+            [addr, port, proto, family],
+        )
+
+
+def test_list_connections_returns_rows_newest_last_seen_first(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_connection(db_path, "1:a:1:tcp", last_seen="2026-06-16 00:00:00")
+    _seed_connection(db_path, "2:b:2:tcp", last_seen="2026-06-16 02:00:00")
+    _seed_connection(db_path, "3:c:3:tcp", last_seen="2026-06-16 01:00:00")
+    result = handle_list_connections(params={}, db_path=db_path)
+    keys = [c["conn_key"] for c in result["connections"]]
+    assert keys == ["2:b:2:tcp", "3:c:3:tcp", "1:a:1:tcp"]
+    row = result["connections"][0]
+    assert row["pid"] == 4321
+    assert row["comm"] == "curl"
+    assert row["saddr"] == "192.168.1.10"
+    assert row["sport"] == 54321
+    assert row["daddr"] == "93.184.216.34"
+    assert row["dport"] == 443
+    assert row["proto"] == "tcp"
+    assert row["family"] == "ipv4"
+    assert row["status"] == "observed"
+    assert "diff_status" not in row
+
+
+def test_list_connections_iso_timestamps(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_connection(db_path, "1:a:1:tcp")
+    result = handle_list_connections(params={}, db_path=db_path)
+    row = result["connections"][0]
+    assert row["first_seen"] == "2026-06-16T00:00:00"
+    assert row["last_seen"] == "2026-06-16T00:00:00"
+
+
+def test_list_connections_active_flag(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    now = datetime.now(tz=UTC).replace(tzinfo=None)
+    _seed_connection(db_path, "fresh:a:1:tcp", last_seen_dt=now)
+    _seed_connection(db_path, "stale:b:2:tcp", last_seen="2020-01-01 00:00:00")
+    result = handle_list_connections(params={}, db_path=db_path)
+    by_key = {c["conn_key"]: c["active"] for c in result["connections"]}
+    assert by_key["fresh:a:1:tcp"] is True
+    assert by_key["stale:b:2:tcp"] is False
+
+
+def test_list_listeners_returns_rows_ordered_by_addr_port(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_listener(db_path, "0.0.0.0", 443)
+    _seed_listener(db_path, "0.0.0.0", 22)
+    _seed_listener(db_path, "127.0.0.1", 53, proto="udp")
+    result = handle_list_listeners(params={}, db_path=db_path)
+    pairs = [(item["addr"], item["port"]) for item in result["listeners"]]
+    assert pairs == [("0.0.0.0", 22), ("0.0.0.0", 443), ("127.0.0.1", 53)]
+    row = result["listeners"][0]
+    assert row["proto"] == "tcp"
+    assert row["family"] == "ipv4"
+    assert row["pid"] is None
+    assert row["comm"] is None
+
+
+def test_list_listeners_first_seen_is_iso_string(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_listener(db_path, "0.0.0.0", 22)
+    result = handle_list_listeners(params={}, db_path=db_path)
+    assert result["listeners"][0]["first_seen"] == "2026-06-16T00:00:00"
 
 
 def test_list_processes_returns_rows_newest_last_seen_first(tmp_path: Path) -> None:
