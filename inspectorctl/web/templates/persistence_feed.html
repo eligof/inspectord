@@ -1,0 +1,31 @@
+{% from "_macros.html" import status_badge %}
+{% if error %}
+<div class="error">⚠ {{ error }}</div>
+{% elif persistence %}
+<table>
+  <thead>
+    <tr>
+      <th>Kind</th>
+      <th>Name</th>
+      <th>Source</th>
+      <th>Details</th>
+      <th>Diff</th>
+      <th>Last seen</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in persistence %}
+    <tr>
+      <td>{{ p.kind or '' }}</td>
+      <td>{{ p.name }}</td>
+      <td class="mono">{{ p.source_path }}</td>
+      <td class="mono muted">{{ p.details }}</td>
+      <td>{{ status_badge(p.diff_status) if p.diff_status else '' }}</td>
+      <td class="mono muted">{{ p.last_seen or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No persistence entries observed yet. Capture a baseline once entries appear.</div>
+{% endif %}
