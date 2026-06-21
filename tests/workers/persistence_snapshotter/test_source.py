@@ -1,0 +1,469 @@
+"""Tests for the persistence_snapshotter pure snapshot source.
+
+All tests use ``tmp_path`` fixtures via an overridable ``Roots`` so they never
+touch the real host.  The source must never raise on missing/unreadable input.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import struct
+from pathlib import Path
+
+from inspectord.workers.persistence_snapshotter.source import (
+    AUTHKEY,
+    AUTOSTART,
+    CRON,
+    TIMER,
+    Roots,
+    _enum_authorized_keys,
+    _enum_autostart,
+    _enum_cron,
+    _enum_timers,
+    _parse_cron_line,
+    default_roots,
+    snapshot,
+)
+
+
+def _valid_ed25519_line(comment: str = "user@host", options: str = "") -> str:
+    """Build an authorized_keys line with a deterministically valid ed25519 blob."""
+    blob = (
+        struct.pack(">I", len(b"ssh-ed25519"))
+        + b"ssh-ed25519"
+        + struct.pack(">I", 32)
+        + (b"\x00" * 32)
+    )
+    b64 = base64.b64encode(blob).decode()
+    prefix = f"{options} " if options else ""
+    return f"{prefix}ssh-ed25519 {b64} {comment}".strip()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _empty_roots(tmp_path: Path) -> Roots:
+    """A Roots pointing entirely at non-existent paths under tmp_path."""
+    missing = tmp_path / "nope"
+    return Roots(
+        etc_crontab=missing / "crontab",
+        cron_d_dir=missing / "cron.d",
+        run_parts_dirs=[missing / "cron.daily"],
+        user_crontab=missing / "spool",
+        timer_wants=[("system", missing / "timers.target.wants")],
+        autostart_dirs=[missing / "autostart"],
+        authorized_keys=missing / "authorized_keys",
+    )
+
+
+def _cron_key(path: Path, schedule: str, command: str) -> str:
+    # Deliberately re-derives the key format (mirrors source._cron_key) rather than
+    # importing it, so a silent change to the load-bearing key format fails this test.
+    digest = hashlib.sha256(f"{schedule} {command}".encode()).hexdigest()[:12]
+    return f"persist:cron:{path}:{digest}"
+
+
+# ---------------------------------------------------------------------------
+# _parse_cron_line
+# ---------------------------------------------------------------------------
+
+
+def test_parse_cron_line_with_user_field() -> None:
+    assert _parse_cron_line("0 3 * * * root /usr/bin/backup", has_user_field=True) == (
+        "0 3 * * *",
+        "/usr/bin/backup",
+    )
+
+
+def test_parse_cron_line_without_user_field() -> None:
+    assert _parse_cron_line("*/5 * * * * /home/u/run.sh", has_user_field=False) == (
+        "*/5 * * * *",
+        "/home/u/run.sh",
+    )
+
+
+def test_parse_cron_line_shortcut_with_user() -> None:
+    assert _parse_cron_line("@daily root /usr/bin/backup", has_user_field=True) == (
+        "@daily",
+        "/usr/bin/backup",
+    )
+
+
+def test_parse_cron_line_shortcut_without_user() -> None:
+    assert _parse_cron_line("@reboot /home/u/boot.sh", has_user_field=False) == (
+        "@reboot",
+        "/home/u/boot.sh",
+    )
+
+
+def test_parse_cron_line_skips_blank_comment_env() -> None:
+    assert _parse_cron_line("", has_user_field=True) is None
+    assert _parse_cron_line("   ", has_user_field=True) is None
+    assert _parse_cron_line("# a comment", has_user_field=True) is None
+    assert _parse_cron_line("PATH=/usr/bin:/bin", has_user_field=True) is None
+    assert _parse_cron_line("FOO=bar", has_user_field=False) is None
+
+
+def test_parse_cron_line_too_few_fields() -> None:
+    assert _parse_cron_line("0 3 * *", has_user_field=True) is None
+
+
+# ---------------------------------------------------------------------------
+# _enum_cron — system crontab
+# ---------------------------------------------------------------------------
+
+
+def test_enum_cron_system_crontab(tmp_path: Path) -> None:
+    crontab = tmp_path / "crontab"
+    crontab.write_text(
+        "# /etc/crontab\n"
+        "PATH=/usr/bin\n"
+        "\n"
+        "@daily root /usr/bin/backup\n"
+        "0 3 * * * root /usr/bin/backup\n"
+    )
+    roots = _empty_roots(tmp_path)
+    roots.etc_crontab = crontab
+    entries, readable = _enum_cron(roots)
+    assert readable is True
+
+    k1 = _cron_key(crontab, "@daily", "/usr/bin/backup")
+    k2 = _cron_key(crontab, "0 3 * * *", "/usr/bin/backup")
+    assert set(entries) == {k1, k2}
+    assert entries[k1]["kind"] == CRON
+    assert entries[k1]["name"] == "/usr/bin/backup"
+    assert entries[k1]["details"] == "@daily root /usr/bin/backup"
+    assert entries[k1]["source_path"] == str(crontab)
+
+
+def test_enum_cron_d_dir(tmp_path: Path) -> None:
+    cron_d = tmp_path / "cron.d"
+    cron_d.mkdir()
+    job = cron_d / "job"
+    job.write_text("*/10 * * * * root /usr/bin/poll\n")
+    roots = _empty_roots(tmp_path)
+    roots.cron_d_dir = cron_d
+    entries, readable = _enum_cron(roots)
+    assert readable is True
+    k = _cron_key(job, "*/10 * * * *", "/usr/bin/poll")
+    assert k in entries
+    assert entries[k]["name"] == "/usr/bin/poll"
+
+
+def test_enum_cron_user_crontab_no_user_field(tmp_path: Path) -> None:
+    spool = tmp_path / "spool_user"
+    spool.write_text("*/5 * * * * /home/u/run.sh\n")
+    roots = _empty_roots(tmp_path)
+    roots.user_crontab = spool
+    entries, readable = _enum_cron(roots)
+    assert readable is True
+    k = _cron_key(spool, "*/5 * * * *", "/home/u/run.sh")
+    assert k in entries
+    assert entries[k]["name"] == "/home/u/run.sh"
+
+
+def test_enum_cron_run_parts(tmp_path: Path) -> None:
+    daily = tmp_path / "cron.daily"
+    daily.mkdir()
+    script = daily / "logrotate"
+    script.write_text("#!/bin/sh\necho hi\n")
+    roots = _empty_roots(tmp_path)
+    roots.run_parts_dirs = [daily]
+    entries, readable = _enum_cron(roots)
+    assert readable is True
+    k = f"persist:cron:{script}"
+    assert k in entries
+    assert entries[k]["name"] == "logrotate"
+    assert entries[k]["details"] == f"run-parts {daily}"
+    assert entries[k]["source_path"] == str(script)
+
+
+def test_enum_cron_malformed_line_never_raises(tmp_path: Path) -> None:
+    crontab = tmp_path / "crontab"
+    crontab.write_text("this is not valid\n0 3 * * * root /ok\n")
+    roots = _empty_roots(tmp_path)
+    roots.etc_crontab = crontab
+    entries, readable = _enum_cron(roots)
+    assert readable is True
+    # the valid line still parsed; the malformed one skipped, no raise
+    assert any(e["name"] == "/ok" for e in entries.values())
+
+
+def test_enum_cron_all_missing_marks_unreadable(tmp_path: Path) -> None:
+    roots = _empty_roots(tmp_path)
+    entries, readable = _enum_cron(roots)
+    assert entries == {}
+    assert readable is False
+
+
+# ---------------------------------------------------------------------------
+# _enum_timers
+# ---------------------------------------------------------------------------
+
+
+def _make_timer(wants_dir: Path, name: str, unit_text: str) -> Path:
+    """Create a unit file plus a symlink in *wants_dir*; return the symlink."""
+    unit_file = wants_dir.parent / name
+    unit_file.write_text(unit_text)
+    link = wants_dir / name
+    link.symlink_to(unit_file)
+    return link
+
+
+def test_enum_timers_enabled_via_symlink(tmp_path: Path) -> None:
+    wants = tmp_path / "timers.target.wants"
+    wants.mkdir()
+    _make_timer(wants, "foo.timer", "[Timer]\nOnCalendar=daily\n")
+    roots = _empty_roots(tmp_path)
+    roots.timer_wants = [("system", wants)]
+    entries, readable = _enum_timers(roots)
+    assert readable is True
+    k = "persist:timer:system:foo.timer"
+    assert k in entries
+    assert entries[k]["kind"] == TIMER
+    assert entries[k]["name"] == "foo.timer"
+    assert "OnCalendar=daily" in entries[k]["details"]
+
+
+def test_enum_timers_masked_skipped(tmp_path: Path) -> None:
+    wants = tmp_path / "timers.target.wants"
+    wants.mkdir()
+    link = wants / "masked.timer"
+    link.symlink_to("/dev/null")
+    roots = _empty_roots(tmp_path)
+    roots.timer_wants = [("system", wants)]
+    entries, readable = _enum_timers(roots)
+    assert readable is True
+    assert entries == {}
+
+
+def test_enum_timers_template_skipped(tmp_path: Path) -> None:
+    wants = tmp_path / "timers.target.wants"
+    wants.mkdir()
+    _make_timer(wants, "bar@.timer", "[Timer]\nOnCalendar=daily\n")
+    roots = _empty_roots(tmp_path)
+    roots.timer_wants = [("system", wants)]
+    entries, readable = _enum_timers(roots)
+    assert readable is True
+    assert entries == {}
+
+
+def test_enum_timers_scope_distinguished(tmp_path: Path) -> None:
+    sys_wants = tmp_path / "sys.target.wants"
+    usr_wants = tmp_path / "usr.target.wants"
+    sys_wants.mkdir()
+    usr_wants.mkdir()
+    _make_timer(sys_wants, "foo.timer", "[Timer]\nOnCalendar=daily\n")
+    # Distinct unit name to avoid the shared parent-dir unit-file collision.
+    usr_unit = tmp_path / "userfoo.timer"
+    usr_unit.write_text("[Timer]\nOnBootSec=10min\n")
+    (usr_wants / "foo.timer").symlink_to(usr_unit)
+    roots = _empty_roots(tmp_path)
+    roots.timer_wants = [("system", sys_wants), ("user", usr_wants)]
+    entries, readable = _enum_timers(roots)
+    assert readable is True
+    assert "persist:timer:system:foo.timer" in entries
+    assert "persist:timer:user:foo.timer" in entries
+    assert "OnBootSec=10min" in entries["persist:timer:user:foo.timer"]["details"]
+
+
+def test_enum_timers_all_missing_marks_unreadable(tmp_path: Path) -> None:
+    roots = _empty_roots(tmp_path)
+    entries, readable = _enum_timers(roots)
+    assert entries == {}
+    assert readable is False
+
+
+# ---------------------------------------------------------------------------
+# _enum_autostart
+# ---------------------------------------------------------------------------
+
+
+def test_enum_autostart_name_and_exec(tmp_path: Path) -> None:
+    ad = tmp_path / "autostart"
+    ad.mkdir()
+    df = ad / "app.desktop"
+    df.write_text("[Desktop Entry]\nName=App\nExec=/usr/bin/app --foo\n")
+    roots = _empty_roots(tmp_path)
+    roots.autostart_dirs = [ad]
+    entries, readable = _enum_autostart(roots)
+    assert readable is True
+    k = f"persist:autostart:{df}"
+    assert k in entries
+    assert entries[k]["kind"] == AUTOSTART
+    assert entries[k]["name"] == "App"
+    assert entries[k]["details"] == "/usr/bin/app --foo"
+    assert entries[k]["source_path"] == str(df)
+
+
+def test_enum_autostart_no_exec_skipped(tmp_path: Path) -> None:
+    ad = tmp_path / "autostart"
+    ad.mkdir()
+    (ad / "noexec.desktop").write_text("[Desktop Entry]\nName=NoExec\n")
+    roots = _empty_roots(tmp_path)
+    roots.autostart_dirs = [ad]
+    entries, readable = _enum_autostart(roots)
+    assert readable is True
+    assert entries == {}
+
+
+def test_enum_autostart_both_dirs_scanned(tmp_path: Path) -> None:
+    ad1 = tmp_path / "user_autostart"
+    ad2 = tmp_path / "xdg_autostart"
+    ad1.mkdir()
+    ad2.mkdir()
+    (ad1 / "a.desktop").write_text("[Desktop Entry]\nName=A\nExec=/a\n")
+    (ad2 / "b.desktop").write_text("[Desktop Entry]\nName=B\nExec=/b\n")
+    roots = _empty_roots(tmp_path)
+    roots.autostart_dirs = [ad1, ad2]
+    entries, readable = _enum_autostart(roots)
+    assert readable is True
+    assert {e["name"] for e in entries.values()} == {"A", "B"}
+
+
+def test_enum_autostart_all_missing_marks_unreadable(tmp_path: Path) -> None:
+    entries, readable = _enum_autostart(_empty_roots(tmp_path))
+    assert entries == {}
+    assert readable is False
+
+
+# ---------------------------------------------------------------------------
+# _enum_authorized_keys
+# ---------------------------------------------------------------------------
+
+
+def test_enum_authorized_keys_plain_line(tmp_path: Path) -> None:
+    ak = tmp_path / "authorized_keys"
+    ak.write_text(_valid_ed25519_line(comment="user@host") + "\n")
+    roots = _empty_roots(tmp_path)
+    roots.authorized_keys = ak
+    entries, readable = _enum_authorized_keys(roots)
+    assert readable is True
+    assert len(entries) == 1
+    attrs = next(iter(entries.values()))
+    assert attrs["kind"] == AUTHKEY
+    assert attrs["name"] == "user@host"
+    assert attrs["key"].startswith("persist:authkey:ssh-ed25519:SHA256:")
+    assert attrs["details"].startswith("ssh-ed25519 SHA256:")
+
+
+def test_enum_authorized_keys_options_prefixed(tmp_path: Path) -> None:
+    ak = tmp_path / "authorized_keys"
+    ak.write_text(_valid_ed25519_line(comment="c", options='cmd="x"') + "\n")
+    roots = _empty_roots(tmp_path)
+    roots.authorized_keys = ak
+    entries, readable = _enum_authorized_keys(roots)
+    assert readable is True
+    assert len(entries) == 1
+    attrs = next(iter(entries.values()))
+    assert attrs["name"] == "c"
+    assert ":ssh-ed25519:" in attrs["key"]
+
+
+def test_enum_authorized_keys_skips_blank_comment_garbage(tmp_path: Path) -> None:
+    ak = tmp_path / "authorized_keys"
+    ak.write_text(
+        "\n"
+        "# a comment\n"
+        "this is not a key line\n"
+        "ssh-ed25519 not-valid-base64!! bad\n" + _valid_ed25519_line(comment="good") + "\n"
+    )
+    roots = _empty_roots(tmp_path)
+    roots.authorized_keys = ak
+    entries, readable = _enum_authorized_keys(roots)
+    assert readable is True
+    assert len(entries) == 1
+    assert next(iter(entries.values()))["name"] == "good"
+
+
+def test_enum_authorized_keys_rejects_keytype_blob_mismatch(tmp_path: Path) -> None:
+    # Declared keytype is ssh-rsa but the blob's embedded length-prefixed type is
+    # ssh-ed25519 — the line must be rejected (the embedded-type validation branch).
+    blob = (
+        struct.pack(">I", len(b"ssh-ed25519"))
+        + b"ssh-ed25519"
+        + struct.pack(">I", 32)
+        + (b"\x00" * 32)
+    )
+    b64 = base64.b64encode(blob).decode()
+    ak = tmp_path / "authorized_keys"
+    ak.write_text(f"ssh-rsa {b64} mismatch\n")
+    roots = _empty_roots(tmp_path)
+    roots.authorized_keys = ak
+    entries, readable = _enum_authorized_keys(roots)
+    assert readable is True
+    assert entries == {}
+
+
+def test_enum_authorized_keys_fingerprint_prefix(tmp_path: Path) -> None:
+    ak = tmp_path / "authorized_keys"
+    ak.write_text(_valid_ed25519_line() + "\n")
+    roots = _empty_roots(tmp_path)
+    roots.authorized_keys = ak
+    entries, _ = _enum_authorized_keys(roots)
+    fp = next(iter(entries.values()))["key"].split(":", 3)[3]
+    assert fp.startswith("SHA256:")
+
+
+def test_enum_authorized_keys_missing_marks_unreadable(tmp_path: Path) -> None:
+    entries, readable = _enum_authorized_keys(_empty_roots(tmp_path))
+    assert entries == {}
+    assert readable is False
+
+
+# ---------------------------------------------------------------------------
+# snapshot()
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_all_missing_returns_all_failed(tmp_path: Path) -> None:
+    entries, failed = snapshot(_empty_roots(tmp_path))
+    assert entries == {}
+    assert failed == {CRON, TIMER, AUTOSTART, AUTHKEY}
+
+
+def test_snapshot_never_raises_and_key_matches_dict_key(tmp_path: Path) -> None:
+    # Populate one of each kind so the merge + key invariant is exercised.
+    crontab = tmp_path / "crontab"
+    crontab.write_text("0 3 * * * root /usr/bin/backup\n")
+    wants = tmp_path / "timers.target.wants"
+    wants.mkdir()
+    _make_timer(wants, "foo.timer", "[Timer]\nOnCalendar=daily\n")
+    ad = tmp_path / "autostart"
+    ad.mkdir()
+    (ad / "app.desktop").write_text("[Desktop Entry]\nName=App\nExec=/usr/bin/app\n")
+    ak = tmp_path / "authorized_keys"
+    ak.write_text(_valid_ed25519_line() + "\n")
+
+    roots = _empty_roots(tmp_path)
+    roots.etc_crontab = crontab
+    roots.timer_wants = [("system", wants)]
+    roots.autostart_dirs = [ad]
+    roots.authorized_keys = ak
+
+    entries, failed = snapshot(roots)
+    assert failed == set()  # every source readable
+    kinds = {e["kind"] for e in entries.values()}
+    assert kinds == {CRON, TIMER, AUTOSTART, AUTHKEY}
+    for key, attrs in entries.items():
+        assert attrs["key"] == key
+        assert set(attrs) == {"kind", "name", "source_path", "details", "key"}
+
+
+def test_snapshot_truncates_long_details(tmp_path: Path) -> None:
+    crontab = tmp_path / "crontab"
+    long_cmd = "/usr/bin/x " + "a" * 400
+    crontab.write_text(f"0 3 * * * root {long_cmd}\n")
+    roots = _empty_roots(tmp_path)
+    roots.etc_crontab = crontab
+    entries, _ = snapshot(roots)
+    details = next(iter(entries.values()))["details"]
+    assert len(details) == 257  # 256 chars + the ellipsis
+    assert details.endswith("…")
+
+
+def test_default_roots_is_roots() -> None:
+    assert isinstance(default_roots(), Roots)

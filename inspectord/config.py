@@ -135,6 +135,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "module": "inspectord.workers.udev_monitor",
                     "config": {},
                 },
+                {
+                    "name": "persistence_snapshotter",
+                    "module": "inspectord.workers.persistence_snapshotter",
+                    "config": {},
+                },
             ],
         }
     )

@@ -67,3 +67,7 @@ module = "inspectord.workers.services_monitor"
 [[workers]]
 name = "udev_monitor"
 module = "inspectord.workers.udev_monitor"
+
+[[workers]]
+name = "persistence_snapshotter"
+module = "inspectord.workers.persistence_snapshotter"

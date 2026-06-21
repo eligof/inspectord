@@ -48,6 +48,7 @@ def build_event(
     service: dict[str, Any] | None = None,
     package: dict[str, Any] | None = None,
     device: dict[str, Any] | None = None,
+    persistence: dict[str, Any] | None = None,
     raw: dict[str, Any] | None = None,
     labels: list[str] | None = None,
     ts: datetime | None = None,
@@ -75,6 +76,7 @@ def build_event(
         service=service,
         package=package,
         device=device,
+        persistence=persistence,
         raw=raw,
         labels=labels or [],
     )

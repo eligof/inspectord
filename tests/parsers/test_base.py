@@ -30,6 +30,25 @@ def test_build_event_minimum_fields() -> None:
     assert ev.raw == {"source_file": "/var/log/pacman.log", "line": "..."}
 
 
+def test_build_event_carries_persistence_block() -> None:
+    ev = build_event(
+        module="persistence_snapshotter",
+        action="persistence_added",
+        category=["host"],
+        type_=["start"],
+        severity="low",
+        persistence={
+            "kind": "cron",
+            "name": "backup",
+            "source_path": "/etc/crontab",
+            "details": "@daily root backup",
+            "key": "persist:cron:/etc/crontab:abc123",
+        },
+    )
+    assert ev.persistence is not None
+    assert ev.persistence["key"] == "persist:cron:/etc/crontab:abc123"
+
+
 def test_build_event_includes_uuidv7_event_id() -> None:
     ev2 = build_event(
         module="log_tailer", action="x", category=["host"], type_=["info"], severity="info"
