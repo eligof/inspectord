@@ -16,6 +16,7 @@ from inspectord.workers.persistence_snapshotter.source import (
     TIMER,
     Roots,
     _enum_cron,
+    _enum_timers,
     _parse_cron_line,
     default_roots,
     snapshot,
@@ -174,6 +175,84 @@ def test_enum_cron_malformed_line_never_raises(tmp_path: Path) -> None:
 def test_enum_cron_all_missing_marks_unreadable(tmp_path: Path) -> None:
     roots = _empty_roots(tmp_path)
     entries, readable = _enum_cron(roots)
+    assert entries == {}
+    assert readable is False
+
+
+# ---------------------------------------------------------------------------
+# _enum_timers
+# ---------------------------------------------------------------------------
+
+
+def _make_timer(wants_dir: Path, name: str, unit_text: str) -> Path:
+    """Create a unit file plus a symlink in *wants_dir*; return the symlink."""
+    unit_file = wants_dir.parent / name
+    unit_file.write_text(unit_text)
+    link = wants_dir / name
+    link.symlink_to(unit_file)
+    return link
+
+
+def test_enum_timers_enabled_via_symlink(tmp_path: Path) -> None:
+    wants = tmp_path / "timers.target.wants"
+    wants.mkdir()
+    _make_timer(wants, "foo.timer", "[Timer]\nOnCalendar=daily\n")
+    roots = _empty_roots(tmp_path)
+    roots.timer_wants = [("system", wants)]
+    entries, readable = _enum_timers(roots)
+    assert readable is True
+    k = "persist:timer:system:foo.timer"
+    assert k in entries
+    assert entries[k]["kind"] == TIMER
+    assert entries[k]["name"] == "foo.timer"
+    assert "OnCalendar=daily" in entries[k]["details"]
+
+
+def test_enum_timers_masked_skipped(tmp_path: Path) -> None:
+    wants = tmp_path / "timers.target.wants"
+    wants.mkdir()
+    link = wants / "masked.timer"
+    link.symlink_to("/dev/null")
+    roots = _empty_roots(tmp_path)
+    roots.timer_wants = [("system", wants)]
+    entries, readable = _enum_timers(roots)
+    assert readable is True
+    assert entries == {}
+
+
+def test_enum_timers_template_skipped(tmp_path: Path) -> None:
+    wants = tmp_path / "timers.target.wants"
+    wants.mkdir()
+    _make_timer(wants, "bar@.timer", "[Timer]\nOnCalendar=daily\n")
+    roots = _empty_roots(tmp_path)
+    roots.timer_wants = [("system", wants)]
+    entries, readable = _enum_timers(roots)
+    assert readable is True
+    assert entries == {}
+
+
+def test_enum_timers_scope_distinguished(tmp_path: Path) -> None:
+    sys_wants = tmp_path / "sys.target.wants"
+    usr_wants = tmp_path / "usr.target.wants"
+    sys_wants.mkdir()
+    usr_wants.mkdir()
+    _make_timer(sys_wants, "foo.timer", "[Timer]\nOnCalendar=daily\n")
+    # Distinct unit name to avoid the shared parent-dir unit-file collision.
+    usr_unit = tmp_path / "userfoo.timer"
+    usr_unit.write_text("[Timer]\nOnBootSec=10min\n")
+    (usr_wants / "foo.timer").symlink_to(usr_unit)
+    roots = _empty_roots(tmp_path)
+    roots.timer_wants = [("system", sys_wants), ("user", usr_wants)]
+    entries, readable = _enum_timers(roots)
+    assert readable is True
+    assert "persist:timer:system:foo.timer" in entries
+    assert "persist:timer:user:foo.timer" in entries
+    assert "OnBootSec=10min" in entries["persist:timer:user:foo.timer"]["details"]
+
+
+def test_enum_timers_all_missing_marks_unreadable(tmp_path: Path) -> None:
+    roots = _empty_roots(tmp_path)
+    entries, readable = _enum_timers(roots)
     assert entries == {}
     assert readable is False
 
