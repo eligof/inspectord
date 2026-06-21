@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Persistence</h1>
+
+<form method="post" action="/persistence/capture-baseline" class="filter-bar">
+  <button type="submit">Capture baseline</button>
+  <span class="muted">Snapshots current persistence entries as the diff reference.</span>
+</form>
+
+<div id="persistence-feed"
+     hx-get="/persistence/feed"
+     hx-target="#persistence-feed"
+     hx-trigger="load, every 5s">
+  <div class="empty">Loading…</div>
+</div>
+{% endblock %}
