@@ -27,6 +27,8 @@ def project(event: Event, db: Database, *, boot_id: str | None = None) -> None:
         _project_listener(event, db)
     elif event.module == "fim_watcher":
         _project_file(event, db)
+    elif event.module == "persistence_snapshotter":
+        _project_persistence(event, db)
 
 
 def _family(addr: str) -> str:
@@ -167,6 +169,42 @@ def _project_file(event: Event, db: Database) -> None:
             last_event_id = excluded.last_event_id
         """,
         [path, change_type, event.ts, event.ts, event.event_id],
+    )
+
+
+def _project_persistence(event: Event, db: Database) -> None:
+    p = event.persistence or {}
+    key = p.get("key")
+    if not key:
+        return
+    if event.action == "persistence_removed":
+        # The snapshotter emits per-mechanism deltas, so a removal deletes the one
+        # persist_key row (current set = all rows, mirroring _project_listener).
+        db.execute("DELETE FROM persistence_state WHERE persist_key = ?", [key])
+        return
+    db.execute(
+        """
+        INSERT INTO persistence_state
+            (persist_key, kind, name, source_path, details, first_seen, last_seen, last_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (persist_key) DO UPDATE SET
+            kind          = excluded.kind,
+            name          = excluded.name,
+            source_path   = excluded.source_path,
+            details       = excluded.details,
+            last_seen     = excluded.last_seen,
+            last_event_id = excluded.last_event_id
+        """,
+        [
+            key,
+            p.get("kind"),
+            p.get("name"),
+            p.get("source_path"),
+            p.get("details"),
+            event.ts,
+            event.ts,
+            event.event_id,
+        ],
     )
 
 

@@ -217,6 +217,106 @@ def _file_event(
     )
 
 
+def _persistence_event(
+    action: str,
+    *,
+    key: str,
+    kind: str = "cron",
+    name: str | None = "j",
+    source_path: str | None = "/etc/crontab",
+    details: str | None = "d",
+    event_id: str,
+    ts: datetime = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+) -> Event:
+    return Event(
+        ts=ts,
+        event_id=event_id,
+        kind=EventKind.event,
+        category=["host"],
+        type=["start"] if action == "persistence_added" else ["end"],
+        action=action,
+        severity=Severity.info,
+        module="persistence_snapshotter",
+        persistence={
+            "kind": kind,
+            "name": name,
+            "source_path": source_path,
+            "details": details,
+            "key": key,
+        },
+        raw={"source": "persistence_snapshotter"},
+    )
+
+
+def test_persistence_added_inserts_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_persistence_event("persistence_added", key="persist:cron:abc", event_id="pp1"), db)
+    rows = db.query(
+        "SELECT persist_key, kind, name, source_path, details, last_event_id "
+        "FROM persistence_state WHERE persist_key='persist:cron:abc'"
+    ).fetchall()
+    assert rows == [("persist:cron:abc", "cron", "j", "/etc/crontab", "d", "pp1")]
+    db.close()
+
+
+def test_persistence_readd_preserves_first_seen_advances_rest(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    first_ts = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
+    later_ts = datetime(2026, 6, 16, 12, 5, 0, tzinfo=UTC)
+    project(
+        _persistence_event("persistence_added", key="persist:cron:abc", event_id="pp1", ts=first_ts),
+        db,
+    )
+    first_seen_before = db.query(
+        "SELECT first_seen FROM persistence_state WHERE persist_key='persist:cron:abc'"
+    ).fetchall()[0][0]
+    project(
+        _persistence_event(
+            "persistence_added",
+            key="persist:cron:abc",
+            details="d2",
+            event_id="pp2",
+            ts=later_ts,
+        ),
+        db,
+    )
+    rows = db.query(
+        "SELECT first_seen, last_seen, details, last_event_id FROM persistence_state "
+        "WHERE persist_key='persist:cron:abc'"
+    ).fetchall()
+    assert rows[0][0] == first_seen_before  # first_seen preserved
+    assert rows[0][1] != first_seen_before  # last_seen advanced
+    assert rows[0][2] == "d2"  # details updated
+    assert rows[0][3] == "pp2"  # last_event_id advanced
+    db.close()
+
+
+def test_persistence_removed_deletes_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_persistence_event("persistence_added", key="persist:cron:abc", event_id="pp1"), db)
+    project(_persistence_event("persistence_removed", key="persist:cron:abc", event_id="pp2"), db)
+    assert db.query("SELECT COUNT(*) FROM persistence_state").fetchall()[0][0] == 0
+    db.close()
+
+
+def test_persistence_event_with_no_key_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    ev = Event(
+        ts=datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+        event_id="pp9",
+        kind=EventKind.event,
+        category=["host"],
+        type=["start"],
+        action="persistence_added",
+        severity=Severity.info,
+        module="persistence_snapshotter",
+        persistence={},
+    )
+    project(ev, db)  # must not raise
+    assert db.query("SELECT COUNT(*) FROM persistence_state").fetchall()[0][0] == 0
+    db.close()
+
+
 def test_file_created_inserts_row(tmp_path: Path) -> None:
     db = _db(tmp_path)
     project(_file_event("file_created", "/etc/passwd", event_id="f1"), db)
