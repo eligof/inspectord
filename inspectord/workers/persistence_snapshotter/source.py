@@ -166,7 +166,9 @@ def _enum_cron(roots: Roots) -> tuple[dict[str, dict[str, Any]], bool]:
     if _parse_crontab(roots.etc_crontab, has_user_field=True):
         any_readable = True
 
-    # /etc/cron.d/* (schedule user command)
+    # /etc/cron.d/* (schedule user command). Readability keys off the directory
+    # listing succeeding (like run-parts below), not each file's read result — a
+    # listable cron.d counts cron as readable even if individual files are skipped.
     try:
         cron_d_files = sorted(p for p in roots.cron_d_dir.iterdir() if p.is_file())
     except OSError:
