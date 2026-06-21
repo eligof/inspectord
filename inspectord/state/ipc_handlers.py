@@ -211,6 +211,60 @@ def handle_list_listeners(*, params: dict[str, Any], db_path: Path) -> dict[str,
     return {"schema_version": "1.0.0", "listeners": listeners}
 
 
+def handle_list_persistence(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    limit = int(params.get("limit", 200))
+    want_diff = bool(params.get("diff", False))
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT persist_key, kind, name, source_path, details, first_seen, last_seen "
+            "FROM persistence_state ORDER BY kind, name LIMIT ?",
+            [limit],
+        ).fetchall()
+        baseline: dict[str, dict[str, Any]] = {}
+        if want_diff:
+            brows = db.query(
+                "SELECT key, attrs_json FROM baseline_entry WHERE kind='persistence'"
+            ).fetchall()
+            baseline = {k: json.loads(a) for k, a in brows}
+
+    persistence: list[dict[str, Any]] = []
+    current_keys: set[str] = set()
+    for persist_key, kind, name, source_path, details, first_seen, last_seen in rows:
+        current_keys.add(persist_key)
+        item: dict[str, Any] = {
+            "persist_key": persist_key,
+            "kind": kind,
+            "name": name,
+            "source_path": source_path,
+            "details": details,
+            "first_seen": _iso(first_seen),
+            "last_seen": _iso(last_seen),
+        }
+        if want_diff:
+            # Persistence diff is simpler than services: new/removed/unchanged only,
+            # no "re-enabled" (a persistence mechanism either exists or it does not).
+            item["diff_status"] = "new" if persist_key not in baseline else "unchanged"
+        persistence.append(item)
+
+    if want_diff:
+        for key in sorted(baseline):
+            if key not in current_keys:
+                persistence.append(
+                    {
+                        "persist_key": key,
+                        "kind": None,
+                        "name": None,
+                        "source_path": None,
+                        "details": None,
+                        "first_seen": None,
+                        "last_seen": None,
+                        "diff_status": "removed",
+                    }
+                )
+
+    return {"schema_version": "1.0.0", "persistence": persistence}
+
+
 def handle_list_file_changes(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
     limit = int(params.get("limit", 200))
     with Database(db_path) as db:

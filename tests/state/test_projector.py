@@ -264,7 +264,9 @@ def test_persistence_readd_preserves_first_seen_advances_rest(tmp_path: Path) ->
     first_ts = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
     later_ts = datetime(2026, 6, 16, 12, 5, 0, tzinfo=UTC)
     project(
-        _persistence_event("persistence_added", key="persist:cron:abc", event_id="pp1", ts=first_ts),
+        _persistence_event(
+            "persistence_added", key="persist:cron:abc", event_id="pp1", ts=first_ts
+        ),
         db,
     )
     first_seen_before = db.query(

@@ -12,6 +12,7 @@ from inspectord.state.ipc_handlers import (
     handle_list_devices,
     handle_list_file_changes,
     handle_list_listeners,
+    handle_list_persistence,
     handle_list_processes,
     handle_list_services,
 )
@@ -358,6 +359,74 @@ def test_diff_marks_all_removed_when_services_gone(tmp_path: Path) -> None:
     assert by_unit == {"sshd.service": "removed", "cron.service": "removed"}
     # synthetic rows carry null state fields
     assert all(s["active_state"] is None for s in result["services"])
+
+
+def _seed_persistence(db_path: Path, persist_key: str, kind: str, name: str) -> None:
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO persistence_state (persist_key, kind, name, source_path, details, "
+            "first_seen, last_seen, last_event_id) VALUES "
+            "(?, ?, ?, '/etc/crontab', 'd', TIMESTAMP '2026-06-16 00:00:00', "
+            "TIMESTAMP '2026-06-16 00:00:00', 'pp1') "
+            "ON CONFLICT (persist_key) DO UPDATE SET name = excluded.name",
+            [persist_key, kind, name],
+        )
+
+
+def test_list_persistence_returns_rows_ordered_by_kind_name(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_persistence(db_path, "persist:systemd:1", "systemd", "zeta")
+    _seed_persistence(db_path, "persist:cron:1", "cron", "beta")
+    _seed_persistence(db_path, "persist:cron:2", "cron", "alpha")
+    result = handle_list_persistence(params={}, db_path=db_path)
+    pairs = [(p["kind"], p["name"]) for p in result["persistence"]]
+    assert pairs == [("cron", "alpha"), ("cron", "beta"), ("systemd", "zeta")]
+    row = result["persistence"][0]
+    assert row["persist_key"] == "persist:cron:2"
+    assert row["source_path"] == "/etc/crontab"
+    assert row["details"] == "d"
+    assert "diff_status" not in row
+
+
+def test_list_persistence_iso_timestamps(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_persistence(db_path, "persist:cron:1", "cron", "a")
+    result = handle_list_persistence(params={}, db_path=db_path)
+    row = result["persistence"][0]
+    assert row["first_seen"] == "2026-06-16T00:00:00"
+    assert row["last_seen"] == "2026-06-16T00:00:00"
+
+
+def test_list_persistence_diff_marks_new_when_no_baseline(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_persistence(db_path, "persist:cron:1", "cron", "a")
+    _seed_persistence(db_path, "persist:cron:2", "cron", "b")
+    result = handle_list_persistence(params={"diff": True}, db_path=db_path)
+    assert all(p["diff_status"] == "new" for p in result["persistence"])
+
+
+def test_list_persistence_diff_new_removed_unchanged_no_reenabled(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_persistence(db_path, "persist:cron:keep", "cron", "keep")
+    _seed_persistence(db_path, "persist:cron:gone", "cron", "gone")
+    with Database(db_path) as db:
+        capture_baseline("persistence", db)
+    # mutate after baseline: add one, delete one, keep one
+    _seed_persistence(db_path, "persist:cron:added", "cron", "added")
+    with Database(db_path) as db:
+        db.execute("DELETE FROM persistence_state WHERE persist_key='persist:cron:gone'")
+
+    result = handle_list_persistence(params={"diff": True}, db_path=db_path)
+    by_key = {p["persist_key"]: p["diff_status"] for p in result["persistence"]}
+    assert by_key["persist:cron:keep"] == "unchanged"
+    assert by_key["persist:cron:added"] == "new"
+    assert by_key["persist:cron:gone"] == "removed"
+    assert "re-enabled" not in by_key.values()
+    # synthetic removed row carries null fields
+    gone = next(p for p in result["persistence"] if p["persist_key"] == "persist:cron:gone")
+    assert gone["kind"] is None
+    assert gone["name"] is None
+    assert gone["first_seen"] is None
 
 
 def test_capture_baseline_handler(tmp_path: Path) -> None:
