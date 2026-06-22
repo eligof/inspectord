@@ -24,6 +24,7 @@ class StorageConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     db_path: Path
     journal_dir: Path
+    evidence_dir: Path = Path("/var/lib/inspectord/evidence")
 
 
 class IpcConfig(BaseModel):
@@ -61,6 +62,7 @@ def dev_config(*, base: Path) -> DaemonConfig:
             "storage": {
                 "db_path": str(base / "var" / "inspectord.duckdb"),
                 "journal_dir": str(base / "var" / "journal"),
+                "evidence_dir": str(base / "var" / "evidence"),
             },
             "ipc": {
                 "socket_path": str(base / "var" / "inspectord.sock"),
