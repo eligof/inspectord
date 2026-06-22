@@ -1,0 +1,17 @@
+version: 1.0.0
+id: persistence.new_cron
+name: "new cron persistence"
+severity: medium
+category: persistence
+why: |
+  A new cron entry appeared (user crontab, /etc/cron.d, or a run-parts dir).
+  Scheduled jobs are a classic mechanism for re-running a payload across reboots.
+false_positives:
+  - "You added a cron job yourself."
+  - "A package install registered a cron entry."
+detect:
+  any_of:
+    - event.module == "persistence_snapshotter" AND event.action == "persistence_added" AND persistence.kind == "cron"
+short: "new cron persistence: {persistence.name}"
+detail: "A new cron entry appeared at {persistence.source_path}: {persistence.details}"
+labels: [persistence, cron]

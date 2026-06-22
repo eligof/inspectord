@@ -1,0 +1,17 @@
+version: 1.0.0
+id: persistence.authorized_keys_changed
+name: "new SSH authorized_key"
+severity: high
+category: persistence
+why: |
+  A new SSH authorized_keys entry appeared. Adding a public key grants
+  persistent remote access and is a high-signal persistence mechanism.
+false_positives:
+  - "You added your own SSH public key."
+  - "A provisioning tool deployed an authorized key."
+detect:
+  any_of:
+    - event.module == "persistence_snapshotter" AND event.action == "persistence_added" AND persistence.kind == "authorized_key"
+short: "new SSH authorized_key: {persistence.name}"
+detail: "A new SSH authorized_key appeared at {persistence.source_path}: {persistence.details}"
+labels: [persistence, authorized_key]

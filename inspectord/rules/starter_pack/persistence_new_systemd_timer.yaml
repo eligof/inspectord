@@ -1,0 +1,17 @@
+version: 1.0.0
+id: persistence.new_systemd_timer
+name: "new systemd timer persistence"
+severity: medium
+category: persistence
+why: |
+  A new systemd timer appeared. Timers schedule unit activation and are a
+  common persistence mechanism.
+false_positives:
+  - "You created a systemd timer yourself."
+  - "A package install registered a timer unit."
+detect:
+  any_of:
+    - event.module == "persistence_snapshotter" AND event.action == "persistence_added" AND persistence.kind == "timer"
+short: "new systemd timer: {persistence.name}"
+detail: "A new systemd timer appeared at {persistence.source_path}: {persistence.details}"
+labels: [persistence, timer]
