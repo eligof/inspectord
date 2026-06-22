@@ -30,6 +30,15 @@ CASE = {
         {"ts": "2026-06-20T00:00:00", "seq": 0, "kind": "opened", "text": None},
         {"ts": "2026-06-20T00:00:00", "seq": 1, "kind": "alert_attached", "text": "a1"},
     ],
+    "evidence": [
+        {
+            "kind": "file",
+            "sha256": "abc123def456abc7890",
+            "original_path": "/etc/sudoers",
+            "captured_at": "2026-06-22T00:00:00",
+            "meta": {"size": 42},
+        },
+    ],
 }
 
 
@@ -107,6 +116,42 @@ def test_case_detail_renders(ipc_factory) -> None:
     assert "alert_attached" in response.text
     assert "/cases/c1/notes" in response.text
     assert "/cases/c1/close" in response.text
+
+
+def test_case_detail_renders_evidence(ipc_factory) -> None:
+    client = ipc_factory([_get_case(CASE)])
+    response = client.get("/cases/c1")
+    assert response.status_code == 200
+    assert "Evidence" in response.text
+    assert "/etc/sudoers" in response.text
+    assert "abc123def456abc7" in response.text
+
+
+def test_case_detail_escapes_evidence_path(ipc_factory) -> None:
+    case = copy.deepcopy(CASE)
+    case["evidence"].append(
+        {
+            "kind": "file",
+            "sha256": "deadbeefdeadbeef0000",
+            "original_path": "<script>alert(1)</script>",
+            "captured_at": "2026-06-22T00:00:00",
+            "meta": {"size": 7},
+        }
+    )
+    client = ipc_factory([_get_case(case)])
+    response = client.get("/cases/c1")
+    assert response.status_code == 200
+    assert "<script>alert(1)</script>" not in response.text
+    assert "&lt;script&gt;" in response.text
+
+
+def test_case_detail_evidence_empty_state(ipc_factory) -> None:
+    case = copy.deepcopy(CASE)
+    case["evidence"] = []
+    client = ipc_factory([_get_case(case)])
+    response = client.get("/cases/c1")
+    assert response.status_code == 200
+    assert "No evidence captured." in response.text
 
 
 def test_case_detail_missing_404(ipc_factory) -> None:

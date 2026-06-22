@@ -122,3 +122,21 @@ def test_get_case_missing_returns_none(tmp_path: Path) -> None:
     db_path = _fresh(tmp_path)
     result = handle_get_case(params={"case_id": "nope"}, db_path=db_path)
     assert result == {"schema_version": "1.0.0", "case": None}
+
+
+def test_get_case_renders_evidence_captured_at_iso(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_alert(db_path, "a1")
+    case_id = handle_open_case(params={"alert_id": "a1"}, db_path=db_path)["case_id"]
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO case_evidence (case_id, kind, sha256, original_path, captured_at, "
+            "meta_json) VALUES (?, 'file', 'deadbeef', '/etc/sudoers', "
+            "TIMESTAMP '2026-06-22 00:00:00', '{\"size\": 42}')",
+            [case_id],
+        )
+    result = handle_get_case(params={"case_id": case_id}, db_path=db_path)
+    case = result["case"]
+    assert case is not None
+    assert len(case["evidence"]) == 1
+    assert isinstance(case["evidence"][0]["captured_at"], str)

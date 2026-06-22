@@ -56,4 +56,6 @@ def handle_get_case(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
             a["ts"] = _iso(a["ts"])
         for t in case["timeline"]:
             t["ts"] = _iso(t["ts"])
+        for ev in case["evidence"]:
+            ev["captured_at"] = _iso(ev["captured_at"])
     return {"schema_version": "1.0.0", "case": case}
