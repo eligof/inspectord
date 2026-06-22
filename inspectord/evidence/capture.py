@@ -33,10 +33,7 @@ def _path_allowed(path: str) -> bool:
     if ".." in Path(path).parts:
         return False
     real = os.path.realpath(path)
-    for deny in _DENY_PREFIXES:
-        if real == deny or real.startswith(deny + "/"):
-            return False
-    return True
+    return not any(real == deny or real.startswith(deny + "/") for deny in _DENY_PREFIXES)
 
 
 def read_capture(path: str, *, max_bytes: int = _MAX_FILE_BYTES) -> bytes | None:

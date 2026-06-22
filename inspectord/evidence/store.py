@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 from pathlib import Path
 
 
@@ -25,9 +26,13 @@ class ForensicStore:
             return sha
         shard = dest.parent
         os.makedirs(shard, mode=0o700, exist_ok=True)
-        # makedirs honors umask on intermediate dirs; force the shard mode explicitly.
+        # makedirs honors umask on intermediate dirs; force 0700 on BOTH the root and the
+        # shard so the whole tree is private (the root would otherwise be umask-dependent).
+        os.chmod(self._root, 0o700)
         os.chmod(shard, 0o700)
-        tmp = shard / f".tmp-{sha}-{os.getpid()}"
+        # Unique tmp name per call: pid alone collides across the threaded workers that drive
+        # capture, so a second thread putting identical content would hit O_EXCL otherwise.
+        tmp = shard / f".tmp-{sha}-{os.getpid()}-{secrets.token_hex(8)}"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
         try:
             # os.open honors umask; force 0600 so the mode holds regardless of umask.
