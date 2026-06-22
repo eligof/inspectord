@@ -33,6 +33,27 @@
   </tbody>
 </table>
 
+<h2>Evidence</h2>
+{% if case.evidence %}
+<table>
+  <thead><tr><th>Kind</th><th>Source</th><th>Captured</th><th>Info</th><th>SHA-256</th></tr></thead>
+  <tbody>
+    {% for e in case.evidence %}
+    <tr>
+      <td>{{ e.kind }}</td>
+      <td class="mono">{{ e.original_path or '—' }}</td>
+      <td class="mono muted">{{ e.captured_at }}</td>
+      <td class="mono muted">{{ e.meta.size if e.meta.size is defined else (e.meta.socket_count if e.meta.socket_count is defined else '') }}</td>
+      <td class="mono muted">{{ e.sha256[:16] }}…</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">Preserved — retrieval via export coming soon.</p>
+{% else %}
+<div class="empty">No evidence captured.</div>
+{% endif %}
+
 {% if case.status == "open" %}
 <div class="actions">
   <form method="post" action="/cases/{{ case.case_id }}/notes">
