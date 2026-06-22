@@ -5,9 +5,12 @@ successive snapshots, and emits one normalised Event per added/removed entry.
 
 Two deliberate divergences from the listening-socket worker (spec §3.2):
 
-1. **No baseline suppression.** ``self._prev`` starts empty, so the FIRST
-   ``step()`` emits every current entry as ``persistence_added`` — this is how
-   the persistence state table is populated.
+1. **Empty baseline, marked first_seen.** ``self._prev`` starts empty, so the
+   FIRST ``step()`` emits every current entry as ``persistence_added`` — this is
+   how the persistence state table is populated. Those first-poll events carry
+   ``first_seen=True`` (gated on ``self._seeded``) so the rule engine suppresses
+   them: state still populates, but detection rules do not alert on pre-existing
+   persistence at every daemon restart.
 2. **Per-source carry-forward diff.** When ``snapshot()`` reports a kind in
    ``failed_kinds`` (its source was unreadable this poll), the previous poll's
    entries of that kind are carried forward instead of being emitted as

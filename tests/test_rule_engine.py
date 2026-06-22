@@ -74,6 +74,54 @@ def test_rule_engine_respects_allowlist(tmp_path: Path) -> None:
     assert n == 0
 
 
+def test_rule_engine_drops_first_seen_events(tmp_path: Path) -> None:
+    """A first_seen baseline event is dropped before rule evaluation."""
+    db_path = tmp_path / "t.duckdb"
+    with Database(db_path) as db:
+        run_migrations(db)
+    reg = Registry(yaml_rules=[], python_rules=[_AlwaysFireOnce()])
+    engine = RuleEngine(registry=reg, db_path=db_path, allowlist_entries=[])
+    ev = build_event(
+        module="m",
+        action="a",
+        category=["c"],
+        type_=["t"],
+        severity="info",
+        first_seen=True,
+    )
+    out = engine.process(ev)
+    assert out == []
+    with Database(db_path) as db:
+        n = db.query("SELECT COUNT(*) FROM alerts").fetchall()[0][0]
+    assert n == 0
+
+
+def test_rule_engine_first_seen_does_not_enter_history(tmp_path: Path) -> None:
+    """A dropped first_seen event must not pollute correlation history.
+
+    A normal (first_seen=False) event matching the same rule still alerts.
+    """
+    db_path = tmp_path / "t.duckdb"
+    with Database(db_path) as db:
+        run_migrations(db)
+    reg = Registry(yaml_rules=[], python_rules=[_AlwaysFireOnce()])
+    engine = RuleEngine(registry=reg, db_path=db_path, allowlist_entries=[])
+
+    baseline = build_event(
+        module="m",
+        action="a",
+        category=["c"],
+        type_=["t"],
+        severity="info",
+        first_seen=True,
+    )
+    assert engine.process(baseline) == []
+
+    normal = build_event(module="m", action="a", category=["c"], type_=["t"], severity="info")
+    out = engine.process(normal)
+    assert len(out) == 1
+
+
 def test_rule_engine_passes_history_to_correlation_rules(tmp_path: Path) -> None:
     db_path = tmp_path / "t.duckdb"
     with Database(db_path) as db:
