@@ -23,6 +23,14 @@ from inspectord.alerts.ipc_handlers import (
     handle_resolve_alert,
     handle_suppress_alert,
 )
+from inspectord.cases.ipc_handlers import (
+    handle_add_note,
+    handle_attach_alert,
+    handle_close_case,
+    handle_get_case,
+    handle_list_cases,
+    handle_open_case,
+)
 from inspectord.config import DaemonConfig, dev_config, load
 from inspectord.dependencies.ipc_handlers import (
     handle_apply_dependency_plan,
@@ -223,6 +231,36 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
                 params=params, db_path=cfg.storage.db_path
             ),
             mutates=True,
+        ),
+        Method(
+            name="open_case",
+            handler=lambda params: handle_open_case(params=params, db_path=cfg.storage.db_path),
+            mutates=True,
+        ),
+        Method(
+            name="attach_alert",
+            handler=lambda params: handle_attach_alert(params=params, db_path=cfg.storage.db_path),
+            mutates=True,
+        ),
+        Method(
+            name="add_note",
+            handler=lambda params: handle_add_note(params=params, db_path=cfg.storage.db_path),
+            mutates=True,
+        ),
+        Method(
+            name="close_case",
+            handler=lambda params: handle_close_case(params=params, db_path=cfg.storage.db_path),
+            mutates=True,
+        ),
+        Method(
+            name="list_cases",
+            handler=lambda params: handle_list_cases(params=params, db_path=cfg.storage.db_path),
+            mutates=False,
+        ),
+        Method(
+            name="get_case",
+            handler=lambda params: handle_get_case(params=params, db_path=cfg.storage.db_path),
+            mutates=False,
         ),
     ]
 
