@@ -156,3 +156,91 @@ def test_suppress_alert_post(ipc_factory) -> None:  # type: ignore[no-untyped-de
         follow_redirects=False,
     )
     assert response.status_code == 303
+
+
+def _get_alert_a1() -> Method:
+    def handler(_params: dict[str, object]) -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "alert": {
+                "alert_id": "a1",
+                "rule": {
+                    "id": "lolbin.bash_dev_tcp",
+                    "name": "Reverse-shell pattern",
+                    "severity": "critical",
+                    "why": "bash -i >& /dev/tcp/ is a classic reverse-shell idiom",
+                    "false_positives": ["pentest/CTF tools"],
+                },
+                "ts": "2026-05-25T14:23:10+00:00",
+                "severity": "critical",
+                "status": "new",
+                "category": "intrusion_detection",
+                "rendered": {"short": "Reverse shell pid 9999", "detail": "long detail"},
+                "entities": [{"kind": "process", "key": "pid:9999"}],
+                "dedup_count": 3,
+                "first_seen_at": "2026-05-25T14:00:00+00:00",
+                "last_seen_at": "2026-05-25T14:23:10+00:00",
+                "labels": ["lolbin", "reverse-shell"],
+            },
+        }
+
+    return Method(name="get_alert", handler=handler, mutates=False)
+
+
+def _list_cases(cases: list[dict]) -> Method:  # type: ignore[type-arg]
+    return Method(
+        name="list_cases",
+        handler=lambda _params: {"schema_version": "1.0.0", "cases": cases},
+        mutates=False,
+    )
+
+
+def test_open_case_post_redirects_to_case(ipc_factory) -> None:  # type: ignore[no-untyped-def]
+    open_calls: list[dict] = []  # type: ignore[type-arg]
+
+    def open_handler(params: dict) -> dict:  # type: ignore[type-arg]
+        open_calls.append(params)
+        return {"schema_version": "1.0.0", "case_id": "c9"}
+
+    open_method = Method(name="open_case", handler=open_handler, mutates=True)
+    client = ipc_factory([_get_alert_a1(), open_method])
+    response = client.post("/alerts/a1/open-case", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/cases/c9"
+    assert any(c.get("alert_id") == "a1" for c in open_calls)
+
+
+def test_attach_case_post_redirects_to_alert(ipc_factory) -> None:  # type: ignore[no-untyped-def]
+    attach_calls: list[dict] = []  # type: ignore[type-arg]
+
+    def attach_handler(params: dict) -> dict:  # type: ignore[type-arg]
+        attach_calls.append(params)
+        return {"schema_version": "1.0.0", "ok": True}
+
+    attach_method = Method(name="attach_alert", handler=attach_handler, mutates=True)
+    client = ipc_factory([_get_alert_a1(), attach_method])
+    response = client.post(
+        "/alerts/a1/attach-case",
+        data={"case_id": "c1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/alerts/a1"
+    assert any(c.get("case_id") == "c1" and c.get("alert_id") == "a1" for c in attach_calls)
+
+
+def test_alert_detail_renders_case_actions(ipc_factory) -> None:  # type: ignore[no-untyped-def]
+    open_case = {
+        "case_id": "c1",
+        "title": "sshd brute force",
+        "status": "open",
+        "opened_at": "2026-06-20T00:00:00",
+        "alert_count": 1,
+    }
+    client = ipc_factory([_get_alert_a1(), _list_cases([open_case])])
+    response = client.get("/alerts/a1")
+    assert response.status_code == 200
+    assert "/alerts/a1/open-case" in response.text
+    assert "/alerts/a1/attach-case" in response.text
+    assert 'value="c1"' in response.text
+    assert "sshd brute force" in response.text

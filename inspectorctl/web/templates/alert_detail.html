@@ -60,5 +60,22 @@
     </form>
   </div>
   {% endif %}
+
+  <h2>Case</h2>
+  <div class="actions">
+    <form method="post" action="/alerts/{{ alert.alert_id }}/open-case">
+      <button type="submit">Open case</button>
+    </form>
+    {% if open_cases %}
+    <form method="post" action="/alerts/{{ alert.alert_id }}/attach-case">
+      <select name="case_id" required>
+        {% for c in open_cases %}
+        <option value="{{ c.case_id }}">{{ c.title }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Attach to case</button>
+    </form>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}
