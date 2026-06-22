@@ -49,6 +49,20 @@ def test_build_event_carries_persistence_block() -> None:
     assert ev.persistence["key"] == "persist:cron:/etc/crontab:abc123"
 
 
+def test_build_event_carries_first_seen() -> None:
+    ev = build_event(
+        module="m",
+        action="a",
+        category=["host"],
+        type_=["start"],
+        severity="low",
+        first_seen=True,
+    )
+    assert ev.first_seen is True
+    ev2 = build_event(module="m", action="a", category=["host"], type_=["start"], severity="low")
+    assert ev2.first_seen is False
+
+
 def test_build_event_includes_uuidv7_event_id() -> None:
     ev2 = build_event(
         module="log_tailer", action="x", category=["host"], type_=["info"], severity="info"

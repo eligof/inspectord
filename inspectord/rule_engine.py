@@ -34,6 +34,11 @@ class RuleEngine:
         self._history: deque[Event] = deque(maxlen=_HISTORY_MAX)
 
     def process(self, event: Event) -> list[Alert]:
+        if event.first_seen:
+            # Baseline catch-up (snapshot collectors re-emit existing state on
+            # startup) is not a detection: skip rule evaluation and keep it out
+            # of the correlation history.
+            return []
         self._history.append(event)
         self._trim_history(event.ts)
         ctx = EvalContext(event=event, history=list(self._history))

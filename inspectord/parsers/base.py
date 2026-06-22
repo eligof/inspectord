@@ -52,6 +52,7 @@ def build_event(
     raw: dict[str, Any] | None = None,
     labels: list[str] | None = None,
     ts: datetime | None = None,
+    first_seen: bool = False,
 ) -> Event:
     """Construct a normalized Event with sensible defaults."""
     return Event(
@@ -79,4 +80,5 @@ def build_event(
         persistence=persistence,
         raw=raw,
         labels=labels or [],
+        first_seen=first_seen,
     )

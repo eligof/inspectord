@@ -1,0 +1,17 @@
+version: 1.0.0
+id: persistence.autostart_changed
+name: "new autostart entry"
+severity: medium
+category: persistence
+why: |
+  A new desktop autostart entry appeared. Autostart .desktop files run on
+  login and are a common persistence mechanism.
+false_positives:
+  - "You added an autostart entry yourself."
+  - "An application install registered an autostart entry."
+detect:
+  any_of:
+    - event.module == "persistence_snapshotter" AND event.action == "persistence_added" AND persistence.kind == "autostart"
+short: "new autostart entry: {persistence.name}"
+detail: "A new autostart entry appeared at {persistence.source_path}: {persistence.details}"
+labels: [persistence, autostart]
