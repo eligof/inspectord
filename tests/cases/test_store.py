@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
+
+import pytest
 
 from inspectord.cases import store
 from inspectord.storage.db import Database
@@ -66,6 +69,30 @@ def test_open_case_title_fallback_when_alert_absent(tmp_path: Path) -> None:
     # The link is still created even though the alert is absent.
     links = db.query("SELECT alert_id FROM case_alert WHERE case_id = ?", [case_id]).fetchall()
     assert [r[0] for r in links] == ["ghost"]
+
+
+def test_open_case_truncates_long_title(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1", short="x" * 20000)
+    case_id = store.open_case(db, alert_id="a1")
+    title = db.query("SELECT title FROM cases WHERE case_id = ?", [case_id]).fetchall()[0][0]
+    assert len(title) == 16384
+
+
+def test_open_case_is_atomic_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A mid-op failure must roll back the whole case (no case row, link, or events left behind).
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+
+    def _boom(*args: object, **kwargs: object) -> bool:
+        raise RuntimeError("attach failed")
+
+    monkeypatch.setattr(store, "_attach", _boom)
+    with contextlib.suppress(RuntimeError):
+        store.open_case(db, alert_id="a1")
+    assert db.query("SELECT COUNT(*) FROM cases").fetchall()[0][0] == 0
+    assert db.query("SELECT COUNT(*) FROM case_event").fetchall()[0][0] == 0
+    assert db.query("SELECT COUNT(*) FROM case_alert").fetchall()[0][0] == 0
 
 
 def test_attach_alert_idempotent(tmp_path: Path) -> None:
@@ -169,3 +196,70 @@ def test_close_case_missing_is_noop(tmp_path: Path) -> None:
     store.close_case(db, case_id="nope")
     events = db.query("SELECT kind FROM case_event").fetchall()
     assert events == []
+
+
+# --- 2c: list_cases + get_case ---
+
+
+def test_list_cases_counts_and_orders_newest_first(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    _seed_alert(db, "a2")
+    first = store.open_case(db, alert_id="a1", title="first")
+    store.attach_alert(db, case_id=first, alert_id="a2")
+    second = store.open_case(db, alert_id="a2", title="second")
+    cases = store.list_cases(db)
+    # Newest opened_at first.
+    assert [c["case_id"] for c in cases] == [second, first]
+    by_id = {c["case_id"]: c for c in cases}
+    assert by_id[first]["alert_count"] == 2
+    assert by_id[second]["alert_count"] == 1
+    assert by_id[first]["title"] == "first"
+    assert by_id[first]["status"] == "open"
+
+
+def test_get_case_returns_alerts_and_timeline(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    case = store.get_case(db, case_id=case_id)
+    assert case is not None
+    assert set(case.keys()) == {
+        "case_id",
+        "title",
+        "status",
+        "opened_at",
+        "closed_at",
+        "alerts",
+        "timeline",
+    }
+    assert len(case["alerts"]) == 1
+    a = case["alerts"][0]
+    assert a["alert_id"] == "a1"
+    assert a["rule_id"] == "r1"
+    assert a["severity"] == "high"
+    assert a["status"] == "new"
+    assert a["rendered_short"] == "sshd brute force"
+    assert a["ts"] is not None
+    kinds = [t["kind"] for t in case["timeline"]]
+    assert kinds == ["opened", "alert_attached"]
+
+
+def test_get_case_pruned_alert_is_placeholder(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    case_id = store.open_case(db, alert_id="ghost")
+    case = store.get_case(db, case_id=case_id)
+    assert case is not None
+    assert len(case["alerts"]) == 1
+    a = case["alerts"][0]
+    assert a["alert_id"] == "ghost"
+    assert a["rule_id"] is None
+    assert a["severity"] is None
+    assert a["status"] is None
+    assert a["rendered_short"] is None
+    assert a["ts"] is None
+
+
+def test_get_case_missing_returns_none(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    assert store.get_case(db, case_id="nope") is None
