@@ -151,6 +151,74 @@ def test_severity_by_kind() -> None:
     assert by_kind["cron"]["severity"] == "low"
 
 
+def test_first_step_marks_events_first_seen() -> None:
+    """The first (baseline) step marks emitted persistence_added first_seen=True."""
+    k1 = "persist:cron:/etc/crontab:aaa"
+    sink = BytesIO()
+    worker = PersistenceSnapshotterWorker(
+        snapshot_fn=FakeSnapshot([({k1: _cron_attrs(k1)}, set())]),
+        sink=sink,
+        host_name="test-host",
+    )
+    worker.start()
+    worker.step()
+    worker.stop()
+
+    events = _read_events(sink)
+    assert len(events) == 1, events
+    assert events[0]["action"] == "persistence_added"
+    assert events[0]["first_seen"] is True
+
+
+def test_second_step_new_entry_not_first_seen() -> None:
+    """A genuinely-new entry after the baseline poll is first_seen=False."""
+    k1, k2 = "persist:cron:/etc/crontab:aaa", "persist:cron:/etc/crontab:bbb"
+    a1, a2 = _cron_attrs(k1), _cron_attrs(k2, name="k")
+    sink = BytesIO()
+    worker = PersistenceSnapshotterWorker(
+        snapshot_fn=FakeSnapshot([({k1: a1}, set()), ({k1: a1, k2: a2}, set())]),
+        sink=sink,
+        host_name="test-host",
+    )
+    worker.start()
+    worker.step()  # baseline
+    sink.seek(0)
+    sink.truncate(0)
+    worker.step()  # k2 genuinely new
+    worker.stop()
+
+    events = _read_events(sink)
+    assert len(events) == 1, events
+    assert events[0]["persistence"]["key"] == k2
+    assert events[0]["first_seen"] is False
+
+
+def test_zero_persistence_baseline_still_seeds() -> None:
+    """An empty first step emits nothing but still flips the seeded flag.
+
+    The next step's new entry must NOT be treated as baseline catch-up.
+    """
+    k1 = "persist:cron:/etc/crontab:aaa"
+    sink = BytesIO()
+    worker = PersistenceSnapshotterWorker(
+        snapshot_fn=FakeSnapshot([({}, set()), ({k1: _cron_attrs(k1)}, set())]),
+        sink=sink,
+        host_name="test-host",
+    )
+    worker.start()
+    worker.step()  # empty baseline -> no events, but seeded
+    assert _read_events(sink) == []
+    sink.seek(0)
+    sink.truncate(0)
+    worker.step()  # k1 appears -> genuinely new, not baseline
+    worker.stop()
+
+    events = _read_events(sink)
+    assert len(events) == 1, events
+    assert events[0]["persistence"]["key"] == k1
+    assert events[0]["first_seen"] is False
+
+
 def test_event_shape() -> None:
     """Emitted event carries persistence labels and details."""
     k1 = "persist:cron:/etc/crontab:aaa"

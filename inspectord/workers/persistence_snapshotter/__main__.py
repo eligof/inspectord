@@ -62,6 +62,9 @@ class PersistenceSnapshotterWorker:
         self._host_name = host_name
         # Empty baseline: the first step emits the full current inventory as added.
         self._prev: dict[str, dict[str, Any]] = {}
+        # First step is the baseline catch-up: its added events are marked
+        # first_seen so the rule engine drops them (no flood on daemon restart).
+        self._seeded = False
 
     def start(self) -> None:
         """No-op; the source is stateless and read fresh on every step()."""
@@ -69,6 +72,8 @@ class PersistenceSnapshotterWorker:
     def step(self) -> None:
         """Take one snapshot, diff it against the previous one, emit events."""
         current, failed = self._snapshot_fn()
+        baseline = not self._seeded
+        self._seeded = True
         effective = dict(current)
         # Carry forward previous entries whose source failed this poll, so a
         # transient read error does not masquerade as a persistence removal.
@@ -76,15 +81,15 @@ class PersistenceSnapshotterWorker:
             if attrs["kind"] in failed and key not in effective:
                 effective[key] = attrs
         for key in effective.keys() - self._prev.keys():
-            self._emit("persistence_added", effective[key])
+            self._emit("persistence_added", effective[key], first_seen=baseline)
         for key in self._prev.keys() - effective.keys():
-            self._emit("persistence_removed", self._prev[key])
+            self._emit("persistence_removed", self._prev[key], first_seen=False)
         self._prev = effective
 
     def stop(self) -> None:
         """No-op; nothing to close."""
 
-    def _emit(self, action: str, attrs: dict[str, Any]) -> None:
+    def _emit(self, action: str, attrs: dict[str, Any], *, first_seen: bool = False) -> None:
         sev = "medium" if attrs["kind"] == AUTHKEY else "low"
         ev = build_event(
             module="persistence_snapshotter",
@@ -103,6 +108,7 @@ class PersistenceSnapshotterWorker:
             labels=["persistence", f"persist:{attrs['kind']}"],
             message=f"{action} {attrs['kind']} {attrs.get('name', '')}",
             raw={"source": attrs.get("source_path")},
+            first_seen=first_seen,
         )
         self._sink.write(json.dumps(ev.model_dump(mode="json", exclude_none=True)).encode() + b"\n")
         self._sink.flush()
