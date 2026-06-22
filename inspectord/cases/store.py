@@ -6,6 +6,7 @@ case_event is an append-only activity/notes log, NOT a tamper-evident chain-of-c
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -90,6 +91,13 @@ def add_note(db: Database, *, case_id: str, text: str) -> None:
     _append_event(db, case_id, datetime.now(tz=UTC), 0, "note", text)
 
 
+def append_timeline(db: Database, *, case_id: str, kind: str, text: str | None = None) -> None:
+    """Append a case_event of a custom kind (e.g. 'evidence_captured'). No-op if case missing."""
+    if not _case_exists(db, case_id):
+        return
+    _append_event(db, case_id, datetime.now(tz=UTC), 0, kind, text)
+
+
 def close_case(db: Database, *, case_id: str) -> None:
     rows = db.query("SELECT status FROM cases WHERE case_id = ?", [case_id]).fetchall()
     if not rows or rows[0][0] == "closed":
@@ -151,6 +159,21 @@ def get_case(db: Database, *, case_id: str) -> dict[str, Any] | None:
         [case_id],
     ).fetchall()
     timeline = [{"ts": t[0], "seq": t[1], "kind": t[2], "text": t[3]} for t in trows]
+    erows = db.query(
+        "SELECT kind, sha256, original_path, captured_at, meta_json "
+        "FROM case_evidence WHERE case_id = ? ORDER BY captured_at, kind, sha256",
+        [case_id],
+    ).fetchall()
+    evidence = [
+        {
+            "kind": e[0],
+            "sha256": e[1],
+            "original_path": e[2],
+            "captured_at": e[3],
+            "meta": json.loads(e[4]) if e[4] else {},
+        }
+        for e in erows
+    ]
     return {
         "case_id": c[0],
         "title": c[1],
@@ -159,4 +182,5 @@ def get_case(db: Database, *, case_id: str) -> dict[str, Any] | None:
         "closed_at": c[4],
         "alerts": alerts,
         "timeline": timeline,
+        "evidence": evidence,
     }

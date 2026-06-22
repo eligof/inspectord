@@ -232,6 +232,7 @@ def test_get_case_returns_alerts_and_timeline(tmp_path: Path) -> None:
         "closed_at",
         "alerts",
         "timeline",
+        "evidence",
     }
     assert len(case["alerts"]) == 1
     a = case["alerts"][0]
@@ -263,3 +264,66 @@ def test_get_case_pruned_alert_is_placeholder(tmp_path: Path) -> None:
 def test_get_case_missing_returns_none(tmp_path: Path) -> None:
     db = _db(tmp_path)
     assert store.get_case(db, case_id="nope") is None
+
+
+# --- 2d: append_timeline + get_case evidence ---
+
+
+def _seed_evidence(
+    db: Database,
+    case_id: str,
+    *,
+    kind: str = "file",
+    sha256: str = "deadbeef",
+    original_path: str = "/etc/sudoers",
+    meta_json: str | None = '{"size": 42}',
+) -> None:
+    db.execute(
+        "INSERT INTO case_evidence (case_id, kind, sha256, original_path, captured_at, meta_json) "
+        "VALUES (?, ?, ?, ?, TIMESTAMP '2026-06-22 00:00:00', ?)",
+        [case_id, kind, sha256, original_path, meta_json],
+    )
+
+
+def test_append_timeline_adds_event_of_given_kind(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    store.append_timeline(db, case_id=case_id, kind="evidence_captured", text="captured 1 file")
+    case = store.get_case(db, case_id=case_id)
+    assert case is not None
+    matches = [t for t in case["timeline"] if t["kind"] == "evidence_captured"]
+    assert len(matches) == 1
+    assert matches[0]["text"] == "captured 1 file"
+
+
+def test_append_timeline_missing_case_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    store.append_timeline(db, case_id="nope", kind="evidence_captured", text="x")
+    events = db.query("SELECT kind FROM case_event").fetchall()
+    assert events == []
+
+
+def test_get_case_returns_evidence(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    _seed_evidence(db, case_id)
+    case = store.get_case(db, case_id=case_id)
+    assert case is not None
+    assert len(case["evidence"]) == 1
+    e = case["evidence"][0]
+    assert e["kind"] == "file"
+    assert e["sha256"] == "deadbeef"
+    assert e["original_path"] == "/etc/sudoers"
+    assert e["captured_at"] is not None
+    assert e["meta"] == {"size": 42}
+
+
+def test_get_case_no_evidence_is_empty_list(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    case = store.get_case(db, case_id=case_id)
+    assert case is not None
+    assert case["evidence"] == []
