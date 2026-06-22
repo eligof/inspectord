@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% from "_macros.html" import severity_badge, status_badge %}
+{% block content %}
+<h1>{{ case.title }}</h1>
+<p>{{ status_badge(case.status) }} <span class="mono muted">opened {{ case.opened_at }}</span></p>
+
+<h2>Alerts</h2>
+{% if case.alerts %}
+<table>
+  <thead><tr><th>Alert</th><th>Rule</th><th>Severity</th><th>Summary</th></tr></thead>
+  <tbody>
+    {% for a in case.alerts %}
+    <tr>
+      <td class="mono"><a href="/alerts/{{ a.alert_id }}">{{ a.alert_id[:8] }}…</a></td>
+      <td class="mono">{{ a.rule_id or '—' }}</td>
+      <td>{{ severity_badge(a.severity) if a.severity else '—' }}</td>
+      <td>{{ a.rendered_short or '(alert no longer available)' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No alerts linked.</div>
+{% endif %}
+
+<h2>Timeline</h2>
+<table>
+  <thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for t in case.timeline %}
+    <tr><td class="mono muted">{{ t.ts }}</td><td>{{ t.kind }}</td><td>{{ t.text or '' }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if case.status == "open" %}
+<div class="actions">
+  <form method="post" action="/cases/{{ case.case_id }}/notes">
+    <input type="text" name="text" placeholder="Add a note" required>
+    <button type="submit">Add note</button>
+  </form>
+  <form method="post" action="/cases/{{ case.case_id }}/close">
+    <button type="submit">Close case</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
