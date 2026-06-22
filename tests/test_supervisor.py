@@ -159,6 +159,41 @@ def test_supervisor_persist_projects_service_state(tmp_path: Path) -> None:
         sup.stop(timeout=5.0)
 
 
+def test_supervisor_captures_evidence_on_high_alert(tmp_path: Path) -> None:
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []  # no subprocesses; we inject directly
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        ev = Event(
+            ts=datetime(2026, 6, 22, tzinfo=UTC),
+            event_id="ev-1",
+            kind=EventKind.event,
+            category=["file"],
+            type=["change"],
+            action="file_modified",
+            severity=Severity.info,
+            module="fim_watcher",
+            file={"path": "/etc/sudoers"},
+        )
+        sup._inject_for_test(ev)
+        deadline = time.monotonic() + 3.0
+        ev_rows: list = []
+        while time.monotonic() < deadline:
+            with Database(cfg.storage.db_path) as db:
+                cases = db.query("SELECT case_id FROM cases").fetchall()
+                if cases:
+                    ev_rows = db.query("SELECT kind FROM case_evidence").fetchall()
+                    if ev_rows:
+                        break
+            time.sleep(0.05)
+        assert ev_rows, "expected case_evidence rows from the high-sev alert"
+        kinds = {r[0] for r in ev_rows}
+        assert "net_state" in kinds and "event_bundle" in kinds
+    finally:
+        sup.stop(timeout=5.0)
+
+
 def test_supervisor_persist_projects_process_state(tmp_path: Path) -> None:
     cfg = dev_config(base=tmp_path)
     cfg.workers = []  # no subprocesses; we inject directly

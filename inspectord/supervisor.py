@@ -23,6 +23,8 @@ import yaml as _yaml
 from inspectord.allowlist.file_loader import load_allowlist_file
 from inspectord.config import DaemonConfig, WorkerSpec
 from inspectord.enrichment import enrich
+from inspectord.evidence.collector import EvidenceCollector
+from inspectord.evidence.store import ForensicStore
 from inspectord.journal import Journal
 from inspectord.log import get
 from inspectord.router import DropPolicy, EventRouter
@@ -76,10 +78,14 @@ class Supervisor:
             allowlist_entries=load_allowlist_file(),
         )
         self._alert_listeners: list[Callable[[Alert], None]] = []
+        self._evidence_collector: EvidenceCollector | None = None
 
     def start(self) -> None:
         self._db.connect()
         run_migrations(self._db)
+        self._evidence_collector = EvidenceCollector(
+            self._cfg.storage.db_path, ForensicStore(self._cfg.storage.evidence_dir)
+        )
         # suppress(OSError) guards the /proc/sys/kernel/random/boot_id read on hosts
         # where it is unreadable (e.g. some CI sandboxes); migrations above have
         # already created process_state, so the reconcile UPDATE itself won't raise here.
@@ -103,6 +109,9 @@ class Supervisor:
         """Test hook: push an event through the same path workers' events take."""
         ev = enrich(ev)
         for alert in self._rule_engine.process(ev):
+            if self._evidence_collector is not None:
+                # MUST precede the notifier listeners (evidence first, notify second).
+                self._evidence_collector.capture(alert, ev)
             for fn in list(self._alert_listeners):
                 try:
                     fn(alert)
@@ -192,6 +201,9 @@ class Supervisor:
                 ev = Event.model_validate(payload)
                 ev = enrich(ev)
                 for alert in self._rule_engine.process(ev):
+                    if self._evidence_collector is not None:
+                        # MUST precede the notifier listeners (evidence first, notify second).
+                        self._evidence_collector.capture(alert, ev)
                     for fn in list(self._alert_listeners):
                         try:
                             fn(alert)
