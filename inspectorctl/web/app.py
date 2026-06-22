@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from inspectorctl.web.routes import (
     alerts,
+    cases,
     deps,
     devices,
     events,
@@ -65,5 +66,6 @@ def create_app(*, socket_path: Path) -> FastAPI:
     app.include_router(devices.router)
     app.include_router(file_integrity.router)
     app.include_router(persistence.router)
+    app.include_router(cases.router)
 
     return app
