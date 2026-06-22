@@ -90,3 +90,82 @@ def test_attach_alert_missing_case_is_noop(tmp_path: Path) -> None:
     assert links == []
     events = db.query("SELECT kind FROM case_event").fetchall()
     assert events == []
+
+
+# --- 2b: add_note + close_case ---
+
+
+def test_add_note_appends_note_event(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    store.add_note(db, case_id=case_id, text="looks malicious")
+    notes = db.query(
+        "SELECT text FROM case_event WHERE case_id = ? AND kind = 'note'", [case_id]
+    ).fetchall()
+    assert [n[0] for n in notes] == ["looks malicious"]
+
+
+def test_add_note_works_on_closed_case(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    store.close_case(db, case_id=case_id)
+    store.add_note(db, case_id=case_id, text="after close")
+    notes = db.query(
+        "SELECT text FROM case_event WHERE case_id = ? AND kind = 'note'", [case_id]
+    ).fetchall()
+    assert [n[0] for n in notes] == ["after close"]
+
+
+def test_add_note_truncates_long_text(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    store.add_note(db, case_id=case_id, text="x" * 20000)
+    notes = db.query(
+        "SELECT text FROM case_event WHERE case_id = ? AND kind = 'note'", [case_id]
+    ).fetchall()
+    assert len(notes[0][0]) == 16384
+
+
+def test_add_note_missing_case_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    store.add_note(db, case_id="nope", text="hi")
+    events = db.query("SELECT kind FROM case_event").fetchall()
+    assert events == []
+
+
+def test_close_case_sets_status_and_appends_event(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    store.close_case(db, case_id=case_id)
+    crow = db.query("SELECT status, closed_at FROM cases WHERE case_id = ?", [case_id]).fetchall()
+    assert crow[0][0] == "closed"
+    assert crow[0][1] is not None
+    closed = db.query(
+        "SELECT kind FROM case_event WHERE case_id = ? AND kind = 'closed'", [case_id]
+    ).fetchall()
+    assert len(closed) == 1
+
+
+def test_close_case_idempotent(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    store.close_case(db, case_id=case_id)
+    store.close_case(db, case_id=case_id)
+    crow = db.query("SELECT status FROM cases WHERE case_id = ?", [case_id]).fetchall()
+    assert crow[0][0] == "closed"
+    closed = db.query(
+        "SELECT kind FROM case_event WHERE case_id = ? AND kind = 'closed'", [case_id]
+    ).fetchall()
+    assert len(closed) == 1
+
+
+def test_close_case_missing_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    store.close_case(db, case_id="nope")
+    events = db.query("SELECT kind FROM case_event").fetchall()
+    assert events == []

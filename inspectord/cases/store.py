@@ -81,3 +81,20 @@ def attach_alert(db: Database, *, case_id: str, alert_id: str) -> None:
     if not _case_exists(db, case_id):
         return
     _attach(db, case_id, alert_id, datetime.now(tz=UTC), 0)
+
+
+def add_note(db: Database, *, case_id: str, text: str) -> None:
+    if not _case_exists(db, case_id):
+        return
+    _append_event(db, case_id, datetime.now(tz=UTC), 0, "note", text)
+
+
+def close_case(db: Database, *, case_id: str) -> None:
+    rows = db.query("SELECT status FROM cases WHERE case_id = ?", [case_id]).fetchall()
+    if not rows or rows[0][0] == "closed":
+        return
+    now = datetime.now(tz=UTC)
+    db.execute(
+        "UPDATE cases SET status = 'closed', closed_at = ? WHERE case_id = ?", [now, case_id]
+    )
+    _append_event(db, case_id, now, 0, "closed", None)
