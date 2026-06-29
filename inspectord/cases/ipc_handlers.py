@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any
 
-from inspectord.cases import store
+from inspectord.cases import export, store
+from inspectord.evidence.store import ForensicStore
 from inspectord.storage.db import Database
 
 
@@ -59,3 +61,49 @@ def handle_get_case(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
         for ev in case["evidence"]:
             ev["captured_at"] = _iso(ev["captured_at"])
     return {"schema_version": "1.0.0", "case": case}
+
+
+def handle_export_case_zip(
+    *, params: dict[str, Any], db_path: Path, evidence_dir: Path
+) -> dict[str, Any]:
+    case_id = str(params["case_id"])
+    store_ = ForensicStore(evidence_dir)
+    with Database(db_path) as db:
+        try:
+            data = export.build_case_zip(db, store_, case_id)
+        except export.CaseNotFound:
+            return {"schema_version": "1.0.0", "ok": False, "error": "not found"}
+        except export.ExportTooLarge:
+            return {"schema_version": "1.0.0", "ok": False, "error": "too_large"}
+        store.append_timeline(db, case_id=case_id, kind="exported", text="case exported as ZIP")
+    return {
+        "schema_version": "1.0.0",
+        "ok": True,
+        "filename": f"case-{case_id[:8]}.zip",
+        "content_b64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def handle_download_evidence(
+    *, params: dict[str, Any], db_path: Path, evidence_dir: Path
+) -> dict[str, Any]:
+    case_id = str(params["case_id"])
+    sha = str(params["sha"])
+    store_ = ForensicStore(evidence_dir)
+    with Database(db_path) as db:
+        try:
+            data, filename, media_type = export.read_evidence_blob(db, store_, case_id, sha)
+        except export.EvidenceNotFound:
+            return {"schema_version": "1.0.0", "ok": False, "error": "not found"}
+        except export.ExportTooLarge:
+            return {"schema_version": "1.0.0", "ok": False, "error": "too_large"}
+        store.append_timeline(
+            db, case_id=case_id, kind="evidence_downloaded", text=f"downloaded {sha[:12]}"
+        )
+    return {
+        "schema_version": "1.0.0",
+        "ok": True,
+        "filename": filename,
+        "media_type": media_type,
+        "content_b64": base64.b64encode(data).decode("ascii"),
+    }
