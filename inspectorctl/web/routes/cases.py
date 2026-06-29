@@ -114,3 +114,22 @@ def case_export(request: Request, case_id: str) -> Response:
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/cases/{case_id}/evidence/{sha}")
+def case_evidence_download(request: Request, case_id: str, sha: str) -> Response:
+    try:
+        result = call(
+            request.app.state.socket_path,
+            "download_evidence",
+            {"case_id": case_id, "sha": sha},
+        )
+    except WebIpcError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    _export_error_response(result)
+    data = base64.b64decode(result["content_b64"])
+    return Response(
+        content=data,
+        media_type=result["media_type"],
+        headers={"Content-Disposition": f'attachment; filename="{result["filename"]}"'},
+    )

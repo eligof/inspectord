@@ -247,3 +247,41 @@ def test_case_export_too_large_413(ipc_factory) -> None:
     response = client.post("/cases/c1/export")
     assert response.status_code == 413
     assert "forensic store" in response.text  # friendly retrieve-from-disk message
+
+
+def _download_ok() -> Method:
+    content_b64 = base64.b64encode(b"file bytes").decode("ascii")
+    return Method(
+        name="download_evidence",
+        handler=lambda params: {
+            "schema_version": "1.0.0",
+            "ok": True,
+            "filename": "sudoers",
+            "media_type": "application/octet-stream",
+            "content_b64": content_b64,
+        },
+        mutates=False,
+    )
+
+
+def _download_error(error: str) -> Method:
+    return Method(
+        name="download_evidence",
+        handler=lambda params: {"schema_version": "1.0.0", "ok": False, "error": error},
+        mutates=False,
+    )
+
+
+def test_case_evidence_download_returns_blob(ipc_factory) -> None:
+    client = ipc_factory([_download_ok()])
+    response = client.post("/cases/c1/evidence/" + "a" * 64)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert 'attachment; filename="sudoers"' in response.headers["content-disposition"]
+    assert response.content == b"file bytes"
+
+
+def test_case_evidence_download_not_in_case_404(ipc_factory) -> None:
+    client = ipc_factory([_download_error("not found")])
+    response = client.post("/cases/c1/evidence/" + "b" * 64)
+    assert response.status_code == 404
