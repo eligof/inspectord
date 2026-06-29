@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.templating import _TemplateResponse
 
@@ -83,3 +84,33 @@ def case_add_note(request: Request, case_id: str, text: str = Form(...)) -> Redi
 @router.post("/cases/{case_id}/close")
 def case_close(request: Request, case_id: str) -> RedirectResponse:
     return _case_mutate(request.app.state.socket_path, "close_case", {"case_id": case_id}, case_id)
+
+
+def _export_error_response(result: dict[str, Any]) -> None:
+    """Translate a daemon error dict into an HTTPException. Returns None if no error."""
+    if result.get("ok"):
+        return None
+    error = result.get("error")
+    if error == "too_large":
+        raise HTTPException(
+            status_code=413,
+            detail="export too large for browser download — retrieve from the on-disk "
+            "forensic store",
+        )
+    raise HTTPException(status_code=404, detail=error or "not found")
+
+
+@router.post("/cases/{case_id}/export")
+def case_export(request: Request, case_id: str) -> Response:
+    try:
+        result = call(request.app.state.socket_path, "export_case_zip", {"case_id": case_id})
+    except WebIpcError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    _export_error_response(result)
+    data = base64.b64decode(result["content_b64"])
+    filename = result["filename"]
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

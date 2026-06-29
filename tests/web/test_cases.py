@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import copy
+import io
+import zipfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -196,3 +199,51 @@ def test_case_close_post(ipc_factory) -> None:
     assert response.headers["location"] == "/cases/c1"
     assert len(calls) == 1
     assert calls[0]["case_id"] == "c1"
+
+
+def _export_ok() -> Method:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("case.json", '{"case_id": "c1"}')
+    content_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return Method(
+        name="export_case_zip",
+        handler=lambda params: {
+            "schema_version": "1.0.0",
+            "ok": True,
+            "filename": "case-c1.zip",
+            "content_b64": content_b64,
+        },
+        mutates=False,
+    )
+
+
+def _export_error(error: str) -> Method:
+    return Method(
+        name="export_case_zip",
+        handler=lambda params: {"schema_version": "1.0.0", "ok": False, "error": error},
+        mutates=False,
+    )
+
+
+def test_case_export_returns_zip(ipc_factory) -> None:
+    client = ipc_factory([_export_ok()])
+    response = client.post("/cases/c1/export")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert 'attachment; filename="case-c1.zip"' in response.headers["content-disposition"]
+    zf = zipfile.ZipFile(io.BytesIO(response.content))
+    assert "case.json" in zf.namelist()
+
+
+def test_case_export_not_found_404(ipc_factory) -> None:
+    client = ipc_factory([_export_error("not found")])
+    response = client.post("/cases/c1/export")
+    assert response.status_code == 404
+
+
+def test_case_export_too_large_413(ipc_factory) -> None:
+    client = ipc_factory([_export_error("too_large")])
+    response = client.post("/cases/c1/export")
+    assert response.status_code == 413
+    assert "forensic store" in response.text  # friendly retrieve-from-disk message
