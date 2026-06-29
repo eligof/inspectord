@@ -51,7 +51,8 @@ def _read_blob(store: ForensicStore, sha: str) -> bytes | None:
     path = store.path_for(sha)
     try:
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
+    except OSError as exc:
+        log.info("export: cannot open blob %s: %r", path, exc)
         return None
     try:
         st = os.fstat(fd)
@@ -64,7 +65,8 @@ def _read_blob(store: ForensicStore, sha: str) -> bytes | None:
                 break
             chunks.append(chunk)
         return b"".join(chunks)
-    except OSError:
+    except OSError as exc:
+        log.info("export: read failed %s: %r", path, exc)
         return None
     finally:
         os.close(fd)
@@ -163,10 +165,12 @@ def build_case_zip(db: Database, store: ForensicStore, case_id: str) -> bytes:
             if sha in written_shas:
                 continue
             if not _SHA_RE.match(sha):
+                log.warning("export: case %s has invalid sha in case_evidence: %r", case_id, sha)
                 skipped.append((sha, "invalid sha"))
                 continue
             blob = _read_blob(store, sha)
             if blob is None:
+                log.info("export: case %s blob missing on disk: %s", case_id, sha)
                 skipped.append((sha, "missing on disk"))
                 continue
             total += len(blob)

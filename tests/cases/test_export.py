@@ -227,3 +227,26 @@ def test_read_evidence_blob_sha_not_in_case(tmp_path: Path) -> None:
     sha = fstore.put(b"orphan")  # blob exists but not linked to this case
     with pytest.raises(export.EvidenceNotFound):
         export.read_evidence_blob(db, fstore, case_id, sha)
+
+
+def test_read_evidence_blob_size_cap_raises(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    fstore = _store(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    sha = fstore.put(b"x" * 1000)
+    _add_evidence(db, case_id, "file", sha, "/big")
+    monkeypatch.setattr(export, "_MAX_EXPORT_BYTES", 100)
+    with pytest.raises(export.ExportTooLarge):
+        export.read_evidence_blob(db, fstore, case_id, sha)
+
+
+def test_read_evidence_blob_missing_from_store_raises(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    fstore = _store(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    sha = "e" * 64  # valid hex, in case_evidence, but no blob on disk
+    _add_evidence(db, case_id, "file", sha, "/pruned")
+    with pytest.raises(export.EvidenceNotFound):
+        export.read_evidence_blob(db, fstore, case_id, sha)
