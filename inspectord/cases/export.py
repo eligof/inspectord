@@ -13,6 +13,8 @@ import re
 import stat
 import zipfile
 
+from inspectord.cases import store as cases_store
+
 log = logging.getLogger(__name__)
 
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -109,3 +111,68 @@ def _build_narrative(case: dict, *, skipped: list[tuple[str, str]]) -> str:
         for sha, reason in skipped:
             lines.append(f"- {sha}: {reason}")
     return "\n".join(lines) + "\n"
+
+
+def _alert_record(db, alert_id: str) -> bytes:
+    """Full alert record as JSON bytes (payload_json), or a placeholder for a pruned alert."""
+    rows = db.query("SELECT payload_json FROM alerts WHERE alert_id = ?", [alert_id]).fetchall()
+    if rows and rows[0][0]:
+        return rows[0][0].encode("utf-8")
+    import json as _json
+
+    return _json.dumps({"alert_id": alert_id, "note": "alert record pruned"}).encode("utf-8")
+
+
+def build_case_zip(db, store, case_id: str) -> bytes:
+    """Assemble the whole-case ZIP in memory. Raises CaseNotFound / ExportTooLarge."""
+    import json as _json
+
+    case = cases_store.get_case(db, case_id=case_id)
+    if case is None:
+        raise CaseNotFound(case_id)
+    # get_case returns datetime objects; render them ISO for JSON.
+    for key in ("opened_at", "closed_at"):
+        v = case.get(key)
+        if hasattr(v, "isoformat"):
+            case[key] = v.isoformat()
+    for a in case["alerts"]:
+        if hasattr(a.get("ts"), "isoformat"):
+            a["ts"] = a["ts"].isoformat()
+    for t in case["timeline"]:
+        if hasattr(t.get("ts"), "isoformat"):
+            t["ts"] = t["ts"].isoformat()
+    for e in case["evidence"]:
+        if hasattr(e.get("captured_at"), "isoformat"):
+            e["captured_at"] = e["captured_at"].isoformat()
+
+    skipped: list[tuple[str, str]] = []
+    total = 0
+    buf = io.BytesIO()
+    written_shas: set[str] = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("case.json", _json.dumps(case, indent=2, default=str))
+        seen_alerts: set[str] = set()
+        for a in case["alerts"]:
+            aid = a["alert_id"]
+            if aid in seen_alerts:
+                continue
+            seen_alerts.add(aid)
+            zf.writestr(f"alerts/{aid}.json", _alert_record(db, aid))
+        for e in case["evidence"]:
+            sha = e["sha256"]
+            if sha in written_shas:
+                continue
+            if not _SHA_RE.match(sha):
+                skipped.append((sha, "invalid sha"))
+                continue
+            blob = _read_blob(store, sha)
+            if blob is None:
+                skipped.append((sha, "missing on disk"))
+                continue
+            total += len(blob)
+            if total > _MAX_EXPORT_BYTES:
+                raise ExportTooLarge(f"case {case_id} exceeds {_MAX_EXPORT_BYTES} bytes")
+            zf.writestr(f"evidence/{sha}", blob)
+            written_shas.add(sha)
+        zf.writestr("narrative.md", _build_narrative(case, skipped=skipped))
+    return buf.getvalue()
