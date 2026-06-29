@@ -285,3 +285,15 @@ def test_case_evidence_download_not_in_case_404(ipc_factory) -> None:
     client = ipc_factory([_download_error("not found")])
     response = client.post("/cases/c1/evidence/" + "b" * 64)
     assert response.status_code == 404
+
+
+def test_case_detail_shows_export_and_download_links(ipc_factory) -> None:
+    client = ipc_factory([_get_case(CASE)])
+    response = client.get("/cases/c1")
+    assert response.status_code == 200
+    # Export button posts to the export route
+    assert 'action="/cases/c1/export"' in response.text
+    # Per-evidence-row download button posts to the evidence route with the sha
+    assert f'action="/cases/c1/evidence/{CASE["evidence"][0]["sha256"]}"' in response.text
+    # The old placeholder text is gone
+    assert "coming soon" not in response.text
