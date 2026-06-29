@@ -54,12 +54,14 @@
     {% endfor %}
   </tbody>
 </table>
-<form method="post" action="/cases/{{ case.case_id }}/export">
-  <button type="submit">Export case as ZIP</button>
-</form>
 {% else %}
 <div class="empty">No evidence captured.</div>
 {% endif %}
+{# Export is offered regardless of evidence: a zero-evidence case still exports a
+   valid minimal ZIP (case.json + narrative.md) per spec §3. #}
+<form method="post" action="/cases/{{ case.case_id }}/export">
+  <button type="submit">Export case as ZIP</button>
+</form>
 
 {% if case.status == "open" %}
 <div class="actions">

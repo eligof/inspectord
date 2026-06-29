@@ -155,6 +155,8 @@ def test_case_detail_evidence_empty_state(ipc_factory) -> None:
     response = client.get("/cases/c1")
     assert response.status_code == 200
     assert "No evidence captured." in response.text
+    # A zero-evidence case still exports a valid minimal ZIP (spec §3) — button must show.
+    assert 'action="/cases/c1/export"' in response.text
 
 
 def test_case_detail_missing_404(ipc_factory) -> None:
