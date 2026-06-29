@@ -27,6 +27,8 @@ from inspectord.cases.ipc_handlers import (
     handle_add_note,
     handle_attach_alert,
     handle_close_case,
+    handle_download_evidence,
+    handle_export_case_zip,
     handle_get_case,
     handle_list_cases,
     handle_open_case,
@@ -260,6 +262,24 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
         Method(
             name="get_case",
             handler=lambda params: handle_get_case(params=params, db_path=cfg.storage.db_path),
+            mutates=False,
+        ),
+        Method(
+            name="export_case_zip",
+            handler=lambda params: handle_export_case_zip(
+                params=params,
+                db_path=cfg.storage.db_path,
+                evidence_dir=cfg.storage.evidence_dir,
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="download_evidence",
+            handler=lambda params: handle_download_evidence(
+                params=params,
+                db_path=cfg.storage.db_path,
+                evidence_dir=cfg.storage.evidence_dir,
+            ),
             mutates=False,
         ),
     ]
