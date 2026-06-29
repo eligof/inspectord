@@ -264,6 +264,9 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
             handler=lambda params: handle_get_case(params=params, db_path=cfg.storage.db_path),
             mutates=False,
         ),
+        # export/download are user-initiated reads; mutates=False is deliberate (spec §2.2) so a
+        # future polkit gate does not prompt on every download. They DO append a custody
+        # case_event as an internal side-effect — that write must never require authorization.
         Method(
             name="export_case_zip",
             handler=lambda params: handle_export_case_zip(

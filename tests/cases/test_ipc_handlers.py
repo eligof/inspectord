@@ -192,11 +192,16 @@ def test_export_case_zip_handler_round_trip_and_custody(tmp_path) -> None:
     assert resp["filename"].endswith(".zip")
 
     db2 = _db(tmp_path)  # reopen; migrations are idempotent
-    kinds = [
-        r[0]
-        for r in db2.query("SELECT kind FROM case_event WHERE case_id = ?", [case_id]).fetchall()
-    ]
-    assert "exported" in kinds
+    try:
+        kinds = [
+            r[0]
+            for r in db2.query(
+                "SELECT kind FROM case_event WHERE case_id = ?", [case_id]
+            ).fetchall()
+        ]
+        assert "exported" in kinds
+    finally:
+        db2.close()
 
 
 def test_export_case_zip_handler_not_found(tmp_path) -> None:
@@ -224,11 +229,16 @@ def test_download_evidence_handler_round_trip_and_custody(tmp_path) -> None:
     assert resp["media_type"] == "application/octet-stream"
 
     db2 = _db(tmp_path)
-    kinds = [
-        r[0]
-        for r in db2.query("SELECT kind FROM case_event WHERE case_id = ?", [case_id]).fetchall()
-    ]
-    assert "evidence_downloaded" in kinds
+    try:
+        kinds = [
+            r[0]
+            for r in db2.query(
+                "SELECT kind FROM case_event WHERE case_id = ?", [case_id]
+            ).fetchall()
+        ]
+        assert "evidence_downloaded" in kinds
+    finally:
+        db2.close()
 
 
 def test_download_evidence_handler_not_found(tmp_path) -> None:
