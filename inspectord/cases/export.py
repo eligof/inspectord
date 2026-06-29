@@ -7,13 +7,17 @@ built here and shipped base64-over-IPC, hard-capped at _MAX_EXPORT_BYTES raw byt
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import re
 import stat
 import zipfile
+from typing import Any
 
 from inspectord.cases import store as cases_store
+from inspectord.evidence.store import ForensicStore
+from inspectord.storage.db import Database
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +41,7 @@ class ExportTooLarge(CaseExportError):
     pass
 
 
-def _read_blob(store, sha: str) -> bytes | None:
+def _read_blob(store: ForensicStore, sha: str) -> bytes | None:
     """Read a forensic-store blob by sha. None if missing/invalid/unsafe.
 
     Opens with O_NOFOLLOW (defense-in-depth — the store holds regular files only) and
@@ -66,7 +70,7 @@ def _read_blob(store, sha: str) -> bytes | None:
         os.close(fd)
 
 
-def _build_narrative(case: dict, *, skipped: list[tuple[str, str]]) -> str:
+def _build_narrative(case: dict[str, Any], *, skipped: list[tuple[str, str]]) -> str:
     """Plain-text human summary. `skipped` = (sha, reason) for blobs not included."""
     lines: list[str] = []
     lines.append(f"# Case {case['case_id']}: {case.get('title') or '(untitled)'}")
@@ -92,10 +96,7 @@ def _build_narrative(case: dict, *, skipped: list[tuple[str, str]]) -> str:
     lines.append("")
     lines.append("## Evidence")
     for e in case.get("evidence", []):
-        lines.append(
-            f"- {e.get('kind')} {e.get('sha256')} "
-            f"{e.get('original_path') or ''}".rstrip()
-        )
+        lines.append(f"- {e.get('kind')} {e.get('sha256')} {e.get('original_path') or ''}".rstrip())
     if not case.get("evidence"):
         lines.append("- (none)")
     lines.append("")
@@ -113,44 +114,43 @@ def _build_narrative(case: dict, *, skipped: list[tuple[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _alert_record(db, alert_id: str) -> bytes:
+def _alert_record(db: Database, alert_id: str) -> bytes:
     """Full alert record as JSON bytes (payload_json), or a placeholder for a pruned alert."""
     rows = db.query("SELECT payload_json FROM alerts WHERE alert_id = ?", [alert_id]).fetchall()
     if rows and rows[0][0]:
-        return rows[0][0].encode("utf-8")
-    import json as _json
+        payload: str = rows[0][0]
+        return payload.encode("utf-8")
+    return json.dumps({"alert_id": alert_id, "note": "alert record pruned"}).encode("utf-8")
 
-    return _json.dumps({"alert_id": alert_id, "note": "alert record pruned"}).encode("utf-8")
+
+def _isoify(obj: dict[str, Any], key: str) -> None:
+    """Render a datetime value at obj[key] as an ISO string in place (no-op otherwise)."""
+    iso = getattr(obj.get(key), "isoformat", None)
+    if iso is not None:
+        obj[key] = iso()
 
 
-def build_case_zip(db, store, case_id: str) -> bytes:
+def build_case_zip(db: Database, store: ForensicStore, case_id: str) -> bytes:
     """Assemble the whole-case ZIP in memory. Raises CaseNotFound / ExportTooLarge."""
-    import json as _json
-
     case = cases_store.get_case(db, case_id=case_id)
     if case is None:
         raise CaseNotFound(case_id)
     # get_case returns datetime objects; render them ISO for JSON.
-    for key in ("opened_at", "closed_at"):
-        v = case.get(key)
-        if hasattr(v, "isoformat"):
-            case[key] = v.isoformat()
+    _isoify(case, "opened_at")
+    _isoify(case, "closed_at")
     for a in case["alerts"]:
-        if hasattr(a.get("ts"), "isoformat"):
-            a["ts"] = a["ts"].isoformat()
+        _isoify(a, "ts")
     for t in case["timeline"]:
-        if hasattr(t.get("ts"), "isoformat"):
-            t["ts"] = t["ts"].isoformat()
+        _isoify(t, "ts")
     for e in case["evidence"]:
-        if hasattr(e.get("captured_at"), "isoformat"):
-            e["captured_at"] = e["captured_at"].isoformat()
+        _isoify(e, "captured_at")
 
     skipped: list[tuple[str, str]] = []
     total = 0
     buf = io.BytesIO()
     written_shas: set[str] = set()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("case.json", _json.dumps(case, indent=2, default=str))
+        zf.writestr("case.json", json.dumps(case, indent=2, default=str))
         seen_alerts: set[str] = set()
         for a in case["alerts"]:
             aid = a["alert_id"]
@@ -176,3 +176,36 @@ def build_case_zip(db, store, case_id: str) -> bytes:
             written_shas.add(sha)
         zf.writestr("narrative.md", _build_narrative(case, skipped=skipped))
     return buf.getvalue()
+
+
+def _basename(path: str) -> str:
+    return os.path.basename(path.rstrip("/")) or ""
+
+
+def read_evidence_blob(
+    db: Database, store: ForensicStore, case_id: str, sha: str
+) -> tuple[bytes, str, str]:
+    """Return (bytes, filename, media_type) for a sha tied to THIS case. Raises on absence.
+
+    Validates `sha` as hex BEFORE any path op, and confirms the sha is in this case's
+    case_evidence rows — never serves an arbitrary store path.
+    """
+    if not _SHA_RE.match(sha):
+        raise EvidenceNotFound(sha)
+    rows = db.query(
+        "SELECT kind, original_path FROM case_evidence WHERE case_id = ? AND sha256 = ? "
+        "ORDER BY original_path LIMIT 1",
+        [case_id, sha],
+    ).fetchall()
+    if not rows:
+        raise EvidenceNotFound(sha)
+    kind, original_path = rows[0][0], rows[0][1] or ""
+    blob = _read_blob(store, sha)
+    if blob is None:
+        raise EvidenceNotFound(sha)
+    if len(blob) > _MAX_EXPORT_BYTES:
+        raise ExportTooLarge(sha)
+    if kind in ("net_state", "event_bundle"):
+        return blob, f"{sha[:12]}-{kind}.json", "application/json"
+    filename = _basename(original_path) or f"{sha[:12]}.bin"
+    return blob, filename, "application/octet-stream"

@@ -90,9 +90,14 @@ def test_build_narrative_includes_core_fields_and_missing_section() -> None:
 
 def test_build_narrative_omits_missing_section_when_none() -> None:
     case = {
-        "case_id": "c1", "title": "t", "status": "closed",
-        "opened_at": "x", "closed_at": "y",
-        "alerts": [], "timeline": [], "evidence": [],
+        "case_id": "c1",
+        "title": "t",
+        "status": "closed",
+        "opened_at": "x",
+        "closed_at": "y",
+        "alerts": [],
+        "timeline": [],
+        "evidence": [],
     }
     text = export._build_narrative(case, skipped=[])
     assert "Missing evidence" not in text
@@ -181,3 +186,44 @@ def test_build_case_zip_empty_case_is_valid(tmp_path: Path) -> None:
     data = export.build_case_zip(db, fstore, case_id)
     zf = zipfile.ZipFile(io.BytesIO(data))
     assert "case.json" in zf.namelist() and "narrative.md" in zf.namelist()
+
+
+def test_read_evidence_blob_file_kind(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    fstore = _store(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    sha = fstore.put(b"file bytes")
+    _add_evidence(db, case_id, "file", sha, "/etc/shadow")
+    data, filename, media = export.read_evidence_blob(db, fstore, case_id, sha)
+    assert data == b"file bytes"
+    assert filename == "shadow"
+    assert media == "application/octet-stream"
+
+
+def test_read_evidence_blob_json_kind(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    fstore = _store(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    sha = fstore.put(b"{}")
+    _add_evidence(db, case_id, "net_state", sha, "")
+    _data, filename, media = export.read_evidence_blob(db, fstore, case_id, sha)
+    assert media == "application/json"
+    assert filename == f"{sha[:12]}-net_state.json"
+
+
+def test_read_evidence_blob_rejects_non_hex(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    with pytest.raises(export.EvidenceNotFound):
+        export.read_evidence_blob(db, _store(tmp_path), "c1", "NOTHEX")
+
+
+def test_read_evidence_blob_sha_not_in_case(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    fstore = _store(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    sha = fstore.put(b"orphan")  # blob exists but not linked to this case
+    with pytest.raises(export.EvidenceNotFound):
+        export.read_evidence_blob(db, fstore, case_id, sha)
