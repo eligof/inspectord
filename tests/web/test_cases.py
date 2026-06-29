@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import copy
+import io
+import zipfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -152,6 +155,8 @@ def test_case_detail_evidence_empty_state(ipc_factory) -> None:
     response = client.get("/cases/c1")
     assert response.status_code == 200
     assert "No evidence captured." in response.text
+    # A zero-evidence case still exports a valid minimal ZIP (spec §3) — button must show.
+    assert 'action="/cases/c1/export"' in response.text
 
 
 def test_case_detail_missing_404(ipc_factory) -> None:
@@ -196,3 +201,101 @@ def test_case_close_post(ipc_factory) -> None:
     assert response.headers["location"] == "/cases/c1"
     assert len(calls) == 1
     assert calls[0]["case_id"] == "c1"
+
+
+def _export_ok() -> Method:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("case.json", '{"case_id": "c1"}')
+    content_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return Method(
+        name="export_case_zip",
+        handler=lambda params: {
+            "schema_version": "1.0.0",
+            "ok": True,
+            "filename": "case-c1.zip",
+            "content_b64": content_b64,
+        },
+        mutates=False,
+    )
+
+
+def _export_error(error: str) -> Method:
+    return Method(
+        name="export_case_zip",
+        handler=lambda params: {"schema_version": "1.0.0", "ok": False, "error": error},
+        mutates=False,
+    )
+
+
+def test_case_export_returns_zip(ipc_factory) -> None:
+    client = ipc_factory([_export_ok()])
+    response = client.post("/cases/c1/export")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert 'attachment; filename="case-c1.zip"' in response.headers["content-disposition"]
+    zf = zipfile.ZipFile(io.BytesIO(response.content))
+    assert "case.json" in zf.namelist()
+
+
+def test_case_export_not_found_404(ipc_factory) -> None:
+    client = ipc_factory([_export_error("not found")])
+    response = client.post("/cases/c1/export")
+    assert response.status_code == 404
+
+
+def test_case_export_too_large_413(ipc_factory) -> None:
+    client = ipc_factory([_export_error("too_large")])
+    response = client.post("/cases/c1/export")
+    assert response.status_code == 413
+    assert "forensic store" in response.text  # friendly retrieve-from-disk message
+
+
+def _download_ok() -> Method:
+    content_b64 = base64.b64encode(b"file bytes").decode("ascii")
+    return Method(
+        name="download_evidence",
+        handler=lambda params: {
+            "schema_version": "1.0.0",
+            "ok": True,
+            "filename": "sudoers",
+            "media_type": "application/octet-stream",
+            "content_b64": content_b64,
+        },
+        mutates=False,
+    )
+
+
+def _download_error(error: str) -> Method:
+    return Method(
+        name="download_evidence",
+        handler=lambda params: {"schema_version": "1.0.0", "ok": False, "error": error},
+        mutates=False,
+    )
+
+
+def test_case_evidence_download_returns_blob(ipc_factory) -> None:
+    client = ipc_factory([_download_ok()])
+    response = client.post("/cases/c1/evidence/" + "a" * 64)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert 'attachment; filename="sudoers"' in response.headers["content-disposition"]
+    assert response.content == b"file bytes"
+
+
+def test_case_evidence_download_not_in_case_404(ipc_factory) -> None:
+    client = ipc_factory([_download_error("not found")])
+    response = client.post("/cases/c1/evidence/" + "b" * 64)
+    assert response.status_code == 404
+
+
+def test_case_detail_shows_export_and_download_links(ipc_factory) -> None:
+    client = ipc_factory([_get_case(CASE)])
+    response = client.get("/cases/c1")
+    assert response.status_code == 200
+    # Export button posts to the export route
+    assert 'action="/cases/c1/export"' in response.text
+    # Per-evidence-row download button posts to the evidence route with the sha
+    assert f'action="/cases/c1/evidence/{CASE["evidence"][0]["sha256"]}"' in response.text
+    # The old placeholder text is gone
+    assert "coming soon" not in response.text

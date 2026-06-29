@@ -9,6 +9,11 @@ from typing import Any
 
 from inspectord.schemas.versions import IPC_PROTOCOL_VERSION
 
+# Guard on the response size. The largest legitimate response is a base64-encoded case
+# export (daemon-capped at 64 MiB raw → ~85 MiB base64) plus JSON envelope; 96 MiB gives
+# headroom while bounding a runaway/oversized response.
+_MAX_RESPONSE_BYTES = 96 * 1024 * 1024
+
 
 class IpcError(RuntimeError):
     pass
@@ -35,13 +40,17 @@ class IpcClient:
                 "schema_version": IPC_PROTOCOL_VERSION,
             }
             sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
-            line = b""
-            while not line.endswith(b"\n"):
-                chunk = sock.recv(4096)
+            buf = bytearray()
+            while not buf.endswith(b"\n"):
+                chunk = sock.recv(65536)
                 if not chunk:
                     break
-                line += chunk
-            resp = json.loads(line.decode("utf-8"))
+                buf += chunk  # bytearray += is amortized O(1) (no quadratic recopy)
+                if len(buf) > _MAX_RESPONSE_BYTES:
+                    raise IpcError(
+                        f"response exceeds {_MAX_RESPONSE_BYTES} bytes (too large for IPC)"
+                    )
+            resp = json.loads(bytes(buf).decode("utf-8"))
             if "error" in resp:
                 raise IpcError(f"{resp['error']['code']}: {resp['error']['message']}")
             return resp["result"]
