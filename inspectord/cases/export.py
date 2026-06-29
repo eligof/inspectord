@@ -52,7 +52,9 @@ def _read_blob(store: ForensicStore, sha: str) -> bytes | None:
     try:
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as exc:
-        log.info("export: cannot open blob %s: %r", path, exc)
+        # debug, not info: callers (build_case_zip) log the operational signal with case_id
+        # context; this helper only records the low-level cause.
+        log.debug("export: cannot open blob %s: %r", path, exc)
         return None
     try:
         st = os.fstat(fd)
@@ -66,7 +68,7 @@ def _read_blob(store: ForensicStore, sha: str) -> bytes | None:
             chunks.append(chunk)
         return b"".join(chunks)
     except OSError as exc:
-        log.info("export: read failed %s: %r", path, exc)
+        log.debug("export: read failed %s: %r", path, exc)
         return None
     finally:
         os.close(fd)

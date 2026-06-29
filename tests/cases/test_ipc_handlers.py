@@ -7,7 +7,7 @@ import io
 import zipfile
 from pathlib import Path
 
-from inspectord.cases import ipc_handlers, store
+from inspectord.cases import export, ipc_handlers, store
 from inspectord.cases.ipc_handlers import (
     handle_add_note,
     handle_attach_alert,
@@ -252,3 +252,33 @@ def test_download_evidence_handler_not_found(tmp_path) -> None:
         evidence_dir=tmp_path / "evidence",
     )
     assert resp["ok"] is False and resp["error"] == "not found"
+
+
+def test_export_case_zip_handler_too_large(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    fstore = ForensicStore(tmp_path / "evidence")
+    case_id, _sha = _seed_case_with_evidence(db, fstore)
+    db.close()
+    monkeypatch.setattr(export, "_MAX_EXPORT_BYTES", 1)
+    resp = ipc_handlers.handle_export_case_zip(
+        params={"case_id": case_id},
+        db_path=tmp_path / "t.duckdb",
+        evidence_dir=tmp_path / "evidence",
+    )
+    assert resp["schema_version"] == "1.0.0"
+    assert resp["ok"] is False and resp["error"] == "too_large"
+
+
+def test_download_evidence_handler_too_large(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    fstore = ForensicStore(tmp_path / "evidence")
+    case_id, sha = _seed_case_with_evidence(db, fstore)
+    db.close()
+    monkeypatch.setattr(export, "_MAX_EXPORT_BYTES", 1)
+    resp = ipc_handlers.handle_download_evidence(
+        params={"case_id": case_id, "sha": sha},
+        db_path=tmp_path / "t.duckdb",
+        evidence_dir=tmp_path / "evidence",
+    )
+    assert resp["schema_version"] == "1.0.0"
+    assert resp["ok"] is False and resp["error"] == "too_large"
