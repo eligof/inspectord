@@ -18,8 +18,8 @@ use aya_ebpf::{
 };
 
 use records::{
-    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, PtraceRecord,
-    CMDLINE_LEN, COMM_LEN,
+    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, PtraceRecord, CMDLINE_LEN,
+    COMM_LEN,
 };
 
 #[map]
