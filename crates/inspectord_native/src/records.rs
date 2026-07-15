@@ -123,6 +123,63 @@ impl ProcessExitRecord {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct PtraceRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub uid: u32,
+    /// Raw ptrace request; only the validated injection-relevant set is ever
+    /// emitted (see the BPF program). Decoded by `request_str`.
+    pub request: i32,
+    /// ptrace's target pid argument — a TID in the *caller's* pid namespace,
+    /// so not necessarily a host pid for namespaced callers.
+    pub target_pid: i32,
+    pub comm: [u8; COMM_LEN],
+}
+
+impl PtraceRecord {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        assert!(bytes.len() >= std::mem::size_of::<Self>());
+        let mut out = Self {
+            timestamp_ns: 0,
+            pid: 0,
+            uid: 0,
+            request: 0,
+            target_pid: 0,
+            comm: [0; COMM_LEN],
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                &mut out as *mut Self as *mut u8,
+                std::mem::size_of::<Self>(),
+            );
+        }
+        out
+    }
+
+    pub fn comm_str(&self) -> String {
+        let n = self.comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        String::from_utf8_lossy(&self.comm[..n]).into_owned()
+    }
+
+    /// Human-readable ptrace request name. Known injection-relevant values map
+    /// to their PTRACE_* constant; anything else renders as `PTRACE_<decimal>`.
+    pub fn request_str(&self) -> String {
+        match self.request {
+            4 => "PTRACE_POKETEXT".to_string(),
+            5 => "PTRACE_POKEDATA".to_string(),
+            6 => "PTRACE_POKEUSR".to_string(),
+            13 => "PTRACE_SETREGS".to_string(),
+            16 => "PTRACE_ATTACH".to_string(),
+            0x4205 => "PTRACE_SETREGSET".to_string(),
+            0x4206 => "PTRACE_SEIZE".to_string(),
+            other => format!("PTRACE_{other}"),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ConnectRecord {
     pub timestamp_ns: u64,
     pub pid: u32,
@@ -347,5 +404,64 @@ mod tests {
         assert_eq!(parsed.comm_str(), "curl");
         assert_eq!(parsed.saddr_str(), "2001:db8::1");
         assert_eq!(parsed.daddr_str(), "2606:2800:220:1:248:1893:25c8:1946");
+    }
+
+    fn sample_ptrace() -> PtraceRecord {
+        let mut comm = [0u8; COMM_LEN];
+        comm[..4].copy_from_slice(b"gdb\0");
+        PtraceRecord {
+            timestamp_ns: 999,
+            pid: 1234,
+            uid: 1000,
+            request: 16, // PTRACE_ATTACH
+            target_pid: 5678,
+            comm,
+        }
+    }
+
+    #[test]
+    fn ptrace_from_bytes_roundtrips_the_c_layout() {
+        let r = sample_ptrace();
+        let mut buf = vec![0u8; std::mem::size_of::<PtraceRecord>()];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &r as *const PtraceRecord as *const u8,
+                buf.as_mut_ptr(),
+                buf.len(),
+            );
+        }
+        let parsed = PtraceRecord::from_bytes(&buf);
+        assert_eq!(parsed.timestamp_ns, 999);
+        assert_eq!(parsed.pid, 1234);
+        assert_eq!(parsed.uid, 1000);
+        assert_eq!(parsed.request, 16);
+        assert_eq!(parsed.target_pid, 5678);
+        assert_eq!(parsed.comm_str(), "gdb");
+    }
+
+    #[test]
+    fn ptrace_request_str_maps_known_values() {
+        let mut r = sample_ptrace();
+        for (val, name) in [
+            (4, "PTRACE_POKETEXT"),
+            (5, "PTRACE_POKEDATA"),
+            (6, "PTRACE_POKEUSR"),
+            (13, "PTRACE_SETREGS"),
+            (16, "PTRACE_ATTACH"),
+            (0x4205, "PTRACE_SETREGSET"),
+            (0x4206, "PTRACE_SEIZE"),
+        ] {
+            r.request = val;
+            assert_eq!(r.request_str(), name);
+        }
+    }
+
+    #[test]
+    fn ptrace_request_str_renders_unknown_as_decimal() {
+        let mut r = sample_ptrace();
+        r.request = 0x4207;
+        assert_eq!(r.request_str(), "PTRACE_16903");
+        r.request = -1;
+        assert_eq!(r.request_str(), "PTRACE_-1");
     }
 }
