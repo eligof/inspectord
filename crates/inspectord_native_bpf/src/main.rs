@@ -403,10 +403,11 @@ fn try_ptrace_syscall(ctx: TracePointContext) -> Result<(), i64> {
     //   arg 0 = request  @ offset 16
     //   arg 1 = pid      @ offset 24
     let request: u64 = unsafe { ctx.read_at(16).map_err(|_| -1_i64)? };
-    let target_pid: u64 = unsafe { ctx.read_at(24).map_err(|_| -1_i64)? };
 
     // Compare the FULL u64 so a value with garbage high bits can never alias
     // a real request (e.g. 0x1_0000_0010 must not look like PTRACE_ATTACH).
+    // Filter on request first — the excluded read/step/cont requests are the
+    // overwhelming majority, so we skip the second probe-read on that hot path.
     let interesting = matches!(
         request,
         PTRACE_POKETEXT
@@ -420,6 +421,7 @@ fn try_ptrace_syscall(ctx: TracePointContext) -> Result<(), i64> {
     if !interesting {
         return Err(0);
     }
+    let target_pid: u64 = unsafe { ctx.read_at(24).map_err(|_| -1_i64)? };
 
     // Cross-process only. caller = TGID (upper 32 bits of pid_tgid); drop when
     // the target TID equals it (same-process). Another process's TID can never

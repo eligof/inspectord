@@ -165,6 +165,9 @@ impl PtraceRecord {
     /// Human-readable ptrace request name. Known injection-relevant values map
     /// to their PTRACE_* constant; anything else renders as `PTRACE_<decimal>`.
     pub fn request_str(&self) -> String {
+        // Keep this table in sync with the emitted set (the PTRACE_* consts in
+        // inspectord_native_bpf/src/main.rs). A missing arm here is silent —
+        // the request falls through to the PTRACE_<decimal> default.
         match self.request {
             4 => "PTRACE_POKETEXT".to_string(),
             5 => "PTRACE_POKEDATA".to_string(),
