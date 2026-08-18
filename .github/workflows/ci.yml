@@ -43,7 +43,14 @@ jobs:
           echo "/usr/lib/llvm-18/bin" >> $GITHUB_PATH
 
       - name: Install bpf-linker
-        run: cargo install --locked bpf-linker
+        # Pinned deliberately. bpf-linker 0.11.0 (2026-08-12) dropped
+        # aya-rustc-llvm-proxy and links the *system* LLVM directly, which
+        # requires LLVM 21+; this job installs llvm-18, so an unpinned install
+        # fails to link (undefined symbol: LLVMParseIRInContext2). 0.10.4 is the
+        # last release that links through rustc's own LLVM, which is what this
+        # job has always relied on. Bump only together with the llvm-NN
+        # packages and LLVM_SYS_NNN_PREFIX above.
+        run: cargo install --locked bpf-linker --version 0.10.4
 
       - name: Install dependencies
         run: |

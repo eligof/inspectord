@@ -3,7 +3,10 @@ line-length = 100
 
 [lint]
 select = ["E", "F", "I", "W", "B", "UP", "SIM", "PL", "RUF"]
-ignore = ["PLR0913", "PLR2004"]
+# PLR0917 (too many positional args) is the same judgement call as PLR0913
+# (too many args), which this project already opts out of; ruff promoted it
+# out of preview, which would otherwise fail CI on pre-existing helpers.
+ignore = ["PLR0913", "PLR0917", "PLR2004"]
 
 [lint.per-file-ignores]
 "tests/**" = ["PLR2004", "S101"]
