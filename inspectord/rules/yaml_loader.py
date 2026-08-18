@@ -113,7 +113,10 @@ _LEAF_OP = re.compile(
     """,
     re.VERBOSE,
 )
-_BOOL_TOKEN_RE = re.compile(r"\bAND\b|\bOR\b|\bNOT\b")
+# A NOT that opens a `path NOT IN [...]` leaf belongs to that leaf's operator,
+# not to the boolean grammar; splitting there would leave a bare `IN [...]`
+# fragment that _eval_leaf cannot parse.
+_BOOL_TOKEN_RE = re.compile(r"\bAND\b|\bOR\b|\bNOT\b(?!\s+IN\b)")
 
 
 def _eval_expr(expr: str, event: Event) -> bool:

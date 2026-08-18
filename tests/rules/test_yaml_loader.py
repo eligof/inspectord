@@ -13,6 +13,7 @@ from inspectord.rules.yaml_loader import (
     YamlRuleError,
     evaluate_yaml_rule,
     load_yaml_rule,
+    load_yaml_rule_from_dict,
 )
 
 
@@ -145,3 +146,65 @@ def test_missing_required_field_raises(tmp_path: Path) -> None:
     p.write_text("version: 1.0.0\nid: x\n")
     with pytest.raises(YamlRuleError):
         load_yaml_rule(p)
+
+
+def _proc_event(name: str):
+    return build_event(
+        module="process_collector_module_load",
+        action="module_load_attempt",
+        category=["driver"],
+        type_=["installation"],
+        severity="info",
+        process={"pid": 1, "name": name},
+    )
+
+
+@pytest.mark.parametrize(
+    ("expr", "comm", "expected"),
+    [
+        # `path NOT IN [...]` is advertised by the leaf grammar, so it must be
+        # reachable: the boolean tokenizer must not split the leading NOT off
+        # as a unary operator and leave a bare `IN [...]` behind.
+        ('process.name NOT IN ["modprobe", "insmod"]', "curl", True),
+        ('process.name NOT IN ["modprobe", "insmod"]', "modprobe", False),
+        # ...including as the tail of an AND chain, which is how rules use it.
+        (
+            'event.action == "module_load_attempt" AND process.name NOT IN ["modprobe"]',
+            "curl",
+            True,
+        ),
+        (
+            'event.action == "module_load_attempt" AND process.name NOT IN ["modprobe"]',
+            "modprobe",
+            False,
+        ),
+        # The unary `NOT <leaf>` prefix form must keep working.
+        ('NOT process.name IN ["modprobe"]', "curl", True),
+        ('NOT process.name IN ["modprobe"]', "modprobe", False),
+        ('NOT process.name == "modprobe"', "curl", True),
+        # And plain IN is unaffected.
+        ('process.name IN ["modprobe", "insmod"]', "modprobe", True),
+        ('process.name IN ["modprobe", "insmod"]', "curl", False),
+    ],
+)
+def test_not_in_leaf_operator(expr: str, comm: str, expected: bool) -> None:
+    rule = _rule_from_expr(expr)
+    fired = bool(evaluate_yaml_rule(rule, EvalContext(event=_proc_event(comm), history=[])))
+    assert fired is expected, expr
+
+
+def _rule_from_expr(expr: str) -> YamlRule:
+    return load_yaml_rule_from_dict(
+        {
+            "version": "1.0.0",
+            "id": "test.expr",
+            "name": "expr",
+            "severity": "info",
+            "category": "test",
+            "why": "test",
+            "detect": {"any_of": [expr]},
+            "short": "s",
+            "detail": "d",
+        },
+        source="test.yaml",
+    )
