@@ -83,3 +83,21 @@ module = "inspectord.workers.udev_monitor"
 [[workers]]
 name = "persistence_snapshotter"
 module = "inspectord.workers.persistence_snapshotter"
+
+# scanner_runner is the first worker whose job takes MINUTES. Every scanner
+# ships disabled: flip `enabled` per host once the scanner is installed and its
+# database initialized. See docs/superpowers/specs/2026-08-19-scanner-runner-design.md.
+[[workers]]
+name = "scanner_runner"
+module = "inspectord.workers.scanner_runner"
+[workers.config]
+interval_s = 60.0
+startup_delay_s = 300.0
+max_findings_per_run = 500
+# Per-stream ceiling on captured scanner output; the surplus is drained and
+# dropped, and `scan_completed` says so.
+max_output_bytes = 8388608
+[workers.config.scanners.aide]
+enabled = false
+interval_s = 86400.0
+timeout_s = 3600.0

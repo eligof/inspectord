@@ -72,3 +72,26 @@ def test_build_event_includes_uuidv7_event_id() -> None:
         module="log_tailer", action="x", category=["host"], type_=["info"], severity="info"
     )
     assert ev2.event_id < ev3.event_id
+
+
+def test_build_event_carries_threat_block() -> None:
+    indicator = {
+        "type": "aide_change",
+        "value": "changed",
+        "source": "aide",
+        "severity": "high",
+    }
+    ev = build_event(
+        module="scanner_runner",
+        action="scan_finding",
+        category=["file"],
+        type_=["info"],
+        severity="low",
+        threat={"indicator": indicator},
+    )
+    assert ev.threat == {"indicator": indicator}
+
+
+def test_build_event_threat_defaults_to_none() -> None:
+    ev = build_event(module="m", action="a", category=["host"], type_=["info"], severity="info")
+    assert ev.threat is None

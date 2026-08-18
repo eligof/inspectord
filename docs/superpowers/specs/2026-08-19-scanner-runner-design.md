@@ -149,6 +149,7 @@ Config (contract worker, delivered on stdin):
   "interval_s": 60,
   "startup_delay_s": 120,
   "max_findings_per_run": 500,
+  "max_output_bytes": 8388608,
   "scanners": {
     "aide":     {"enabled": true,  "interval_s": 86400, "timeout_s": 3600},
     "rkhunter": {"enabled": true,  "interval_s": 86400, "timeout_s": 1800},
