@@ -154,6 +154,13 @@ def test_module_load_stream_captures_both_syscall_variants() -> None:
         inits = [r for r in mine if r["variant_name"] == "init_module"]
         assert finits, f"no finit_module record captured; got {records}"
         assert inits, f"no init_module record captured; got {records}"
+        # Exactly one record per syscall. The loader registers a prog-less perf
+        # event on every online CPU to un-gate the faultable tracepoint handler
+        # (see enable_tracepoint_on_all_cpus); if those events ever ended up
+        # carrying the BPF program too, each call would fan out into one record
+        # per CPU. This is the assertion that would catch that.
+        assert len(finits) == 1, f"expected exactly one finit_module record, got {finits}"
+        assert len(inits) == 1, f"expected exactly one init_module record, got {inits}"
         assert finits[0]["fd"] == -1
         assert inits[0]["fd"] == -1  # init_module has no fd
         assert finits[0]["uid"] == 0

@@ -509,7 +509,11 @@ pub fn init_module_syscall(ctx: TracePointContext) -> i32 {
     0
 }
 
-fn try_init_module_syscall(ctx: TracePointContext) -> Result<(), i64> {
+// `_ctx` is deliberately unused: none of init_module's three arguments are
+// captured, so the context is never read. The parameter stays for symmetry
+// with the other tracepoint handlers, and the BPF crate is built with
+// `-D warnings` in CI, which rejects a plain `ctx` here.
+fn try_init_module_syscall(_ctx: TracePointContext) -> Result<(), i64> {
     // sys_enter_init_module(void *umod, unsigned long len, const char *uargs).
     // The module image is an anonymous userspace buffer: there is no fd and no
     // path, which is exactly why this fd-avoidant loader path is traced at all.
