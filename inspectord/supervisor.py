@@ -42,22 +42,76 @@ from inspectord.workers.notifier.__main__ import NotifierWorker
 
 log = get(__name__)
 
+# --- worker restart policy (spec section 3.2) -------------------------------
+# How often the monitor thread polls the children for death.
+MONITOR_POLL_INTERVAL_S = 1.0
+# Delay before the first restart; doubles per consecutive restart...
+RESTART_BASE_DELAY_S = 1.0
+# ...up to this cap.
+RESTART_MAX_DELAY_S = 60.0
+# Uptime after which a restarted worker counts as recovered and its
+# consecutive-restart counter resets. Without this, a worker that crashes once
+# a day would eventually be treated as crash-looping and given up on.
+RESTART_HEALTHY_AFTER_S = 60.0
+# Consecutive restarts that never reached RESTART_HEALTHY_AFTER_S before the
+# supervisor gives up and leaves the worker dead.
+RESTART_MAX_ATTEMPTS = 8
+
+
+def backoff_delay(
+    attempt: int,
+    *,
+    base: float = RESTART_BASE_DELAY_S,
+    cap: float = RESTART_MAX_DELAY_S,
+) -> float:
+    """Delay before restart number ``attempt`` (1-based): base * 2^(n-1), capped."""
+    exponent = max(0, attempt - 1)
+    return min(base * (2.0**exponent), cap)
+
 
 class _WorkerProc:
     def __init__(self, spec: WorkerSpec, proc: subprocess.Popen[bytes]) -> None:
         self.spec = spec
         self.proc = proc
         self.threads: list[threading.Thread] = []
+        # Monotonic timestamp of this incarnation's spawn, for the healthy check.
+        self.started_at = time.monotonic()
+        # Consecutive restarts carried across incarnations; reset once healthy.
+        self.restarts = 0
+        # Monotonic deadline for the pending respawn, None when not scheduled.
+        self.restart_at: float | None = None
+        # True once we gave up: the worker is left dead and never polled again.
+        self.exhausted = False
+        # Guards against re-emitting worker_died on every tick of the corpse.
+        self.died_reported = False
 
 
 class Supervisor:
-    def __init__(self, config: DaemonConfig) -> None:
+    def __init__(
+        self,
+        config: DaemonConfig,
+        *,
+        poll_interval_s: float = MONITOR_POLL_INTERVAL_S,
+        restart_base_delay_s: float = RESTART_BASE_DELAY_S,
+        restart_max_delay_s: float = RESTART_MAX_DELAY_S,
+        restart_healthy_after_s: float = RESTART_HEALTHY_AFTER_S,
+        restart_max_attempts: int = RESTART_MAX_ATTEMPTS,
+    ) -> None:
         self._cfg = config
         self._router = EventRouter()
         self._journal = Journal(config.storage.journal_dir)
         self._db = Database(config.storage.db_path)
         self._procs: list[_WorkerProc] = []
+        # Guards mutation of _procs: the monitor thread swaps entries in place
+        # while stop() and callers read the list.
+        self._procs_lock = threading.RLock()
         self._stop = threading.Event()
+        self._monitor_thread: threading.Thread | None = None
+        self._poll_interval_s = poll_interval_s
+        self._restart_base_delay_s = restart_base_delay_s
+        self._restart_max_delay_s = restart_max_delay_s
+        self._restart_healthy_after_s = restart_healthy_after_s
+        self._restart_max_attempts = restart_max_attempts
         self._boot_id: str | None = None
         self._listeners: list[Callable[[Event], None]] = []
         # Build the rule engine.
