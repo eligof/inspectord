@@ -18,6 +18,10 @@ dependency manifest pins ``minimum_version: "0.18"``) defines::
     17  invalid configureline error
     18  IO error
     19  version mismatch error
+    20  exec error
+    21  file lock error
+    22  memory allocation error
+    23  thread error
 
 So a non-zero status in ``1..7`` means the scan **succeeded and found
 something** — reporting it as a failure would turn every real detection into a
@@ -28,11 +32,12 @@ rather than an enumeration of the error codes: a future AIDE that adds a new
 error code is then reported as a failure (safe) instead of being silently
 misread, while the low-bit range stays exact.
 
-.. warning::
-   AIDE was **not installed on the machine where this adapter was written**
-   (``which aide`` found nothing, ``man aide`` had no entry), so the bit values
-   above come from the documented manual rather than from a local ``man aide``.
-   Re-verify against a real installation.
+Verified 2026-08-19 against the published AIDE manual page (Debian bookworm
+``aide(1)``, ``EXIT STATUS``): 1/2/4 are additive difference flags and the error
+codes run 14-23.  AIDE is not installed on this machine, so this is the
+documented contract rather than an observation of a local binary — but the
+range check needs no revision: codes 8-13 are unallocated and fall through to
+``failure``, which is the safe direction.
 """
 
 from __future__ import annotations
