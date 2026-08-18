@@ -48,13 +48,14 @@ pub struct LoadedConnect6Program {
 pub struct LoadedPtraceProgram {
     _bpf: Ebpf,
     ring: RingBuf<MapData>,
+    /// Held open for the life of the program; see `attach_tracepoint`.
+    _cpu_events: Vec<OwnedFd>,
 }
 
 pub struct LoadedModuleLoadProgram {
     _bpf: Ebpf,
     ring: RingBuf<MapData>,
-    /// Held open for the life of the program; see
-    /// `enable_tracepoint_on_all_cpus`.
+    /// Held open for the life of the program; see `attach_tracepoint`.
     _cpu_events: Vec<OwnedFd>,
 }
 
@@ -123,12 +124,24 @@ fn attach_btf_tracepoint(
     Ok(())
 }
 
+/// Attaches a syscall tracepoint program and returns the per-CPU perf-event
+/// fds that keep it firing everywhere. **The caller must hold the returned fds
+/// for as long as the program is attached** — dropping them re-gates the
+/// tracepoint on the faultable path (see `enable_tracepoint_on_all_cpus`).
+///
+/// The per-CPU events are registered for every syscall tracepoint rather than
+/// only the ones known to need them today. Whether a given tracepoint requires
+/// them is a property of the kernel's handler for it, not of our code: the
+/// faultable variants (those copying a userspace string argument) return early
+/// on CPUs with no registered event, the others do not. Deciding per tracepoint
+/// would mean a collector silently degrading to CPU 0 the day a kernel converts
+/// its tracepoint to the faultable form, with nothing to catch it.
 fn attach_tracepoint(
     bpf: &mut Ebpf,
     program_name: &str,
     category: &str,
     name: &str,
-) -> Result<(), LoadError> {
+) -> Result<Vec<OwnedFd>, LoadError> {
     let program: &mut TracePoint = bpf
         .program_mut(program_name)
         .ok_or_else(|| LoadError::MissingProgram(program_name.to_string()))?
@@ -136,7 +149,7 @@ fn attach_tracepoint(
         .map_err(LoadError::Program)?;
     program.load().map_err(LoadError::Program)?;
     program.attach(category, name).map_err(LoadError::Program)?;
-    Ok(())
+    enable_tracepoint_on_all_cpus(category, name)
 }
 
 const PERF_TYPE_TRACEPOINT: u32 = 2;
@@ -353,9 +366,14 @@ impl LoadedConnect6Program {
 impl LoadedPtraceProgram {
     pub fn load_and_attach() -> Result<Self, LoadError> {
         let (mut bpf, _btf) = load_bpf()?;
-        attach_tracepoint(&mut bpf, "ptrace_syscall", "syscalls", "sys_enter_ptrace")?;
+        let cpu_events =
+            attach_tracepoint(&mut bpf, "ptrace_syscall", "syscalls", "sys_enter_ptrace")?;
         let ring = take_ring(&mut bpf, "PTRACE_EVENTS")?;
-        Ok(Self { _bpf: bpf, ring })
+        Ok(Self {
+            _bpf: bpf,
+            ring,
+            _cpu_events: cpu_events,
+        })
     }
 
     fn drain(&mut self) -> Vec<PtraceRecord> {
@@ -384,21 +402,15 @@ impl LoadedModuleLoadProgram {
     /// a trivial bypass; one ring buffer serves both programs.
     pub fn load_and_attach() -> Result<Self, LoadError> {
         let (mut bpf, _btf) = load_bpf()?;
-        attach_tracepoint(
+        let mut cpu_events = attach_tracepoint(
             &mut bpf,
             "finit_module_syscall",
             "syscalls",
             "sys_enter_finit_module",
         )?;
-        attach_tracepoint(
+        cpu_events.extend(attach_tracepoint(
             &mut bpf,
             "init_module_syscall",
-            "syscalls",
-            "sys_enter_init_module",
-        )?;
-        // Both tracepoints need a perf event on every CPU, not just CPU 0.
-        let mut cpu_events = enable_tracepoint_on_all_cpus("syscalls", "sys_enter_finit_module")?;
-        cpu_events.extend(enable_tracepoint_on_all_cpus(
             "syscalls",
             "sys_enter_init_module",
         )?);
