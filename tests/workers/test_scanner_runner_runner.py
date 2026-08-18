@@ -463,6 +463,48 @@ def test_failure_retries_once_then_waits_for_the_next_slot() -> None:
     assert len({e["raw"]["run_id"] for e in completed}) == 2
 
 
+def test_a_skip_clears_a_retry_flag_left_by_an_earlier_failure() -> None:
+    """A skip is not a scan attempt, so it must not swallow the pending retry.
+
+    `binary_not_found` / `argv_error` never ran anything. If the retry flag from
+    the earlier failure survived one, the NEXT genuine failure would be denied
+    its single retry -- silently, and only for that scanner.
+    """
+    adapter = FakeAdapter(argv=["sh", "-c", "exit 9"])
+    # The retry backoff is short but non-zero, so a retry never starts in the
+    # same tick that reported the failure: the test drives every attempt.
+    worker, buf = _make_worker([adapter], _base_config(retry_backoff_s=0.05))
+
+    def make_due() -> None:
+        # The test owns the schedule: `interval_s` is 1000s, so a scanner only
+        # comes round again when this puts it back in its due window.
+        worker._next_due["fake"] = 0.0
+
+    try:
+        # 1. A failure arms the single retry.
+        events = _pump(worker, buf, until=lambda evs: len(_completed(evs)) == 1)
+        assert len(_completed(events)) == 1
+
+        # 2. The binary has vanished by the time the retry slot comes round, so
+        #    the retry never happens -- it is a skip, not an attempt.
+        adapter.binary = "inspectord-no-such-binary-6f3a1c"
+        make_due()
+        worker.step()
+        skips = [e for e in _events(buf) if e["action"] == "scan_skipped"]
+        assert [e["raw"]["reason"] for e in skips] == ["binary_not_found"]
+
+        # 3. The binary is back. This fresh failure still gets its own retry:
+        #    three completions in total, not two.
+        adapter.binary = "sh"
+        make_due()
+        events = _pump(worker, buf, until=lambda evs: len(_completed(evs)) == 3)
+    finally:
+        worker.teardown()
+
+    assert len(_completed(events)) == 3
+    assert sum(1 for e in events if e["action"] == "scan_started") == 3
+
+
 def test_spawn_failure_is_reported_not_raised() -> None:
     def exploding_spawn(argv: list[str]) -> Any:
         raise FileNotFoundError(argv[0])

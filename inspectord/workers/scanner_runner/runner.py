@@ -535,15 +535,13 @@ class ScannerRunnerWorker(Worker):
         if shutil.which(adapter.binary) is None:
             # Decision 14: silence here would let the user believe AIDE runs
             # nightly when the binary was never installed.
-            self._emit_skipped(name, "binary_not_found")
-            self._consume_slot(name, now)
+            self._skip_slot(name, "binary_not_found", now)
             return
 
         try:
             argv = [str(part) for part in adapter.argv(config)]
         except Exception:
-            self._emit_skipped(name, "argv_error")
-            self._consume_slot(name, now)
+            self._skip_slot(name, "argv_error", now)
             return
 
         run_id = str(uuid7())
@@ -568,6 +566,18 @@ class ScannerRunnerWorker(Worker):
             argv=argv,
             job=job,
         )
+
+    def _skip_slot(self, name: str, reason: str, now: float) -> None:
+        """Report a due window that never became a scan, and give up the slot.
+
+        Clearing the retry flag is the point: nothing was attempted here, so a
+        skip must not consume the retry a previous failure is still owed. (The
+        run-start path deliberately leaves the flag alone — resetting it there
+        would let a scanner retry forever instead of once.)
+        """
+        self._emit_skipped(name, reason)
+        self._retried[name] = False
+        self._consume_slot(name, now)
 
     def _consume_slot(self, name: str, now: float) -> None:
         """Push *name* to its next scheduled slot and end its skip window.
