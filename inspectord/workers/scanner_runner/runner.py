@@ -56,8 +56,15 @@ DEFAULT_MAX_FINDINGS_PER_RUN = 500
 DEFAULT_RETRY_BACKOFF_S = 60.0
 DEFAULT_SCAN_INTERVAL_S = 86400.0
 DEFAULT_TIMEOUT_S = 3600.0
-#: How long to wait between SIGTERM and SIGKILL when killing a scan.
+#: How long to wait between SIGTERM and SIGKILL when killing a scan on timeout.
 KILL_GRACE_S = 5.0
+#: The same, on shutdown -- deliberately much shorter.
+#:
+#: ``Supervisor.stop()`` budgets 5 SECONDS TOTAL for every worker, then
+#: SIGKILLs. A teardown that spent 5s waiting for SIGTERM and 5s more waiting
+#: for SIGKILL would be killed part-way through and orphan the very scan it was
+#: trying to reap. SIGTERM -> 1.5s -> SIGKILL -> 1.5s fits inside the budget.
+SHUTDOWN_GRACE_S = 1.5
 
 SpawnFn = Callable[[list[str]], "subprocess.Popen[str]"]
 
@@ -362,7 +369,7 @@ class ScannerRunnerWorker(Worker):
             return
         self._active = None
         with contextlib.suppress(Exception):
-            active.job.cancel(grace_s=KILL_GRACE_S)
+            active.job.cancel(grace_s=SHUTDOWN_GRACE_S)
         with contextlib.suppress(Exception):
             self._finish_run(active, time.monotonic())
 

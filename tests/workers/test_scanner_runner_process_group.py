@@ -38,13 +38,15 @@ class SleepAdapter:
     name = "sleepy"
     binary = "sh"
 
-    def __init__(self, pidfile: Path) -> None:
+    def __init__(self, pidfile: Path, *, ignore_sigterm: bool = False) -> None:
         self._pidfile = pidfile
+        self._ignore_sigterm = ignore_sigterm
 
     def argv(self, config: Mapping[str, Any]) -> list[str]:
         # The backgrounded sleep is a grandchild of this worker. `sh` writes its
         # pid out so the test can watch that specific process, not just the group.
-        return ["sh", "-c", f"sleep 300 & echo $! > {self._pidfile}; sleep 300"]
+        trap = 'trap "" TERM; ' if self._ignore_sigterm else ""
+        return ["sh", "-c", f"{trap}sleep 300 & echo $! > {self._pidfile}; sleep 300"]
 
     def interpret_exit(self, code: int) -> ScanOutcome:
         return ScanOutcome.clean if code == 0 else ScanOutcome.failure
@@ -86,9 +88,10 @@ def _start_scan(
     tmp_path: Path,
     *,
     timeout_s: float,
+    ignore_sigterm: bool = False,
 ) -> tuple[ScannerRunnerWorker, BytesIO, list[subprocess.Popen[str]], Path]:
     pidfile = tmp_path / "grandchild.pid"
-    adapter = SleepAdapter(pidfile)
+    adapter = SleepAdapter(pidfile, ignore_sigterm=ignore_sigterm)
     spawned: list[subprocess.Popen[str]] = []
 
     def recording_spawn(argv: list[str]) -> subprocess.Popen[str]:
@@ -200,3 +203,24 @@ def test_signalling_a_dead_process_group_never_raises() -> None:
     signal_process_group(proc, signal.SIGKILL)
     kill_process_group(proc, grace_s=0.1)
     kill_process_group(proc, grace_s=0.1)
+
+
+def test_teardown_fits_the_supervisor_shutdown_budget(tmp_path: Path) -> None:
+    """Supervisor.stop() budgets 5s TOTAL for every worker, then SIGKILLs.
+
+    A scan that ignores SIGTERM must still be dead, and teardown must still
+    have returned, well inside that budget -- otherwise the worker is killed
+    part-way through its own cleanup and orphans the scan it was reaping.
+    """
+    worker, _buf, spawned, pidfile = _start_scan(tmp_path, timeout_s=600.0, ignore_sigterm=True)
+    proc = spawned[0]
+    pgid = os.getpgid(proc.pid)
+    grandchild = _read_grandchild_pid(pidfile)
+
+    started = time.monotonic()
+    worker.teardown()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 4.0, f"teardown took {elapsed:.1f}s, over the 5s shutdown budget"
+    assert _wait_until(lambda: not _pid_alive(grandchild), timeout_s=2.0)
+    assert _wait_until(lambda: not _group_alive(pgid), timeout_s=2.0)
