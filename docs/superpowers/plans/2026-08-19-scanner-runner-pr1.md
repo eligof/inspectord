@@ -43,7 +43,7 @@ runs, cron, any state table or migration, any panel or CLI command.
 | `tests/parsers/test_base.py` | New tests for the `threat=` keyword (present, absent, and the existing default). |
 | `tests/workers/test_scanner_runner_aide_adapter.py` | `argv`, the `interpret_exit` **table test**, report parsing, malformed-input tests. |
 | `tests/workers/test_scanner_runner_runner.py` | The threaded runner against a fake adapter: completion, timeout+kill, `teardown()` mid-run, single-flight rejection, missing binary, finding cap + truncation, retry, startup delay. |
-| `tests/workers/test_scanner_runner_process_group.py` | Real-subprocess test: a `sleep` started through the runner, group gone after `teardown()`. |
+| `tests/workers/test_scanner_runner_process_group.py` | Real-subprocess tests: a `sleep` **grandchild** started through the runner, group gone after `teardown()` and after a timeout, plus the shutdown-budget test. |
 | `tests/test_dev_config_scanner_runner.py` | Dev-config presence + the conservative `enabled: false` default. |
 
 ---
@@ -84,7 +84,7 @@ low-bit range — the part that must never be misread as a failure — is exact.
 - Modify: `inspectord/parsers/base.py`
 - Test: `tests/parsers/test_base.py`
 
-- [ ] **Step 1: Write the failing tests** in `tests/parsers/test_base.py`:
+- [x] **Step 1: Write the failing tests** in `tests/parsers/test_base.py`:
 
 ```python
 def test_build_event_accepts_threat() -> None:
@@ -104,11 +104,11 @@ def test_build_event_threat_defaults_to_none() -> None:
     assert ev.threat is None
 ```
 
-- [ ] **Step 2: Run; expect FAIL** (`TypeError: unexpected keyword argument 'threat'`).
-- [ ] **Step 3: Add the keyword** — one parameter in the signature (next to `persistence`) and one
+- [x] **Step 2: Run; expect FAIL** (`TypeError: unexpected keyword argument 'threat'`).
+- [x] **Step 3: Add the keyword** — one parameter in the signature (next to `persistence`) and one
       `threat=threat,` line in the `Event(...)` call. Nothing else changes.
-- [ ] **Step 4: Run `tests/parsers/`; expect PASS.**
-- [ ] **Step 5: Commit** — `feat(parsers): build_event(threat=...) passthrough`
+- [x] **Step 4: Run `tests/parsers/`; expect PASS.**
+- [x] **Step 5: Commit** — `feat(parsers): build_event(threat=...) passthrough`
 
 ---
 
@@ -153,8 +153,8 @@ class ScannerAdapter(Protocol):
 `severity` is `str | None` because AIDE emits no severity of its own; the runner omits the key from
 `threat.indicator` when it is `None` rather than inventing one.
 
-- [ ] **Step 1:** write the three files (the `scanners/__init__.py` registry stays empty until Task 3).
-- [ ] **Step 2:** `.venv/bin/mypy inspectord`; expect clean. (Committed with Task 3.)
+- [x] **Step 1:** write the three files (the `scanners/__init__.py` registry stays empty until Task 3).
+- [x] **Step 2:** `.venv/bin/mypy inspectord`; expect clean. (Committed with Task 3.)
 
 ---
 
@@ -165,7 +165,7 @@ class ScannerAdapter(Protocol):
 - Modify: `inspectord/workers/scanner_runner/scanners/__init__.py` (`default_adapters()`)
 - Test: `tests/workers/test_scanner_runner_aide_adapter.py`
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
 The `interpret_exit` **table test** is the centerpiece (decision 10) — it must contain at least one
 non-zero code mapping to `findings`:
@@ -217,9 +217,9 @@ def test_parse_empty_and_binary_never_raise() -> None:
         assert AideAdapter().parse(text, "") == []
 ```
 
-- [ ] **Step 2: Run; expect FAIL** (`ModuleNotFoundError`).
+- [x] **Step 2: Run; expect FAIL** (`ModuleNotFoundError`).
 
-- [ ] **Step 3: Write the adapter.**
+- [x] **Step 3: Write the adapter.**
 
 ```python
 _CONFIG_PATH = "/var/lib/inspectord/aide/aide.conf"   # spec §30.6 — the database is ours
@@ -271,9 +271,9 @@ Finding(
 and a rule keying on `threat.indicator.value == "changed"` is the useful predicate. Recorded here
 because it is a choice the spec left open.
 
-- [ ] **Step 4:** add `default_adapters()` to `scanners/__init__.py` returning `[AideAdapter()]`.
-- [ ] **Step 5: Run the adapter tests; expect PASS.**
-- [ ] **Step 6: Gates; commit** — `feat(scanner_runner): ScannerAdapter protocol + AIDE adapter`
+- [x] **Step 4:** add `default_adapters()` to `scanners/__init__.py` returning `[AideAdapter()]`.
+- [x] **Step 5: Run the adapter tests; expect PASS.**
+- [x] **Step 6: Gates; commit** — `feat(scanner_runner): ScannerAdapter protocol + AIDE adapter`
 
 ---
 
@@ -361,7 +361,7 @@ Events, per spec §4.2 (`module="scanner_runner"`, `kind="event"`):
 `threat={"indicator": {"type", "value", "source": <scanner>, "severity": <scanner's own>}}` with
 `severity` omitted when the scanner does not provide one.
 
-- [ ] **Step 1: Write the failing tests** in `tests/workers/test_scanner_runner_runner.py`, using a
+- [x] **Step 1: Write the failing tests** in `tests/workers/test_scanner_runner_runner.py`, using a
       `FakeAdapter` whose `argv()` is a controllable **real** `sh -c 'sleep N; ...'` (fast, no root,
       and it exercises the real spawn/kill path), plus a `spawn` injection point for the
       spawn-failure case:
@@ -382,10 +382,10 @@ Events, per spec §4.2 (`module="scanner_runner"`, `kind="event"`):
   - `test_spawn_failure_is_reported_not_raised`
   - `test_disabled_scanner_never_runs`
 
-- [ ] **Step 2: Run; expect FAIL** (`ModuleNotFoundError`).
-- [ ] **Step 3: Write `runner.py` and `__main__.py`.**
-- [ ] **Step 4: Run the runner tests; expect PASS.**
-- [ ] **Step 5: Gates; commit** — `feat(scanner_runner): threaded single-flight scan runner`
+- [x] **Step 2: Run; expect FAIL** (`ModuleNotFoundError`).
+- [x] **Step 3: Write `runner.py` and `__main__.py`.**
+- [x] **Step 4: Run the runner tests; expect PASS.**
+- [x] **Step 5: Gates; commit** — `feat(scanner_runner): threaded single-flight scan runner`
 
 ---
 
@@ -396,13 +396,13 @@ Events, per spec §4.2 (`module="scanner_runner"`, `kind="event"`):
 
 Decision 3 deserves a test that does not mock anything (spec §8).
 
-- [ ] **Step 1: Write it.** An adapter whose `argv()` is `["sh", "-c", "sleep 300 & sleep 300"]` —
+- [x] **Step 1: Write it.** An adapter whose `argv()` is `["sh", "-c", "sleep 300 & sleep 300"]` —
       the backgrounded child is a **grandchild** in the same new session, so killing only the direct
       child would leave it running and prove nothing. Start it through the runner, capture the
       group id, call `teardown()`, then assert with `os.killpg(pgid, 0)` that the group is gone
       (`ProcessLookupError`), polling briefly for the reap.
-- [ ] **Step 2:** the same assertion for the **timeout** path (`timeout_s=0.3`).
-- [ ] **Step 3: Run; expect PASS. Commit** — `test(scanner_runner): real process-group cleanup`
+- [x] **Step 2:** the same assertion for the **timeout** path (`timeout_s=0.3`).
+- [x] **Step 3: Run; expect PASS. Commit** — `test(scanner_runner): real process-group cleanup`
 
 ---
 
@@ -436,17 +436,17 @@ that was never going to happen. `startup_delay_s` is 300 and `interval_s` (per s
 },
 ```
 
-- [ ] **Step 1: Write the failing presence test** (worker present; `aide.enabled` is `False`).
-- [ ] **Step 2: Run; expect FAIL.**
-- [ ] **Step 3: Add the `config.py` entry and the matching TOML block.**
-- [ ] **Step 4: Run `tests/test_dev_config_scanner_runner.py` and `tests/test_config_example.py`; expect PASS.**
-- [ ] **Step 5: Commit** — `feat(config): register the scanner_runner worker (disabled)`
+- [x] **Step 1: Write the failing presence test** (worker present; `aide.enabled` is `False`).
+- [x] **Step 2: Run; expect FAIL.**
+- [x] **Step 3: Add the `config.py` entry and the matching TOML block.**
+- [x] **Step 4: Run `tests/test_dev_config_scanner_runner.py` and `tests/test_config_example.py`; expect PASS.**
+- [x] **Step 5: Commit** — `feat(config): register the scanner_runner worker (disabled)`
 
 ---
 
 ### Task 7: full gates
 
-- [ ] **Step 1:**
+- [x] **Step 1:**
 
 ```sh
 .venv/bin/python -m pytest -m "not integration and not ebpf_load" -q && \
@@ -457,7 +457,7 @@ that was never going to happen. `startup_delay_s` is 300 and `interval_s` (per s
 
 Expected: exit 0 from each; mypy prints `Success: no issues found`.
 
-- [ ] **Step 2:** report. Do not push, do not open a PR, do not merge.
+- [x] **Step 2:** report. Do not push, do not open a PR, do not merge.
 
 ---
 
@@ -482,3 +482,31 @@ Expected: exit 0 from each; mypy prints `Success: no issues found`.
   `test_config_example.py` asserts set equality.
 - **Threading discipline:** only the job thread calls `communicate()`/`wait()`; other threads only
   *send signals* and `join()` the thread. That is what keeps `teardown()` from racing the scan.
+
+
+---
+
+## Execution notes (what actually changed vs. the plan)
+
+Executed 2026-08-19 on branch `scanner-runner-pr1`. All seven tasks done; gates green
+(831 passed / 8 skipped, ruff + mypy clean).
+
+Deltas worth a reviewer's eye:
+
+1. **`SHUTDOWN_GRACE_S = 1.5`, added after the plan was written.** `Supervisor.stop()` budgets
+   **5 seconds total for every worker** and then SIGKILLs. The planned `teardown()` reused the
+   5-second `KILL_GRACE_S`, so SIGTERM → wait 5s → SIGKILL → wait 5s could run to ten seconds:
+   the worker would be killed part-way through its own cleanup and orphan the very scan it was
+   reaping — precisely the failure decision 3 exists to prevent. Shutdown now has its own short
+   grace; the timeout path, under no deadline, keeps 5s. Its own test, mutation-verified.
+2. **A run claims its schedule slot at *start*, not at completion.** Without this, a scanner was
+   still "due" while its own scan was in flight, so every tick reported it as skipped against
+   itself. Found by the tests, fixed in `_start_run`; `_consume_slot` deliberately does *not*
+   touch the retry flag, or a failing scanner would retry forever instead of once.
+3. **The AIDE section terminator is a narrow heading regex**, not "any line ending in `:`". Pure
+   punctuation (`:::::::`) must be skipped as garbage, not treated as a heading that silently
+   swallows the rest of the section — which is exactly what the malformed-input test caught.
+4. **Extra tests beyond the plan:** the scan is its own process-group leader; signalling an
+   already-dead group never raises; an adapter whose `parse()` raises is reported as a failed
+   scan; `teardown()` with no run in flight is a silent no-op.
+5. **Still deferred, as planned:** §4.3 scanner-data staleness on `scan_completed`.
