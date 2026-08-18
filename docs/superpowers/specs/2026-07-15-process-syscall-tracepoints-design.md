@@ -319,9 +319,20 @@ one worker, one rule.
   `false_positives`), while a root-run sniffer — the higher-privilege threat — produces
   events but no alert. Both the FP and the root-sniffer alerting blind spot are
   **accepted in v1**; the tracepoint fires at sys_enter, so the record carries no
-  outcome/capability signal to distinguish these. **Open question for that slice's
-  plan**: whether to add an outcome/capability signal (e.g. a sys_exit pairing or
-  CAP_NET_RAW check) — mirroring §4's open-question pattern.
+  outcome/capability signal to distinguish these. **Resolved 2026-08-19: no outcome or
+  capability signal in v1.** Both candidate mechanisms cost more than the signal
+  is worth. A `sys_exit_socket` pairing needs per-thread state (a hash map keyed
+  by `bpf_get_current_pid_tgid()`, written on enter and read on exit) plus a
+  second program per syscall, and it leaks entries whenever a task dies between
+  the two — real complexity for a collector whose events are already rare.
+  Reading CAP_NET_RAW in-BPF means dereferencing `task->cred->cap_effective`,
+  which requires BTF struct offsets; this whole syscall-tracepoint family is
+  deliberately offset-free (§2), so that would reintroduce the per-kernel
+  fragility the family exists to avoid. The v1 blind spots stated above — a
+  non-root process holding CAP_NET_RAW matches the rule, and a root-run sniffer
+  produces an event but no alert — are therefore accepted, and must be stated
+  plainly in the rule's `false_positives`. Revisit if the uid proxy proves noisy
+  in practice.
 
 ## 6. Testing & gates
 
