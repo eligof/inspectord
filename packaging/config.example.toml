@@ -49,6 +49,10 @@ name = "process_collector_module_load"
 module = "inspectord.workers.process_collector_module_load"
 
 [[workers]]
+name = "process_collector_raw_socket"
+module = "inspectord.workers.process_collector_raw_socket"
+
+[[workers]]
 name = "outbound_connection_tracker"
 module = "inspectord.workers.outbound_connection_tracker"
 

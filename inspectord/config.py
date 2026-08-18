@@ -113,6 +113,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "config": {},
                 },
                 {
+                    "name": "process_collector_raw_socket",
+                    "module": "inspectord.workers.process_collector_raw_socket",
+                    "config": {},
+                },
+                {
                     "name": "outbound_connection_tracker",
                     "module": "inspectord.workers.outbound_connection_tracker",
                     "config": {},
