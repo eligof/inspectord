@@ -64,6 +64,33 @@ impl ProcessExitRecord {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct PtraceRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub uid: u32,
+    /// Raw ptrace request; only the validated injection-relevant set is
+    /// emitted (see the PTRACE_* filter in main.rs).
+    pub request: i32,
+    /// ptrace's target pid arg — a TID in the caller's pid namespace.
+    pub target_pid: i32,
+    pub comm: [u8; COMM_LEN],
+}
+
+impl PtraceRecord {
+    pub const fn zeroed() -> Self {
+        Self {
+            timestamp_ns: 0,
+            pid: 0,
+            uid: 0,
+            request: 0,
+            target_pid: 0,
+            comm: [0; COMM_LEN],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ConnectRecord {
     pub timestamp_ns: u64,
     pub pid: u32,

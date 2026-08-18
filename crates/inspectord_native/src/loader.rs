@@ -7,14 +7,16 @@
 use aya::{
     include_bytes_aligned,
     maps::{ring_buf::RingBuf, Array, MapData},
-    programs::BtfTracePoint,
+    programs::{BtfTracePoint, TracePoint},
     Btf, Ebpf,
 };
 use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use crate::btf_offsets::{BtfError, KernelOffsets};
-use crate::records::{ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord};
+use crate::records::{
+    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, PtraceRecord,
+};
 
 // `include_bytes!` only guarantees byte alignment, but aya's ELF parser
 // requires the program bytes to be aligned to the ELF header struct.
@@ -37,6 +39,11 @@ pub struct LoadedConnectProgram {
 }
 
 pub struct LoadedConnect6Program {
+    _bpf: Ebpf,
+    ring: RingBuf<MapData>,
+}
+
+pub struct LoadedPtraceProgram {
     _bpf: Ebpf,
     ring: RingBuf<MapData>,
 }
@@ -80,6 +87,16 @@ fn load_and_populate_offsets() -> Result<(Ebpf, Btf), LoadError> {
     Ok((bpf, btf))
 }
 
+/// Lean load path for syscall tracepoint programs: they read args at fixed
+/// ftrace offsets and never dereference kernel structs, so — unlike
+/// `load_and_populate_offsets` — they need no BTF-resolved OFFSETS map. The
+/// returned `Ebpf` is loaded but unattached.
+fn load_bpf() -> Result<(Ebpf, Btf), LoadError> {
+    let bpf = Ebpf::load(PROGRAM_BYTES).map_err(LoadError::Load)?;
+    let btf = Btf::from_sys_fs().map_err(LoadError::AyaBtf)?;
+    Ok((bpf, btf))
+}
+
 fn attach_btf_tracepoint(
     bpf: &mut Ebpf,
     program_name: &str,
@@ -88,7 +105,7 @@ fn attach_btf_tracepoint(
 ) -> Result<(), LoadError> {
     let program: &mut BtfTracePoint = bpf
         .program_mut(program_name)
-        .ok_or(LoadError::MissingProgram)?
+        .ok_or_else(|| LoadError::MissingProgram(program_name.to_string()))?
         .try_into()
         .map_err(LoadError::Program)?;
     program.load(tracepoint, btf).map_err(LoadError::Program)?;
@@ -96,8 +113,26 @@ fn attach_btf_tracepoint(
     Ok(())
 }
 
+fn attach_tracepoint(
+    bpf: &mut Ebpf,
+    program_name: &str,
+    category: &str,
+    name: &str,
+) -> Result<(), LoadError> {
+    let program: &mut TracePoint = bpf
+        .program_mut(program_name)
+        .ok_or_else(|| LoadError::MissingProgram(program_name.to_string()))?
+        .try_into()
+        .map_err(LoadError::Program)?;
+    program.load().map_err(LoadError::Program)?;
+    program.attach(category, name).map_err(LoadError::Program)?;
+    Ok(())
+}
+
 fn take_ring(bpf: &mut Ebpf, name: &str) -> Result<RingBuf<MapData>, LoadError> {
-    let map = bpf.take_map(name).ok_or(LoadError::MissingMap)?;
+    let map = bpf
+        .take_map(name)
+        .ok_or_else(|| LoadError::MissingMap(name.to_string()))?;
     RingBuf::try_from(map).map_err(|e| LoadError::MapKind(format!("{e:?}")))
 }
 
@@ -229,16 +264,44 @@ impl LoadedConnect6Program {
     }
 }
 
+impl LoadedPtraceProgram {
+    pub fn load_and_attach() -> Result<Self, LoadError> {
+        let (mut bpf, _btf) = load_bpf()?;
+        attach_tracepoint(&mut bpf, "ptrace_syscall", "syscalls", "sys_enter_ptrace")?;
+        let ring = take_ring(&mut bpf, "PTRACE_EVENTS")?;
+        Ok(Self { _bpf: bpf, ring })
+    }
+
+    fn drain(&mut self) -> Vec<PtraceRecord> {
+        let mut out = Vec::new();
+        while let Some(item) = self.ring.next() {
+            if item.len() >= std::mem::size_of::<PtraceRecord>() {
+                out.push(PtraceRecord::from_bytes(&item));
+            }
+        }
+        out
+    }
+
+    /// Blocks for up to `timeout` waiting for at least one record, then
+    /// drains everything available. Returns empty Vec on timeout.
+    pub fn poll(&mut self, timeout: Duration) -> Vec<PtraceRecord> {
+        if !poll_ring(&self.ring, timeout) {
+            return Vec::new();
+        }
+        self.drain()
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum LoadError {
     #[error("aya load error: {0}")]
     Load(#[from] aya::EbpfError),
     #[error("aya program error: {0}")]
     Program(#[from] aya::programs::ProgramError),
-    #[error("BPF program 'process_exec' not found in object")]
-    MissingProgram,
-    #[error("BPF map 'EVENTS' not found in object")]
-    MissingMap,
+    #[error("BPF program '{0}' not found in object")]
+    MissingProgram(String),
+    #[error("BPF map '{0}' not found in object")]
+    MissingMap(String),
     #[error("BPF map 'OFFSETS' not found in object")]
     MissingOffsetsMap,
     #[error("map kind mismatch: {0}")]

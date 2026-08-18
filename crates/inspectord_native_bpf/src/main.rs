@@ -12,13 +12,14 @@ use aya_ebpf::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
         bpf_probe_read_kernel_buf, gen::bpf_probe_read_user as raw_probe_read_user,
     },
-    macros::{btf_tracepoint, map},
+    macros::{btf_tracepoint, map, tracepoint},
     maps::{Array, RingBuf},
-    programs::BtfTracePointContext,
+    programs::{BtfTracePointContext, TracePointContext},
 };
 
 use records::{
-    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, CMDLINE_LEN, COMM_LEN,
+    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, PtraceRecord, CMDLINE_LEN,
+    COMM_LEN,
 };
 
 #[map]
@@ -32,6 +33,9 @@ static CONNECT_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
 #[map]
 static CONNECT6_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
+
+#[map]
+static PTRACE_EVENTS: RingBuf = RingBuf::with_byte_size(65_536, 0);
 
 // Per-kernel struct field offsets, populated by the userspace loader at
 // startup from /sys/kernel/btf/vmlinux. Avoids the previous habit of
@@ -70,6 +74,16 @@ const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
 const TCP_ESTABLISHED: i32 = 1;
 const TCP_SYN_SENT: i32 = 2;
+
+// Injection-relevant ptrace requests (x86_64). Read/step/cont/PEEK are
+// intentionally excluded — they are the debugger firehose, not injection.
+const PTRACE_POKETEXT: u64 = 4;
+const PTRACE_POKEDATA: u64 = 5;
+const PTRACE_POKEUSR: u64 = 6;
+const PTRACE_SETREGS: u64 = 13;
+const PTRACE_ATTACH: u64 = 16;
+const PTRACE_SETREGSET: u64 = 0x4205;
+const PTRACE_SEIZE: u64 = 0x4206;
 
 #[btf_tracepoint]
 pub fn process_exec(ctx: BtfTracePointContext) -> i32 {
@@ -374,6 +388,70 @@ fn try_outbound_connection6(ctx: BtfTracePointContext) -> Result<(), i64> {
     }
 
     entry.submit(2u64);
+    Ok(())
+}
+
+#[tracepoint]
+pub fn ptrace_syscall(ctx: TracePointContext) -> i32 {
+    let _ = try_ptrace_syscall(ctx);
+    0
+}
+
+fn try_ptrace_syscall(ctx: TracePointContext) -> Result<(), i64> {
+    // ftrace sys_enter layout (stable in practice on x86_64): 8-byte common
+    // header, __syscall_nr at 8, then u64 syscall args at 16 + 8*i.
+    //   arg 0 = request  @ offset 16
+    //   arg 1 = pid      @ offset 24
+    let request: u64 = unsafe { ctx.read_at(16).map_err(|_| -1_i64)? };
+
+    // Compare the FULL u64 so a value with garbage high bits can never alias
+    // a real request (e.g. 0x1_0000_0010 must not look like PTRACE_ATTACH).
+    // Filter on request first — the excluded read/step/cont requests are the
+    // overwhelming majority, so we skip the second probe-read on that hot path.
+    let interesting = matches!(
+        request,
+        PTRACE_POKETEXT
+            | PTRACE_POKEDATA
+            | PTRACE_POKEUSR
+            | PTRACE_SETREGS
+            | PTRACE_ATTACH
+            | PTRACE_SETREGSET
+            | PTRACE_SEIZE
+    );
+    if !interesting {
+        return Err(0);
+    }
+    let target_pid: u64 = unsafe { ctx.read_at(24).map_err(|_| -1_i64)? };
+
+    // Cross-process only. caller = TGID (upper 32 bits of pid_tgid); drop when
+    // the target TID equals it (same-process). Another process's TID can never
+    // equal our TGID within a namespace, so this has no false negatives; a
+    // sibling-thread self-attach still emits (the kernel EPERMs it anyway).
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let tgid = (pid_tgid >> 32) as u32;
+    if target_pid as u32 == tgid {
+        return Err(0);
+    }
+
+    let mut entry = PTRACE_EVENTS.reserve::<PtraceRecord>(0).ok_or(-1_i64)?;
+    let record_ptr = entry.as_mut_ptr();
+    unsafe {
+        record_ptr.write(PtraceRecord::zeroed());
+        (*record_ptr).timestamp_ns = bpf_ktime_get_ns();
+        (*record_ptr).pid = tgid;
+        let uid_gid = bpf_get_current_uid_gid();
+        (*record_ptr).uid = uid_gid as u32;
+        (*record_ptr).request = request as i32;
+        (*record_ptr).target_pid = target_pid as i32;
+        if let Ok(comm) = bpf_get_current_comm() {
+            let dst = &mut (*record_ptr).comm;
+            let n = core::cmp::min(comm.len(), COMM_LEN);
+            for i in 0..n {
+                dst[i] = comm[i];
+            }
+        }
+    }
+    entry.submit(2u64); // BPF_RB_FORCE_WAKEUP
     Ok(())
 }
 
