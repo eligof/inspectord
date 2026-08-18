@@ -1,0 +1,24 @@
+version: 1.0.0
+id: daemon.worker_restart_exhausted
+name: "collector permanently down"
+severity: high
+category: process
+why: |
+  The supervisor restarted this worker with exponential backoff and it kept
+  dying, so it gave up: the worker is now permanently down and will not come
+  back until inspectord itself is restarted. Everything that collector watched
+  — the processes, files, sockets, or logs it was responsible for — is no
+  longer being observed, and nothing else covers for it. This is a blind spot
+  in the monitor, and a blind spot is exactly what an attacker who noticed the
+  collector would want; treat it as urgent regardless of the cause, because a
+  benign crash and a silenced collector look identical from here.
+false_positives:
+  - "A worker whose dependency was uninstalled or upgraded out from under it (a missing eBPF-capable kernel feature, a removed binary such as aide or systemctl) will crash-loop and exhaust — a real outage of that collector, but a configuration problem rather than an attack."
+  - "A machine suspended or hibernated across the restart window: the backoff timers are monotonic, so a long suspend can burn several attempts in quick succession after resume without a genuine fault."
+  - "A deliberate local change — editing a worker's code or config on a running daemon, or removing its Python module — will exhaust that worker without any adversary involved."
+detect:
+  any_of:
+    - event.module == "supervisor" AND event.action == "worker_restart_exhausted"
+short: "collector {raw.worker} is permanently down"
+detail: "The supervisor gave up on worker {raw.worker} after {raw.attempts} consecutive restarts; its telemetry is missing until inspectord is restarted."
+labels: [daemon, availability, blind_spot]

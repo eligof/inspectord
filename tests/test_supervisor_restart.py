@@ -330,3 +330,23 @@ def test_worker_that_stays_alive_is_never_restarted(
         assert not collector.events
     finally:
         sup.stop(timeout=5.0)
+
+
+def test_exhaustion_raises_the_starter_pack_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: crash loop -> exhausted event -> daemon.worker_restart_exhausted."""
+    mod = _install_worker(tmp_path, monkeypatch, "sup_restart_alert", _DIES_SRC)
+    sup = _supervisor(tmp_path, mod, restart_max_attempts=1)
+    alerts: list[Any] = []
+    sup.attach_alert_listener(alerts.append)
+    sup.start()
+    try:
+        assert _wait_for(
+            lambda: any(a.rule.id == "daemon.worker_restart_exhausted" for a in alerts)
+        ), "the exhausted event did not raise its starter-pack alert"
+        alert = next(a for a in alerts if a.rule.id == "daemon.worker_restart_exhausted")
+        assert alert.severity == "high"
+        assert "flaky" in alert.rendered.short
+    finally:
+        sup.stop(timeout=5.0)
