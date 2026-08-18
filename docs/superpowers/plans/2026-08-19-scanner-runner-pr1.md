@@ -498,7 +498,11 @@ Deltas worth a reviewer's eye:
    5-second `KILL_GRACE_S`, so SIGTERM → wait 5s → SIGKILL → wait 5s could run to ten seconds:
    the worker would be killed part-way through its own cleanup and orphan the very scan it was
    reaping — precisely the failure decision 3 exists to prevent. Shutdown now has its own short
-   grace; the timeout path, under no deadline, keeps 5s. Its own test, mutation-verified.
+   grace; the timeout path, under no deadline, keeps 5s per wait. Its true worst case is three
+   of those waits — SIGTERM → 5s → SIGKILL → 5s, then up to 5s more draining the pipes the
+   dying group left behind — i.e. ~15s past `timeout_s`, all of it on the job thread and none
+   of it on `step()` or `teardown()`. Stated on `KILL_GRACE_S` in the code. Its own test,
+   mutation-verified.
 2. **A run claims its schedule slot at *start*, not at completion.** Without this, a scanner was
    still "due" while its own scan was in flight, so every tick reported it as skipped against
    itself. Found by the tests, fixed in `_start_run`; `_consume_slot` deliberately does *not*
