@@ -1,0 +1,17 @@
+"""dev_config must include a process_collector_ptrace worker entry."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from inspectord.config import dev_config
+
+
+def test_dev_config_contains_process_collector_ptrace(tmp_path: Path) -> None:
+    cfg = dev_config(base=tmp_path)
+
+    worker_names = [w.name for w in cfg.workers]
+    assert "process_collector_ptrace" in worker_names, worker_names
+
+    worker = next(w for w in cfg.workers if w.name == "process_collector_ptrace")
+    assert worker.module == "inspectord.workers.process_collector_ptrace", worker.module

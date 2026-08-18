@@ -1,0 +1,20 @@
+version: 1.0.0
+id: proc.ptrace_injection
+name: "cross-process ptrace attach"
+severity: medium
+category: process
+why: |
+  A process attached to another process via ptrace. Debuggers do this
+  legitimately, but it is also a common process-injection primitive on
+  Linux — an attacker attaches, then writes memory or registers.
+false_positives:
+  - "You were debugging with gdb/strace/lldb/rr (attach to a running process)."
+  - "A crash reporter attached to a crashing process (Chromium/Electron crashpad, coredump helpers)."
+  - "An IDE-embedded debugger (VS Code, JetBrains) attached to a process."
+detect:
+  any_of:
+    - event.module == "process_collector_ptrace" AND event.action == "ptrace_call" AND process.ptrace_request == "PTRACE_ATTACH"
+    - event.module == "process_collector_ptrace" AND event.action == "ptrace_call" AND process.ptrace_request == "PTRACE_SEIZE"
+short: "ptrace {process.ptrace_request} from {process.name} to pid {process.target_pid}"
+detail: "{process.name} (pid {process.pid}, uid {user.id}) issued {process.ptrace_request} against pid {process.target_pid} (as seen by the caller)."
+labels: [process, injection, ptrace]
