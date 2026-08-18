@@ -256,11 +256,27 @@ one worker, one rule.
   *initiating process* in real time (who loaded it), including failed attempts.
 - **Worker** emits `action="module_load_attempt"`; rule
   `proc.kernel_module_loaded_unknown` (parent §21).
-- **Open questions for that slice's plan**: (1) module *name* resolution — finit gives an
-  fd, init gives a memory image; best-effort userspace resolution (e.g. the worker
-  reading `/proc/<pid>/fd/<fd>` before the process exits) is racy; decide whether to ship
-  name-less v1 (correlate with `kmod_watcher` via rules) or attempt resolution. (2) Is
-  the params string needed for v1 detection value, or does presence-of-load suffice?
+- **Resolved 2026-08-18** (the two open questions this slice's plan had to settle):
+
+  1. **Module name: not resolved in v1.** The record carries *who loaded a module*, not
+     *which module*. `finit_module` gives an fd and `init_module` gives an anonymous
+     memory image, so any name would come from the worker racing to read
+     `/proc/<pid>/fd/<fd>` before the caller exits or the fd is reused. In a security
+     tool a *wrong* attribution is worse than a missing one, and the name is already
+     available from the other side: `kmod_watcher` emits `kmod_loaded` with
+     `raw.module_name` (verified in `inspectord/workers/kmod_watcher/__main__.py`). The
+     two signals are joined by time proximity in the rule engine — which is exactly the
+     complementary split described above — rather than by a racy fd read. Revisit only
+     if correlation proves too lossy in practice.
+  2. **Params string: cut from v1.** No detection rule consumes it, presence-of-load plus
+     caller attribution is what the rule fires on, and reading a userspace string in-BPF
+     (`bpf_probe_read_user` into a bounded buffer) adds verifier surface and a per-event
+     copy for evidence value nothing currently reads. The record therefore drops the
+     `params` field; it stays a documented extension point if a future rule needs module
+     arguments.
+
+  Net effect on the §4 record: caller pid/uid/comm + `variant` + `fd` + `flags`, no
+  `params`.
 
 ## 5. raw-socket slice — design level (own plan later)
 
