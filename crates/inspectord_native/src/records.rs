@@ -181,6 +181,65 @@ impl PtraceRecord {
     }
 }
 
+/// One kernel-module load attempt, from either `finit_module` (variant 0,
+/// which passes an fd) or `init_module` (variant 1, which passes an anonymous
+/// memory image and therefore has no fd or flags). Emitted for every call,
+/// successful or not — sys_enter fires before the kernel's permission checks.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ModuleLoadRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub uid: u32,
+    /// 0 = finit_module, 1 = init_module.
+    pub variant: u32,
+    /// finit_module's fd argument; -1 for init_module, which has none.
+    pub fd: i32,
+    /// finit_module's flags argument; 0 for init_module, which has none.
+    pub flags: i32,
+    pub _padding: [u8; 4],
+    pub comm: [u8; COMM_LEN],
+}
+
+impl ModuleLoadRecord {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        assert!(bytes.len() >= std::mem::size_of::<Self>());
+        let mut out = Self {
+            timestamp_ns: 0,
+            pid: 0,
+            uid: 0,
+            variant: 0,
+            fd: -1,
+            flags: 0,
+            _padding: [0; 4],
+            comm: [0; COMM_LEN],
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                &mut out as *mut Self as *mut u8,
+                std::mem::size_of::<Self>(),
+            );
+        }
+        out
+    }
+
+    pub fn comm_str(&self) -> String {
+        let n = self.comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        String::from_utf8_lossy(&self.comm[..n]).into_owned()
+    }
+
+    /// Which syscall produced this record. Keep in sync with the `variant`
+    /// values written by the BPF programs in inspectord_native_bpf/src/main.rs.
+    pub fn variant_str(&self) -> String {
+        match self.variant {
+            0 => "finit_module".to_string(),
+            1 => "init_module".to_string(),
+            other => format!("module_load_{other}"),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ConnectRecord {
@@ -466,5 +525,62 @@ mod tests {
         assert_eq!(r.request_str(), "PTRACE_16903");
         r.request = -1;
         assert_eq!(r.request_str(), "PTRACE_-1");
+    }
+
+    fn sample_module_load() -> ModuleLoadRecord {
+        let mut comm = [0u8; COMM_LEN];
+        comm[..6].copy_from_slice(b"insmod");
+        ModuleLoadRecord {
+            timestamp_ns: 42,
+            pid: 4321,
+            uid: 0,
+            variant: 0,
+            fd: 3,
+            flags: 0,
+            _padding: [0; 4],
+            comm,
+        }
+    }
+
+    #[test]
+    fn module_load_record_is_48_bytes() {
+        // The BPF and userspace structs are transmuted across the ring buffer,
+        // so the size must stay pinned; a silent layout change would decode
+        // garbage rather than fail loudly.
+        assert_eq!(std::mem::size_of::<ModuleLoadRecord>(), 48);
+    }
+
+    #[test]
+    fn module_load_from_bytes_roundtrips_the_c_layout() {
+        let record = sample_module_load();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const ModuleLoadRecord as *const u8,
+                std::mem::size_of::<ModuleLoadRecord>(),
+            )
+        };
+        let decoded = ModuleLoadRecord::from_bytes(bytes);
+        assert_eq!(decoded.timestamp_ns, 42);
+        assert_eq!(decoded.pid, 4321);
+        assert_eq!(decoded.uid, 0);
+        assert_eq!(decoded.variant, 0);
+        assert_eq!(decoded.fd, 3);
+        assert_eq!(decoded.flags, 0);
+        assert_eq!(decoded.comm_str(), "insmod");
+    }
+
+    #[test]
+    fn module_load_variant_str_maps_both_syscalls() {
+        let mut record = sample_module_load();
+        assert_eq!(record.variant_str(), "finit_module");
+        record.variant = 1;
+        assert_eq!(record.variant_str(), "init_module");
+    }
+
+    #[test]
+    fn module_load_variant_str_renders_unknown_numerically() {
+        let mut record = sample_module_load();
+        record.variant = 7;
+        assert_eq!(record.variant_str(), "module_load_7");
     }
 }

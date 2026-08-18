@@ -10,12 +10,14 @@ use aya::{
     programs::{BtfTracePoint, TracePoint},
     Btf, Ebpf,
 };
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::btf_offsets::{BtfError, KernelOffsets};
 use crate::records::{
-    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, PtraceRecord,
+    ConnectRecord, ConnectRecord6, ModuleLoadRecord, ProcessExecRecord, ProcessExitRecord,
+    PtraceRecord,
 };
 
 // `include_bytes!` only guarantees byte alignment, but aya's ELF parser
@@ -46,6 +48,14 @@ pub struct LoadedConnect6Program {
 pub struct LoadedPtraceProgram {
     _bpf: Ebpf,
     ring: RingBuf<MapData>,
+}
+
+pub struct LoadedModuleLoadProgram {
+    _bpf: Ebpf,
+    ring: RingBuf<MapData>,
+    /// Held open for the life of the program; see
+    /// `enable_tracepoint_on_all_cpus`.
+    _cpu_events: Vec<OwnedFd>,
 }
 
 /// Load the embedded BPF object and populate the OFFSETS array map from
@@ -127,6 +137,82 @@ fn attach_tracepoint(
     program.load().map_err(LoadError::Program)?;
     program.attach(category, name).map_err(LoadError::Program)?;
     Ok(())
+}
+
+const PERF_TYPE_TRACEPOINT: u32 = 2;
+const PERF_FLAG_FD_CLOEXEC: libc::c_ulong = 1 << 3;
+
+/// `perf_event_attr`, zeroed except for the three fields a tracepoint event
+/// needs. Sized at 128 bytes (PERF_ATTR_SIZE_VER7): older kernels check that
+/// the trailing bytes they don't know about are zero, newer ones zero-fill
+/// the fields we don't supply.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PerfEventAttr {
+    type_: u32,
+    size: u32,
+    config: u64,
+    rest: [u64; 14],
+}
+
+/// Opens one plain tracepoint perf event per online CPU and returns the fds,
+/// which the caller must keep open for as long as the BPF program is attached.
+///
+/// Why: `TracePoint::attach` opens a single perf event with `pid = -1, cpu = 0`.
+/// For most syscall tracepoints that is enough, because the kernel's perf
+/// handler runs the tracepoint's BPF program array on any CPU as soon as one
+/// program is attached. The faultable syscall tracepoints that copy their
+/// userspace string argument — `sys_enter_finit_module` and
+/// `sys_enter_init_module` among them — instead return early on any CPU whose
+/// per-CPU perf-event list for that tracepoint is empty, so a CPU-0-only event
+/// silently limits the collector to module loads that happen to run on CPU 0.
+/// Registering an event on every CPU un-gates the handler everywhere. These
+/// events carry no BPF program and are never mmap'd, so the program stays
+/// attached exactly once and each syscall still produces exactly one record.
+fn enable_tracepoint_on_all_cpus(category: &str, name: &str) -> Result<Vec<OwnedFd>, LoadError> {
+    let tracefs = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"]
+        .into_iter()
+        .find(|dir| Path::new(dir).join("events").is_dir())
+        .ok_or_else(|| LoadError::PerfEvent("tracefs is not mounted".to_string()))?;
+    let id_path = format!("{tracefs}/events/{category}/{name}/id");
+    let id: u64 = std::fs::read_to_string(&id_path)
+        .map_err(|e| LoadError::PerfEvent(format!("read {id_path}: {e}")))?
+        .trim()
+        .parse()
+        .map_err(|e| LoadError::PerfEvent(format!("parse {id_path}: {e}")))?;
+
+    let cpus = aya::util::online_cpus()
+        .map_err(|(path, e)| LoadError::PerfEvent(format!("read {path}: {e}")))?;
+    let mut fds = Vec::with_capacity(cpus.len());
+    for cpu in cpus {
+        let attr = PerfEventAttr {
+            type_: PERF_TYPE_TRACEPOINT,
+            size: std::mem::size_of::<PerfEventAttr>() as u32,
+            config: id,
+            rest: [0; 14],
+        };
+        // SAFETY: `attr` outlives the call and is sized by its own `size`
+        // field; the kernel only reads from it.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_perf_event_open,
+                &attr as *const PerfEventAttr,
+                -1_i32, // pid: any process
+                cpu as i32,
+                -1_i32, // group_fd
+                PERF_FLAG_FD_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(LoadError::PerfEvent(format!(
+                "perf_event_open({category}:{name}) on cpu {cpu}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: perf_event_open returned a fresh, owned fd.
+        fds.push(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+    }
+    Ok(fds)
 }
 
 fn take_ring(bpf: &mut Ebpf, name: &str) -> Result<RingBuf<MapData>, LoadError> {
@@ -292,6 +378,58 @@ impl LoadedPtraceProgram {
     }
 }
 
+impl LoadedModuleLoadProgram {
+    /// Attaches BOTH module-load syscalls. init_module is the fd-avoidant
+    /// path a rootkit loader would prefer, so attaching only finit would leave
+    /// a trivial bypass; one ring buffer serves both programs.
+    pub fn load_and_attach() -> Result<Self, LoadError> {
+        let (mut bpf, _btf) = load_bpf()?;
+        attach_tracepoint(
+            &mut bpf,
+            "finit_module_syscall",
+            "syscalls",
+            "sys_enter_finit_module",
+        )?;
+        attach_tracepoint(
+            &mut bpf,
+            "init_module_syscall",
+            "syscalls",
+            "sys_enter_init_module",
+        )?;
+        // Both tracepoints need a perf event on every CPU, not just CPU 0.
+        let mut cpu_events = enable_tracepoint_on_all_cpus("syscalls", "sys_enter_finit_module")?;
+        cpu_events.extend(enable_tracepoint_on_all_cpus(
+            "syscalls",
+            "sys_enter_init_module",
+        )?);
+        let ring = take_ring(&mut bpf, "MODULE_EVENTS")?;
+        Ok(Self {
+            _bpf: bpf,
+            ring,
+            _cpu_events: cpu_events,
+        })
+    }
+
+    fn drain(&mut self) -> Vec<ModuleLoadRecord> {
+        let mut out = Vec::new();
+        while let Some(item) = self.ring.next() {
+            if item.len() >= std::mem::size_of::<ModuleLoadRecord>() {
+                out.push(ModuleLoadRecord::from_bytes(&item));
+            }
+        }
+        out
+    }
+
+    /// Blocks for up to `timeout` waiting for at least one record, then
+    /// drains everything available. Returns empty Vec on timeout.
+    pub fn poll(&mut self, timeout: Duration) -> Vec<ModuleLoadRecord> {
+        if !poll_ring(&self.ring, timeout) {
+            return Vec::new();
+        }
+        self.drain()
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum LoadError {
     #[error("aya load error: {0}")]
@@ -312,4 +450,6 @@ pub enum LoadError {
     BtfResolve(#[from] BtfError),
     #[error("aya BTF error: {0}")]
     AyaBtf(#[from] aya::BtfError),
+    #[error("tracepoint perf event setup failed: {0}")]
+    PerfEvent(String),
 }

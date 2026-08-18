@@ -18,8 +18,8 @@ use aya_ebpf::{
 };
 
 use records::{
-    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, PtraceRecord, CMDLINE_LEN,
-    COMM_LEN,
+    ConnectRecord, ConnectRecord6, ModuleLoadRecord, ProcessExecRecord, ProcessExitRecord,
+    PtraceRecord, CMDLINE_LEN, COMM_LEN,
 };
 
 #[map]
@@ -36,6 +36,9 @@ static CONNECT6_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
 #[map]
 static PTRACE_EVENTS: RingBuf = RingBuf::with_byte_size(65_536, 0);
+
+#[map]
+static MODULE_EVENTS: RingBuf = RingBuf::with_byte_size(65_536, 0);
 
 // Per-kernel struct field offsets, populated by the userspace loader at
 // startup from /sys/kernel/btf/vmlinux. Avoids the previous habit of
@@ -84,6 +87,11 @@ const PTRACE_SETREGS: u64 = 13;
 const PTRACE_ATTACH: u64 = 16;
 const PTRACE_SETREGSET: u64 = 0x4205;
 const PTRACE_SEIZE: u64 = 0x4206;
+
+// Which module-load syscall produced a record. Keep in sync with
+// ModuleLoadRecord::variant_str in the userspace crate.
+const MODULE_VARIANT_FINIT: u32 = 0;
+const MODULE_VARIANT_INIT: u32 = 1;
 
 #[btf_tracepoint]
 pub fn process_exec(ctx: BtfTracePointContext) -> i32 {
@@ -452,6 +460,83 @@ fn try_ptrace_syscall(ctx: TracePointContext) -> Result<(), i64> {
         }
     }
     entry.submit(2u64); // BPF_RB_FORCE_WAKEUP
+    Ok(())
+}
+
+#[tracepoint]
+pub fn finit_module_syscall(ctx: TracePointContext) -> i32 {
+    let _ = try_finit_module_syscall(ctx);
+    0
+}
+
+fn try_finit_module_syscall(ctx: TracePointContext) -> Result<(), i64> {
+    // sys_enter_finit_module(int fd, const char *param_values, int flags).
+    // ftrace sys_enter layout: 8-byte common header, __syscall_nr at 8, then
+    // u64 syscall args at 16 + 8*i.
+    //   arg 0 = fd     @ 16
+    //   arg 1 = params @ 24 (deliberately not captured — spec section 4)
+    //   arg 2 = flags  @ 32
+    let fd: u64 = unsafe { ctx.read_at(16).map_err(|_| -1_i64)? };
+    let flags: u64 = unsafe { ctx.read_at(32).map_err(|_| -1_i64)? };
+
+    // No filter: module loads are rare, and every attempt is interesting —
+    // including the ones the kernel is about to reject.
+    let mut entry = MODULE_EVENTS.reserve::<ModuleLoadRecord>(0).ok_or(-1_i64)?;
+    let record_ptr = entry.as_mut_ptr();
+    unsafe {
+        record_ptr.write(ModuleLoadRecord::zeroed());
+        (*record_ptr).timestamp_ns = bpf_ktime_get_ns();
+        (*record_ptr).pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+        (*record_ptr).uid = bpf_get_current_uid_gid() as u32;
+        (*record_ptr).variant = MODULE_VARIANT_FINIT;
+        (*record_ptr).fd = fd as i32;
+        (*record_ptr).flags = flags as i32;
+        if let Ok(comm) = bpf_get_current_comm() {
+            let dst = &mut (*record_ptr).comm;
+            let n = core::cmp::min(comm.len(), COMM_LEN);
+            for i in 0..n {
+                dst[i] = comm[i];
+            }
+        }
+    }
+    entry.submit(2u64); // BPF_RB_FORCE_WAKEUP
+    Ok(())
+}
+
+#[tracepoint]
+pub fn init_module_syscall(ctx: TracePointContext) -> i32 {
+    let _ = try_init_module_syscall(ctx);
+    0
+}
+
+// `_ctx` is deliberately unused: none of init_module's three arguments are
+// captured, so the context is never read. The parameter stays for symmetry
+// with the other tracepoint handlers, and the BPF crate is built with
+// `-D warnings` in CI, which rejects a plain `ctx` here.
+fn try_init_module_syscall(_ctx: TracePointContext) -> Result<(), i64> {
+    // sys_enter_init_module(void *umod, unsigned long len, const char *uargs).
+    // The module image is an anonymous userspace buffer: there is no fd and no
+    // path, which is exactly why this fd-avoidant loader path is traced at all.
+    // None of its three arguments are captured (spec section 4: no params
+    // string), so the record carries caller attribution only.
+    let mut entry = MODULE_EVENTS.reserve::<ModuleLoadRecord>(0).ok_or(-1_i64)?;
+    let record_ptr = entry.as_mut_ptr();
+    unsafe {
+        record_ptr.write(ModuleLoadRecord::zeroed());
+        (*record_ptr).timestamp_ns = bpf_ktime_get_ns();
+        (*record_ptr).pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+        (*record_ptr).uid = bpf_get_current_uid_gid() as u32;
+        (*record_ptr).variant = MODULE_VARIANT_INIT;
+        // fd stays -1 and flags stays 0 from zeroed() — init_module has neither.
+        if let Ok(comm) = bpf_get_current_comm() {
+            let dst = &mut (*record_ptr).comm;
+            let n = core::cmp::min(comm.len(), COMM_LEN);
+            for i in 0..n {
+                dst[i] = comm[i];
+            }
+        }
+    }
+    entry.submit(2u64);
     Ok(())
 }
 

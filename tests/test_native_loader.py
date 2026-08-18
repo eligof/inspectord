@@ -10,6 +10,7 @@ import pytest
 from inspectord._native import (
     ProcessConnectStream6,
     ProcessExecStream,
+    ProcessModuleLoadStream,
     ProcessPtraceStream,
 )
 
@@ -97,4 +98,72 @@ def test_ptrace_stream_captures_attach_but_not_out_of_set() -> None:
             os.waitpid(child, 0)
         except (ProcessLookupError, ChildProcessError):
             pass
+        stream.close()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs CAP_BPF (run as root)")
+def test_process_module_load_stream_loads_and_closes() -> None:
+    """Both module-load programs pass the verifier and attach."""
+    stream = ProcessModuleLoadStream()
+    try:
+        assert stream is not None
+    finally:
+        stream.close()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs CAP_BPF (run as root)")
+def test_module_load_stream_captures_both_syscall_variants() -> None:
+    """A failing finit_module and a failing init_module are both recorded.
+
+    sys_enter fires before the kernel validates the fd or the image, so
+    deliberately invalid arguments still produce records — no module is ever
+    loaded by this test.
+    """
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    sys_init_module = 175
+    sys_finit_module = 313
+
+    # Run the syscalls off CPU 0 on purpose. aya attaches a tracepoint with a
+    # single perf event on CPU 0, and these two tracepoints only invoke the
+    # kernel's perf handler on CPUs that have an event registered — so without
+    # the loader's per-CPU events this test would only pass when the scheduler
+    # happened to put us on CPU 0.
+    original_affinity = os.sched_getaffinity(0)
+    off_cpu0 = sorted(original_affinity)[-1]
+
+    stream = ProcessModuleLoadStream()
+    try:
+        os.sched_setaffinity(0, {off_cpu0})
+        time.sleep(0.2)
+        stream.poll(200)  # drain anything unrelated
+
+        # Invalid fd -> EBADF, but the tracepoint has already fired.
+        libc.syscall(sys_finit_module, -1, b"", 0)
+        # NULL image -> ENOEXEC, likewise after the tracepoint fired.
+        libc.syscall(sys_init_module, None, 0, b"")
+
+        records: list[dict] = []
+        for _ in range(10):
+            records.extend(stream.poll(200))
+            names = {r["variant_name"] for r in records if r["pid"] == os.getpid()}
+            if {"finit_module", "init_module"} <= names:
+                break
+
+        mine = [r for r in records if r["pid"] == os.getpid()]
+        finits = [r for r in mine if r["variant_name"] == "finit_module"]
+        inits = [r for r in mine if r["variant_name"] == "init_module"]
+        assert finits, f"no finit_module record captured; got {records}"
+        assert inits, f"no init_module record captured; got {records}"
+        # Exactly one record per syscall. The loader registers a prog-less perf
+        # event on every online CPU to un-gate the faultable tracepoint handler
+        # (see enable_tracepoint_on_all_cpus); if those events ever ended up
+        # carrying the BPF program too, each call would fan out into one record
+        # per CPU. This is the assertion that would catch that.
+        assert len(finits) == 1, f"expected exactly one finit_module record, got {finits}"
+        assert len(inits) == 1, f"expected exactly one init_module record, got {inits}"
+        assert finits[0]["fd"] == -1
+        assert inits[0]["fd"] == -1  # init_module has no fd
+        assert finits[0]["uid"] == 0
+    finally:
+        os.sched_setaffinity(0, original_affinity)
         stream.close()

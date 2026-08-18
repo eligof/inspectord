@@ -89,6 +89,41 @@ impl PtraceRecord {
     }
 }
 
+/// One kernel-module load attempt, from either `finit_module` (variant 0,
+/// which passes an fd) or `init_module` (variant 1, which passes an anonymous
+/// memory image and therefore has no fd or flags). Emitted for every call,
+/// successful or not — sys_enter fires before the kernel's permission checks.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ModuleLoadRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub uid: u32,
+    /// 0 = finit_module, 1 = init_module.
+    pub variant: u32,
+    /// finit_module's fd argument; -1 for init_module, which has none.
+    pub fd: i32,
+    /// finit_module's flags argument; 0 for init_module, which has none.
+    pub flags: i32,
+    pub _padding: [u8; 4],
+    pub comm: [u8; COMM_LEN],
+}
+
+impl ModuleLoadRecord {
+    pub const fn zeroed() -> Self {
+        Self {
+            timestamp_ns: 0,
+            pid: 0,
+            uid: 0,
+            variant: 0,
+            fd: -1,
+            flags: 0,
+            _padding: [0; 4],
+            comm: [0; COMM_LEN],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ConnectRecord {
