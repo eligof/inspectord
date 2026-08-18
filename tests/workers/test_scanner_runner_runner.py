@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from io import BytesIO
 from typing import Any
 
-from inspectord.workers.scanner_runner.runner import ScannerRunnerWorker
+from inspectord.workers.scanner_runner.runner import ScannerRunnerWorker, _ActiveRun
 from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome
 
 
@@ -256,6 +256,44 @@ def test_teardown_during_a_run_kills_it_and_reports_failure() -> None:
     assert _actions(events) == ["scan_started", "scan_completed"]
     assert events[-1]["outcome"] == "failure"
     assert events[-1]["raw"]["reason"] == "shutdown"
+
+
+def test_teardown_reports_an_unreported_job_as_teardown_timeout() -> None:
+    """The shutdown grace expiring is not a spawn failure.
+
+    `teardown()` reports the run whether or not the job thread got back to it,
+    so a synthesized result is unavoidable -- but calling it `spawn_error` would
+    point a later investigation at the wrong thing entirely.
+    """
+
+    class NeverReportingJob:
+        def is_done(self) -> bool:
+            return False
+
+        def result(self) -> None:
+            return None
+
+        def cancel(self, *, grace_s: float) -> None:
+            return None
+
+    adapter = FakeAdapter(argv=["sh", "-c", "exit 0"])
+    worker, buf = _make_worker([adapter], _base_config(startup_delay_s=600.0))
+    worker._active = _ActiveRun(
+        scanner="fake",
+        adapter=adapter,
+        run_id="01a00000-0000-7000-8000-000000000000",
+        started_at=time.monotonic(),
+        argv=["sh", "-c", "exit 0"],
+        job=NeverReportingJob(),  # type: ignore[arg-type]
+    )
+
+    worker.teardown()
+
+    completed = _completed(_events(buf))
+    assert len(completed) == 1
+    assert completed[0]["outcome"] == "failure"
+    assert completed[0]["raw"]["reason"] == "teardown_timeout"
+    assert adapter.parse_calls == 0
 
 
 def test_teardown_without_a_run_is_a_silent_noop() -> None:

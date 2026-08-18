@@ -248,6 +248,9 @@ class ScanResult:
     timed_out: bool = False
     cancelled: bool = False
     error: str | None = None
+    #: The job thread never reported at all — only ``teardown()`` can see this,
+    #: when its shutdown grace expires before the thread gets back to it.
+    unreported: bool = False
     #: Bytes read off the pipes and discarded above the output ceiling, summed
     #: over stdout and stderr. Non-zero means the captured output is a prefix.
     output_dropped_bytes: int = 0
@@ -592,7 +595,7 @@ class ScannerRunnerWorker(Worker):
     # -- completing a run --------------------------------------------------
 
     def _finish_run(self, run: _ActiveRun, now: float) -> None:
-        result = run.job.result() or ScanResult(None, "", "", error="scan produced no result")
+        result = run.job.result() or _UNREPORTED
         outcome, reason = self._classify(run, result)
 
         findings: list[Finding] = []
@@ -641,7 +644,9 @@ class ScannerRunnerWorker(Worker):
         return outcome, "scanner_error" if outcome is ScanOutcome.failure else None
 
     def _reschedule(self, name: str, outcome: ScanOutcome, reason: str | None, now: float) -> None:
-        retryable = outcome is ScanOutcome.failure and reason != "shutdown"
+        # A scan the worker itself stopped is not a scanner failure, so it never
+        # earns a retry — and there would be no tick left to run one anyway.
+        retryable = outcome is ScanOutcome.failure and reason not in _SHUTDOWN_REASONS
         if retryable and not self._retried.get(name, False):
             # §4.4: one retry after a short backoff, then wait for the next slot.
             self._retried[name] = True
@@ -772,8 +777,26 @@ class ScannerRunnerWorker(Worker):
         )
 
 
+#: Reasons that mean "the worker stopped this scan", not "the scanner failed".
+_SHUTDOWN_REASONS = frozenset({"shutdown", "teardown_timeout"})
+
+#: Stands in for a run that ``teardown()`` had to report before its job thread
+#: did. Nothing failed to *spawn* here — the thread simply did not get back
+#: inside SHUTDOWN_GRACE_S — so it gets its own reason rather than being filed
+#: under `spawn_error`, which would send a later investigation the wrong way.
+_UNREPORTED = ScanResult(
+    None,
+    "",
+    "",
+    error="the scan thread did not report before the shutdown grace expired",
+    unreported=True,
+)
+
+
 def _pre_exit_failure_reason(result: ScanResult) -> str | None:
     """Why the scan failed before its exit status could be trusted, if it did."""
+    if result.unreported:
+        return "teardown_timeout"
     if result.error is not None:
         return "spawn_error"
     if result.timed_out:
