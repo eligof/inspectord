@@ -19,7 +19,7 @@ use aya_ebpf::{
 
 use records::{
     ConnectRecord, ConnectRecord6, ModuleLoadRecord, ProcessExecRecord, ProcessExitRecord,
-    PtraceRecord, CMDLINE_LEN, COMM_LEN,
+    PtraceRecord, RawSocketRecord, CMDLINE_LEN, COMM_LEN,
 };
 
 #[map]
@@ -39,6 +39,9 @@ static PTRACE_EVENTS: RingBuf = RingBuf::with_byte_size(65_536, 0);
 
 #[map]
 static MODULE_EVENTS: RingBuf = RingBuf::with_byte_size(65_536, 0);
+
+#[map]
+static RAWSOCK_EVENTS: RingBuf = RingBuf::with_byte_size(65_536, 0);
 
 // Per-kernel struct field offsets, populated by the userspace loader at
 // startup from /sys/kernel/btf/vmlinux. Avoids the previous habit of
@@ -92,6 +95,18 @@ const PTRACE_SEIZE: u64 = 0x4206;
 // ModuleLoadRecord::variant_str in the userspace crate.
 const MODULE_VARIANT_FINIT: u32 = 0;
 const MODULE_VARIANT_INIT: u32 = 1;
+
+// socket(2) domain/type values, as the syscall's `int` arguments. Named apart
+// from the AF_INET/AF_INET6 u16 constants above, which decode
+// sock_common.skc_family rather than a syscall argument.
+// Keep in sync with RawSocketRecord::family_str in the userspace crate.
+const SOCKET_AF_INET: i32 = 2;
+const SOCKET_AF_INET6: i32 = 10;
+const SOCKET_AF_PACKET: i32 = 17;
+const SOCK_RAW: i32 = 3;
+/// socket(2)'s type argument carries SOCK_NONBLOCK/SOCK_CLOEXEC in its high
+/// bits; the base socket type is the low nibble.
+const SOCK_TYPE_MASK: i32 = 0xf;
 
 #[btf_tracepoint]
 pub fn process_exec(ctx: BtfTracePointContext) -> i32 {
@@ -537,6 +552,72 @@ fn try_init_module_syscall(_ctx: TracePointContext) -> Result<(), i64> {
         }
     }
     entry.submit(2u64);
+    Ok(())
+}
+
+#[tracepoint]
+pub fn socket_syscall(ctx: TracePointContext) -> i32 {
+    let _ = try_socket_syscall(ctx);
+    0
+}
+
+fn try_socket_syscall(ctx: TracePointContext) -> Result<(), i64> {
+    // sys_enter_socket(int family, int type, int protocol).
+    // ftrace sys_enter layout: 8-byte common header, __syscall_nr at 8, then
+    // u64 syscall args at 16 + 8*i.
+    //   arg 0 = family   @ 16
+    //   arg 1 = type     @ 24
+    //   arg 2 = protocol @ 32
+    //
+    // Read as u64 and truncate to i32, which is exactly what the kernel's
+    // SYSCALL_DEFINE3(socket, int, int, int) does with those register values —
+    // so our view of the arguments cannot diverge from the kernel's. (The
+    // ptrace program compares the full u64 instead, because ptrace's request
+    // argument is a `long` there and is not truncated.)
+    let family: u64 = unsafe { ctx.read_at(16).map_err(|_| -1_i64)? };
+    let sock_type: u64 = unsafe { ctx.read_at(24).map_err(|_| -1_i64)? };
+    let family = family as i32;
+    let sock_type = sock_type as i32;
+
+    // Filter BEFORE reserving a ring slot (spec section 5). Emit AF_PACKET of
+    // any type — the packet-sniffer domain, CAP_NET_RAW-gated in full — plus
+    // inet/inet6 SOCK_RAW, the crafted-packet path.
+    //
+    // The family scope is load-bearing, not a nicety: AF_NETLINK sockets are
+    // conventionally SOCK_RAW, need no CAP_NET_RAW, and are opened constantly
+    // by ordinary desktop software (iproute2, sd-netlink/systemd,
+    // NetworkManager, libnl), so a type-only filter would flood this stream.
+    // AF_UNIX SOCK_RAW is silently remapped by the kernel and is likewise not
+    // a raw socket in any meaningful sense.
+    let is_raw_inet = (family == SOCKET_AF_INET || family == SOCKET_AF_INET6)
+        && (sock_type & SOCK_TYPE_MASK) == SOCK_RAW;
+    if family != SOCKET_AF_PACKET && !is_raw_inet {
+        return Err(0);
+    }
+
+    let protocol: u64 = unsafe { ctx.read_at(32).map_err(|_| -1_i64)? };
+
+    let mut entry = RAWSOCK_EVENTS.reserve::<RawSocketRecord>(0).ok_or(-1_i64)?;
+    let record_ptr = entry.as_mut_ptr();
+    unsafe {
+        record_ptr.write(RawSocketRecord::zeroed());
+        (*record_ptr).timestamp_ns = bpf_ktime_get_ns();
+        (*record_ptr).pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+        (*record_ptr).uid = bpf_get_current_uid_gid() as u32;
+        (*record_ptr).family = family;
+        // Unmasked on purpose: the mask is only how SOCK_RAW is recognised,
+        // while SOCK_NONBLOCK/SOCK_CLOEXEC are evidence worth keeping.
+        (*record_ptr).type_ = sock_type;
+        (*record_ptr).protocol = protocol as i32;
+        if let Ok(comm) = bpf_get_current_comm() {
+            let dst = &mut (*record_ptr).comm;
+            let n = core::cmp::min(comm.len(), COMM_LEN);
+            for i in 0..n {
+                dst[i] = comm[i];
+            }
+        }
+    }
+    entry.submit(2u64); // BPF_RB_FORCE_WAKEUP
     Ok(())
 }
 

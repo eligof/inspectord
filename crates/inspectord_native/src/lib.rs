@@ -6,7 +6,7 @@ mod records;
 
 use loader::{
     LoadedConnect6Program, LoadedConnectProgram, LoadedExitProgram, LoadedModuleLoadProgram,
-    LoadedProgram, LoadedPtraceProgram,
+    LoadedProgram, LoadedPtraceProgram, LoadedRawSocketProgram,
 };
 use pyo3::exceptions::{PyOSError, PyRuntimeError};
 use pyo3::prelude::*;
@@ -377,6 +377,68 @@ impl ProcessModuleLoadStream {
     }
 }
 
+#[pyclass(unsendable)]
+struct ProcessRawSocketStream {
+    program: Option<LoadedRawSocketProgram>,
+}
+
+#[pymethods]
+impl ProcessRawSocketStream {
+    #[new]
+    fn new() -> PyResult<Self> {
+        let program = LoadedRawSocketProgram::load_and_attach()
+            .map_err(|e| PyOSError::new_err(format!("eBPF load failed: {e}")))?;
+        Ok(Self {
+            program: Some(program),
+        })
+    }
+
+    /// Block for up to `timeout_ms` ms, then return all currently-available
+    /// raw-socket creations as a list of dicts. Only AF_PACKET sockets and
+    /// AF_INET/AF_INET6 SOCK_RAW sockets are emitted; the call is recorded at
+    /// syscall entry, so one the kernel goes on to reject with EPERM appears
+    /// too.
+    fn poll<'py>(&mut self, py: Python<'py>, timeout_ms: u64) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let program = self
+            .program
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("stream is closed"))?;
+        let records = program.poll(Duration::from_millis(timeout_ms));
+        let mut out = Vec::with_capacity(records.len());
+        for record in records {
+            let dict = PyDict::new(py);
+            dict.set_item("timestamp_ns", record.timestamp_ns)?;
+            dict.set_item("pid", record.pid)?;
+            dict.set_item("uid", record.uid)?;
+            dict.set_item("comm", record.comm_str())?;
+            dict.set_item("family", record.family)?;
+            dict.set_item("family_name", record.family_str())?;
+            dict.set_item("type", record.type_)?;
+            dict.set_item("protocol", record.protocol)?;
+            out.push(dict);
+        }
+        Ok(out)
+    }
+
+    fn close(&mut self) {
+        self.program.take();
+    }
+
+    fn __enter__<'py>(slf: PyRef<'py, Self>) -> PyRef<'py, Self> {
+        slf
+    }
+
+    fn __exit__(
+        &mut self,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc_value: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) -> bool {
+        self.close();
+        false
+    }
+}
+
 #[pyfunction]
 fn hello() -> &'static str {
     "hello from inspectord_native"
@@ -391,6 +453,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ProcessConnectStream6>()?;
     m.add_class::<ProcessPtraceStream>()?;
     m.add_class::<ProcessModuleLoadStream>()?;
+    m.add_class::<ProcessRawSocketStream>()?;
     Ok(())
 }
 

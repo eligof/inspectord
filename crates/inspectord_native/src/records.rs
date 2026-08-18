@@ -240,6 +240,74 @@ impl ModuleLoadRecord {
     }
 }
 
+/// One raw-socket creation, from `sys_enter_socket`. Only the family-scoped
+/// raw sockets pass the in-BPF filter (AF_PACKET of any type, or AF_INET /
+/// AF_INET6 with SOCK_RAW) — see the filter in the BPF crate. Emitted at
+/// syscall entry, so a call the kernel is about to reject with EPERM is
+/// recorded too.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawSocketRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub uid: u32,
+    /// socket(2)'s domain argument: AF_PACKET / AF_INET / AF_INET6.
+    /// Decoded by `family_str`.
+    pub family: i32,
+    /// socket(2)'s type argument **as passed**, flag bits included. The BPF
+    /// filter masks with 0xf to test for SOCK_RAW; the record keeps the
+    /// SOCK_NONBLOCK/SOCK_CLOEXEC flags as evidence.
+    pub type_: i32,
+    /// socket(2)'s protocol argument (e.g. ETH_P_ALL = 0x0003 for a sniffer,
+    /// byte-swapped by the caller via htons, so typically 768 on little-endian).
+    pub protocol: i32,
+    pub _padding: [u8; 4],
+    pub comm: [u8; COMM_LEN],
+}
+
+impl RawSocketRecord {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        assert!(bytes.len() >= std::mem::size_of::<Self>());
+        let mut out = Self {
+            timestamp_ns: 0,
+            pid: 0,
+            uid: 0,
+            family: 0,
+            type_: 0,
+            protocol: 0,
+            _padding: [0; 4],
+            comm: [0; COMM_LEN],
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                &mut out as *mut Self as *mut u8,
+                std::mem::size_of::<Self>(),
+            );
+        }
+        out
+    }
+
+    pub fn comm_str(&self) -> String {
+        let n = self.comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        String::from_utf8_lossy(&self.comm[..n]).into_owned()
+    }
+
+    /// Human-readable address family. Only the three families the BPF filter
+    /// emits are named (keep in sync with the SOCKET_AF_* constants in
+    /// inspectord_native_bpf/src/main.rs); anything else renders as
+    /// `AF_<decimal>` so an unexpected value is visible rather than silently
+    /// mislabelled.
+    pub fn family_str(&self) -> String {
+        match self.family {
+            2 => "AF_INET".to_string(),
+            10 => "AF_INET6".to_string(),
+            17 => "AF_PACKET".to_string(),
+            other => format!("AF_{other}"),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ConnectRecord {
@@ -582,5 +650,82 @@ mod tests {
         let mut record = sample_module_load();
         record.variant = 7;
         assert_eq!(record.variant_str(), "module_load_7");
+    }
+
+    fn sample_raw_socket() -> RawSocketRecord {
+        let mut comm = [0u8; COMM_LEN];
+        comm[..7].copy_from_slice(b"tcpdump");
+        RawSocketRecord {
+            timestamp_ns: 42,
+            pid: 4321,
+            uid: 0,
+            family: 17,
+            type_: 3,
+            protocol: 768,
+            _padding: [0; 4],
+            comm,
+        }
+    }
+
+    #[test]
+    fn raw_socket_record_is_48_bytes() {
+        // The BPF and userspace structs are transmuted across the ring buffer,
+        // so the size must stay pinned; a silent layout change would decode
+        // garbage rather than fail loudly.
+        assert_eq!(std::mem::size_of::<RawSocketRecord>(), 48);
+    }
+
+    #[test]
+    fn raw_socket_from_bytes_roundtrips_the_c_layout() {
+        let record = sample_raw_socket();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const RawSocketRecord as *const u8,
+                std::mem::size_of::<RawSocketRecord>(),
+            )
+        };
+        let decoded = RawSocketRecord::from_bytes(bytes);
+        assert_eq!(decoded.timestamp_ns, 42);
+        assert_eq!(decoded.pid, 4321);
+        assert_eq!(decoded.uid, 0);
+        assert_eq!(decoded.family, 17);
+        assert_eq!(decoded.type_, 3);
+        assert_eq!(decoded.protocol, 768);
+        assert_eq!(decoded.comm_str(), "tcpdump");
+    }
+
+    #[test]
+    fn raw_socket_family_str_maps_the_emitted_families() {
+        let mut record = sample_raw_socket();
+        assert_eq!(record.family_str(), "AF_PACKET");
+        record.family = 2;
+        assert_eq!(record.family_str(), "AF_INET");
+        record.family = 10;
+        assert_eq!(record.family_str(), "AF_INET6");
+    }
+
+    #[test]
+    fn raw_socket_family_str_renders_unknown_numerically() {
+        let mut record = sample_raw_socket();
+        record.family = 16;
+        assert_eq!(record.family_str(), "AF_16");
+        record.family = -1;
+        assert_eq!(record.family_str(), "AF_-1");
+    }
+
+    #[test]
+    fn raw_socket_type_keeps_the_socket_flags() {
+        // The BPF filter masks with 0xf to recognise SOCK_RAW, but the record
+        // stores the type as passed so SOCK_NONBLOCK/SOCK_CLOEXEC survive as
+        // evidence. 0x80803 = SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC.
+        let mut record = sample_raw_socket();
+        record.type_ = 0x8_0803;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const RawSocketRecord as *const u8,
+                std::mem::size_of::<RawSocketRecord>(),
+            )
+        };
+        assert_eq!(RawSocketRecord::from_bytes(bytes).type_, 0x8_0803);
     }
 }
