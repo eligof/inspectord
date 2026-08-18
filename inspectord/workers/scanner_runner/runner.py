@@ -611,20 +611,33 @@ class ScannerRunnerWorker(Worker):
         cap = self._max_findings()
         emitted = findings[:cap]
         dropped = len(findings) - len(emitted)
-        for finding in emitted:
-            self._emit_finding(run, finding)
 
-        self._emit_completed(
-            run,
-            outcome=outcome,
-            reason=reason,
-            result=result,
-            duration_s=max(0.0, now - run.started_at),
-            finding_count=len(emitted),
-            findings_dropped=dropped,
+        # Decision 11 is the reason this worker exists in the shape it does: the
+        # run gets reported, and the scanner gets its next slot, whatever the
+        # emission of the findings does. `self._active` is already cleared, so
+        # the "stuck in flight forever" failure is impossible either way; what
+        # this protects is `scan_completed` itself, which is the only thing that
+        # distinguishes a broken scanner from a clean machine.
+        self._guard(lambda: self._emit_findings(run, emitted))
+        self._guard(
+            lambda: self._emit_completed(
+                run,
+                outcome=outcome,
+                reason=reason,
+                result=result,
+                duration_s=max(0.0, now - run.started_at),
+                finding_count=len(emitted),
+                findings_dropped=dropped,
+            )
         )
+        self._guard(lambda: self._reschedule(run.scanner, outcome, reason, now))
 
-        self._reschedule(run.scanner, outcome, reason, now)
+    def _guard(self, action: Callable[[], Any]) -> None:
+        """Run *action*, recording any failure on the heartbeat instead of raising."""
+        try:
+            action()
+        except Exception as exc:
+            self._last_error = repr(exc)
 
     def _classify(self, run: _ActiveRun, result: ScanResult) -> tuple[ScanOutcome, str | None]:
         """Map a finished job to ``(outcome, reason)``.
@@ -738,6 +751,10 @@ class ScannerRunnerWorker(Worker):
                 raw={"scanner": scanner, "reason": reason, "binary": adapter.binary},
             )
         )
+
+    def _emit_findings(self, run: _ActiveRun, findings: Sequence[Finding]) -> None:
+        for finding in findings:
+            self._emit_finding(run, finding)
 
     def _emit_finding(self, run: _ActiveRun, finding: Finding) -> None:
         indicator: dict[str, Any] = {

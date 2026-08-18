@@ -578,6 +578,36 @@ def test_a_parser_that_raises_is_reported_as_a_failed_scan() -> None:
     assert completed["raw"]["reason"] == "parse_error"
 
 
+def test_a_finding_that_fails_to_emit_still_yields_scan_completed() -> None:
+    """Decision 11 is the whole point of this worker: the run is always reported.
+
+    A finding that cannot be emitted (a serialization bug, a broken pipe) must
+    not take `scan_completed` -- and the scanner's next slot -- down with it.
+    """
+    adapter = FakeAdapter(
+        argv=["sh", "-c", "exit 1"],
+        findings=[_finding("/etc/passwd"), _finding("/etc/shadow")],
+    )
+    worker, buf = _make_worker([adapter], _base_config())
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("finding emit exploded")
+
+    worker._emit_finding = boom  # type: ignore[method-assign]
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    assert [e["action"] for e in events] == ["scan_started", "scan_completed"]
+    completed = _completed(events)[0]
+    # The run itself succeeded; only the emission of its findings did not.
+    assert completed["outcome"] == "success"
+    assert completed["raw"]["finding_count"] == 2
+    # ...and the failure is visible on the next heartbeat rather than swallowed.
+    assert "finding emit exploded" in str(worker._last_error)
+
+
 def test_step_interval_comes_from_config() -> None:
     adapter = FakeAdapter(argv=["sh", "-c", "exit 0"])
     worker, _ = _make_worker([adapter], _base_config(interval_s=42.0))
