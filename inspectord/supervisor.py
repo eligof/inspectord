@@ -382,11 +382,17 @@ class Supervisor:
 
     def _reap(self, wp: _WorkerProc) -> None:
         """Join a dead child's reader threads and close its pipes — no leaks, no double-read."""
+        stuck = False
         for t in wp.threads:
             if t is not threading.current_thread():
                 t.join(timeout=1.0)
                 if t.is_alive():
+                    stuck = True
                     log.warning("reader thread for %s did not exit at EOF", wp.spec.name)
+        if stuck:
+            # Closing a pipe out from under a thread still blocked in readline
+            # would kill that thread with a ValueError; leave the fds to stop().
+            return
         for stream in (wp.proc.stdin, wp.proc.stdout, wp.proc.stderr):
             if stream is not None:
                 with contextlib.suppress(Exception):
