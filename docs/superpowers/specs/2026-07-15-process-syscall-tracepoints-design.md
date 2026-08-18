@@ -254,8 +254,29 @@ one worker, one rule.
 - **Relationship to `kmod_watcher`**: complementary, not redundant. The pure-Python
   watcher polls loaded-module *state* (what is loaded now); these tracepoints capture the
   *initiating process* in real time (who loaded it), including failed attempts.
-- **Worker** emits `action="module_load_attempt"`; rule
-  `proc.kernel_module_loaded_unknown` (parent §21).
+- **Worker** emits `action="module_load_attempt"` from a
+  `process_collector_module_load` worker (named in full to keep it distinct
+  from the existing pure-Python `kmod_watcher`).
+- **Rules — reworked 2026-08-18.** The parent spec's `proc.kernel_module_loaded_unknown`
+  presupposed a module *name* to judge as unknown, and this slice deliberately
+  does not collect one (see the resolved questions above). "Unknown" therefore
+  keys off the **loader**, not the module, and the slice ships two rules:
+
+  1. `proc.kernel_module_from_memory` — **high** — fires on `variant ==
+     "init_module"`. Since kernel 3.8 every normal loader (kmod/modprobe,
+     systemd-udevd, dracut) uses `finit_module` with a file descriptor; loading
+     a module image straight from anonymous memory is the fd-avoidant path a
+     rootkit loader picks precisely to avoid leaving a file. It is rare enough
+     on a desktop that a high-severity alert stays quiet.
+  2. `proc.kernel_module_loaded_unknown` — **medium** — fires on `variant ==
+     "finit_module"` when `process.name` is `NOT IN` the known-loader list
+     (`modprobe`, `insmod`, `kmod`, `systemd-udevd`, `systemd`, `dracut`,
+     `mkinitcpio`). Keeps the id promised by parent §21 while resting only on
+     data this collector actually has.
+
+  Both are evaluated per-event with no correlation window; joining these events
+  to `kmod_watcher`'s `kmod_loaded` (which carries the module name) is left to
+  the analyst reading the Cases timeline in v1, not automated.
 - **Resolved 2026-08-18** (the two open questions this slice's plan had to settle):
 
   1. **Module name: not resolved in v1.** The record carries *who loaded a module*, not

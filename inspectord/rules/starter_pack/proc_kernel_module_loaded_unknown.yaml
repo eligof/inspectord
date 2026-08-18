@@ -1,0 +1,21 @@
+version: 1.0.0
+id: proc.kernel_module_loaded_unknown
+name: "kernel module loaded by an unknown loader"
+severity: medium
+category: process
+why: |
+  A process outside the usual set of module loaders (modprobe, insmod, kmod,
+  systemd-udevd, systemd, dracut, mkinitcpio) called finit_module(2) to load a
+  kernel module. Modules run with full kernel privilege, so an unexpected
+  loader is worth a look at who it was and what it loaded — the module name is
+  in the nearby kmod_watcher kmod_loaded event, not in this one.
+false_positives:
+  - "A package install or a pacman hook loading a module through a helper binary that is not in the known-loader list."
+  - "A hypervisor or container runtime (libvirtd, dockerd, VirtualBox or VMware setup helpers) loading its own kernel modules directly."
+  - "A manual modprobe run through a wrapper or shell function, so the caller's comm is the wrapper rather than modprobe."
+detect:
+  any_of:
+    - event.module == "process_collector_module_load" AND event.action == "module_load_attempt" AND process.module_load_variant == "finit_module" AND process.name NOT IN ["modprobe", "insmod", "kmod", "systemd-udevd", "systemd", "dracut", "mkinitcpio"]
+short: "kernel module loaded by {process.name} (pid {process.pid})"
+detail: "{process.name} (pid {process.pid}, uid {user.id}) called finit_module(2); this is not one of the usual module loaders on this host."
+labels: [process, kernel_module]
