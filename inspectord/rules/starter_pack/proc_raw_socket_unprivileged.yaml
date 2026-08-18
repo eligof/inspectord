@@ -1,0 +1,31 @@
+version: 1.0.0
+id: proc.raw_socket_unprivileged
+name: "raw socket created by a non-root process"
+severity: medium
+category: process
+why: |
+  A process running as a non-root uid created a raw socket (AF_PACKET, or
+  AF_INET/AF_INET6 with SOCK_RAW). Raw sockets read frames straight off the
+  wire and send crafted packets, so they are what packet sniffers and
+  packet-crafting tools open.
+
+  Read this alert knowing exactly what it can and cannot tell you. The uid is
+  only a proxy for CAP_NET_RAW: the tracepoint fires on syscall entry, before
+  the kernel checks the capability or returns a result, so the event carries
+  no outcome and no capability. Two consequences, both accepted in v1. A
+  non-root process that legitimately holds CAP_NET_RAW through file or ambient
+  capabilities creates the socket successfully and still matches this rule.
+  And a raw socket opened by root -- the higher-privilege, more dangerous case
+  -- is recorded as an event but never alerts here: root-run sniffers are NOT
+  covered by this rule.
+false_positives:
+  - "A non-root process holding CAP_NET_RAW via file or ambient capabilities: mtr, dumpcap (wireshark's capture helper) and some ping builds open raw sockets by design and match this rule."
+  - "A network diagnostic you ran yourself (ping, traceroute, mtr, tcpdump/dumpcap, nmap, arping)."
+  - "A container, VM or VPN networking helper (docker/podman network setup, libvirt or VirtualBox NAT/DHCP helpers, dhcpcd/dhclient, wpa_supplicant) opening AF_PACKET sockets under a non-root service account."
+  - "Not a false positive but a blind spot to keep in mind while triaging: the same sniffer run as root produces an event and no alert, so the absence of alerts is not the absence of raw sockets."
+detect:
+  any_of:
+    - event.module == "process_collector_raw_socket" AND event.action == "raw_socket_created" AND user.id != "0"
+short: "raw socket ({network.socket_family}) created by {process.name} (pid {process.pid})"
+detail: "{process.name} (pid {process.pid}, uid {user.id}) created a {network.socket_family} raw socket. The uid is a proxy for CAP_NET_RAW rather than proof of it, and the syscall's outcome is unknown -- this fires on the attempt."
+labels: [process, network, raw_socket]
