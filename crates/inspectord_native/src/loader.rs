@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::btf_offsets::{BtfError, KernelOffsets};
 use crate::records::{
     ConnectRecord, ConnectRecord6, ModuleLoadRecord, ProcessExecRecord, ProcessExitRecord,
-    PtraceRecord,
+    PtraceRecord, RawSocketRecord,
 };
 
 // `include_bytes!` only guarantees byte alignment, but aya's ELF parser
@@ -53,6 +53,13 @@ pub struct LoadedPtraceProgram {
 }
 
 pub struct LoadedModuleLoadProgram {
+    _bpf: Ebpf,
+    ring: RingBuf<MapData>,
+    /// Held open for the life of the program; see `attach_tracepoint`.
+    _cpu_events: Vec<OwnedFd>,
+}
+
+pub struct LoadedRawSocketProgram {
     _bpf: Ebpf,
     ring: RingBuf<MapData>,
     /// Held open for the life of the program; see `attach_tracepoint`.
@@ -435,6 +442,42 @@ impl LoadedModuleLoadProgram {
     /// Blocks for up to `timeout` waiting for at least one record, then
     /// drains everything available. Returns empty Vec on timeout.
     pub fn poll(&mut self, timeout: Duration) -> Vec<ModuleLoadRecord> {
+        if !poll_ring(&self.ring, timeout) {
+            return Vec::new();
+        }
+        self.drain()
+    }
+}
+
+impl LoadedRawSocketProgram {
+    /// Attaches `sys_enter_socket`. The program filters in-BPF to AF_PACKET
+    /// and to AF_INET/AF_INET6 SOCK_RAW, so the ring only ever carries
+    /// raw-socket creations.
+    pub fn load_and_attach() -> Result<Self, LoadError> {
+        let (mut bpf, _btf) = load_bpf()?;
+        let cpu_events =
+            attach_tracepoint(&mut bpf, "socket_syscall", "syscalls", "sys_enter_socket")?;
+        let ring = take_ring(&mut bpf, "RAWSOCK_EVENTS")?;
+        Ok(Self {
+            _bpf: bpf,
+            ring,
+            _cpu_events: cpu_events,
+        })
+    }
+
+    fn drain(&mut self) -> Vec<RawSocketRecord> {
+        let mut out = Vec::new();
+        while let Some(item) = self.ring.next() {
+            if item.len() >= std::mem::size_of::<RawSocketRecord>() {
+                out.push(RawSocketRecord::from_bytes(&item));
+            }
+        }
+        out
+    }
+
+    /// Blocks for up to `timeout` waiting for at least one record, then
+    /// drains everything available. Returns empty Vec on timeout.
+    pub fn poll(&mut self, timeout: Duration) -> Vec<RawSocketRecord> {
         if !poll_ring(&self.ring, timeout) {
             return Vec::new();
         }
