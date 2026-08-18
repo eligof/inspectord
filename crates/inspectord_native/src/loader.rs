@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use crate::btf_offsets::{BtfError, KernelOffsets};
 use crate::records::{
-    ConnectRecord, ConnectRecord6, ProcessExecRecord, ProcessExitRecord, PtraceRecord,
+    ConnectRecord, ConnectRecord6, ModuleLoadRecord, ProcessExecRecord, ProcessExitRecord,
+    PtraceRecord,
 };
 
 // `include_bytes!` only guarantees byte alignment, but aya's ELF parser
@@ -44,6 +45,11 @@ pub struct LoadedConnect6Program {
 }
 
 pub struct LoadedPtraceProgram {
+    _bpf: Ebpf,
+    ring: RingBuf<MapData>,
+}
+
+pub struct LoadedModuleLoadProgram {
     _bpf: Ebpf,
     ring: RingBuf<MapData>,
 }
@@ -285,6 +291,48 @@ impl LoadedPtraceProgram {
     /// Blocks for up to `timeout` waiting for at least one record, then
     /// drains everything available. Returns empty Vec on timeout.
     pub fn poll(&mut self, timeout: Duration) -> Vec<PtraceRecord> {
+        if !poll_ring(&self.ring, timeout) {
+            return Vec::new();
+        }
+        self.drain()
+    }
+}
+
+impl LoadedModuleLoadProgram {
+    /// Attaches BOTH module-load syscalls. init_module is the fd-avoidant
+    /// path a rootkit loader would prefer, so attaching only finit would leave
+    /// a trivial bypass; one ring buffer serves both programs.
+    pub fn load_and_attach() -> Result<Self, LoadError> {
+        let (mut bpf, _btf) = load_bpf()?;
+        attach_tracepoint(
+            &mut bpf,
+            "finit_module_syscall",
+            "syscalls",
+            "sys_enter_finit_module",
+        )?;
+        attach_tracepoint(
+            &mut bpf,
+            "init_module_syscall",
+            "syscalls",
+            "sys_enter_init_module",
+        )?;
+        let ring = take_ring(&mut bpf, "MODULE_EVENTS")?;
+        Ok(Self { _bpf: bpf, ring })
+    }
+
+    fn drain(&mut self) -> Vec<ModuleLoadRecord> {
+        let mut out = Vec::new();
+        while let Some(item) = self.ring.next() {
+            if item.len() >= std::mem::size_of::<ModuleLoadRecord>() {
+                out.push(ModuleLoadRecord::from_bytes(&item));
+            }
+        }
+        out
+    }
+
+    /// Blocks for up to `timeout` waiting for at least one record, then
+    /// drains everything available. Returns empty Vec on timeout.
+    pub fn poll(&mut self, timeout: Duration) -> Vec<ModuleLoadRecord> {
         if !poll_ring(&self.ring, timeout) {
             return Vec::new();
         }
