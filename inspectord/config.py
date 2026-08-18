@@ -103,6 +103,11 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "config": {},
                 },
                 {
+                    "name": "process_collector_ptrace",
+                    "module": "inspectord.workers.process_collector_ptrace",
+                    "config": {},
+                },
+                {
                     "name": "outbound_connection_tracker",
                     "module": "inspectord.workers.outbound_connection_tracker",
                     "config": {},

@@ -41,6 +41,10 @@ name = "process_collector_exit"
 module = "inspectord.workers.process_collector_exit"
 
 [[workers]]
+name = "process_collector_ptrace"
+module = "inspectord.workers.process_collector_ptrace"
+
+[[workers]]
 name = "outbound_connection_tracker"
 module = "inspectord.workers.outbound_connection_tracker"
 
