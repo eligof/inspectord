@@ -197,3 +197,40 @@ impl ConnectRecord6 {
         }
     }
 }
+
+/// One raw-socket creation, from `sys_enter_socket`. Only the family-scoped
+/// raw sockets pass the in-BPF filter (AF_PACKET of any type, or AF_INET /
+/// AF_INET6 with SOCK_RAW) — see the filter in main.rs. Emitted at syscall
+/// entry, so a call the kernel is about to reject with EPERM is recorded too.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawSocketRecord {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub uid: u32,
+    /// socket(2)'s domain argument: AF_PACKET / AF_INET / AF_INET6.
+    pub family: i32,
+    /// socket(2)'s type argument **as passed**, flag bits included. The filter
+    /// masks with 0xf to test for SOCK_RAW; the record keeps the flags.
+    pub type_: i32,
+    /// socket(2)'s protocol argument (e.g. ETH_P_ALL = 0x0003 for a sniffer,
+    /// byte-swapped by the caller via htons, so typically 768 on little-endian).
+    pub protocol: i32,
+    pub _padding: [u8; 4],
+    pub comm: [u8; COMM_LEN],
+}
+
+impl RawSocketRecord {
+    pub const fn zeroed() -> Self {
+        Self {
+            timestamp_ns: 0,
+            pid: 0,
+            uid: 0,
+            family: 0,
+            type_: 0,
+            protocol: 0,
+            _padding: [0; 4],
+            comm: [0; COMM_LEN],
+        }
+    }
+}
