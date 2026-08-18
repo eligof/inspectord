@@ -38,6 +38,8 @@ class FakeAdapter:
         self._argv = list(argv)
         self._findings = list(findings)
         self.parse_calls = 0
+        self.last_stdout = ""
+        self.last_stderr = ""
 
     def argv(self, config: Mapping[str, Any]) -> list[str]:
         return list(self._argv)
@@ -51,6 +53,8 @@ class FakeAdapter:
 
     def parse(self, stdout: str, stderr: str) -> list[Finding]:
         self.parse_calls += 1
+        self.last_stdout = stdout
+        self.last_stderr = stderr
         return list(self._findings)
 
 
@@ -361,6 +365,70 @@ def test_finding_cap_truncates_and_flags() -> None:
     assert completed["raw"]["findings_dropped"] == 7
     # Truncation never turns a successful scan into a failed one.
     assert completed["outcome"] == "success"
+
+
+# --------------------------------------------------------------------------
+# output ceiling -- the memory sibling of the finding cap (decision 12)
+# --------------------------------------------------------------------------
+
+
+def test_output_over_the_ceiling_is_truncated_and_the_child_still_completes() -> None:
+    """The cap bounds MEMORY, and the pipe keeps being drained past the cap.
+
+    200 kB per stream is far more than a pipe buffer (64 kB on Linux), so a
+    reader that simply stopped at the ceiling would leave the scanner blocked in
+    `write()` until its timeout. The child reaching `exit 1` is the proof that
+    it did not: a deadlocked scan would be reported as a timeout instead.
+    """
+    payload = 200_000
+    ceiling = 4096
+    adapter = FakeAdapter(
+        argv=[
+            "sh",
+            "-c",
+            f"yes 0123456789 | head -c {payload}; yes 0123456789 | head -c {payload} >&2; exit 1",
+        ],
+        findings=[_finding("/etc/passwd")],
+    )
+    config = _base_config(
+        max_output_bytes=ceiling,
+        scanners={"fake": {"enabled": True, "interval_s": 1000.0, "timeout_s": 10.0}},
+    )
+    worker, buf = _make_worker([adapter], config)
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    # Not killed: the scanner ran to its own exit status.
+    assert completed["outcome"] == "success"
+    assert completed["raw"]["exit_code"] == 1
+    assert "reason" not in completed["raw"]  # pruned: no failure reason
+    # Truncation is visible, never silent (decision 11).
+    assert completed["raw"]["output_truncated"] is True
+    assert completed["raw"]["output_dropped_bytes"] == 2 * (payload - ceiling)
+    # Only the first `ceiling` bytes of each stream were retained.
+    assert len(adapter.last_stdout.encode()) == ceiling
+    assert len(adapter.last_stderr.encode()) == ceiling
+    assert adapter.last_stdout.startswith("0123456789\n")
+    # ...and the run is still parsed and reported normally.
+    assert sum(1 for e in events if e["action"] == "scan_finding") == 1
+
+
+def test_output_under_the_ceiling_is_delivered_whole_and_not_flagged() -> None:
+    adapter = FakeAdapter(argv=["sh", "-c", "echo out; echo err >&2; exit 1"])
+    worker, buf = _make_worker([adapter], _base_config(max_output_bytes=4096))
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert completed["raw"]["output_truncated"] is False
+    assert completed["raw"]["output_dropped_bytes"] == 0
+    assert adapter.last_stdout == "out\n"
+    assert adapter.last_stderr == "err\n"
 
 
 # --------------------------------------------------------------------------

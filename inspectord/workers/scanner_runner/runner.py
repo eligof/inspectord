@@ -12,11 +12,15 @@ death**. So:
 * at most one scan runs at a time; a scanner that is due while a run is in
   flight emits ``scan_skipped`` rather than nothing;
 * a failed scan is always reported (decision 11) — a scan that silently never
-  runs looks exactly like a clean machine.
+  runs looks exactly like a clean machine;
+* the scanner's output is captured under a byte ceiling, and the surplus is
+  *drained and discarded* rather than left in the pipe — a first ``aide --check``
+  against an uninitialized database can print hundreds of megabytes.
 
-Threading discipline: only the job thread ever calls ``communicate()`` or
-``wait()`` on the subprocess. Other threads only *send signals* and ``join()``
-the thread. That is what keeps ``teardown()`` from racing the scan.
+Threading discipline: only the job thread and the two reader threads it owns
+ever touch the subprocess pipes, and only the job thread ever ``wait()``s on the
+process. Other threads only *send signals* and ``join()`` the job thread. That
+is what keeps ``teardown()`` from racing the scan.
 """
 
 from __future__ import annotations
@@ -52,11 +56,25 @@ DEFAULT_TICK_S = 60.0
 DEFAULT_STARTUP_DELAY_S = 120.0
 #: Decision 12 — a first-run AIDE diff can produce thousands of entries.
 DEFAULT_MAX_FINDINGS_PER_RUN = 500
+#: The memory sibling of the finding cap, applied to EACH of stdout and stderr.
+#:
+#: The finding cap bounds the *events* a run emits; it does nothing about the
+#: bytes the scanner wrote, which are all buffered before the first finding is
+#: parsed. 8 MiB is far more than any healthy scanner prints and far less than a
+#: first-run AIDE diff.
+DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 #: The single retry after a failure (§4.4).
 DEFAULT_RETRY_BACKOFF_S = 60.0
 DEFAULT_SCAN_INTERVAL_S = 86400.0
 DEFAULT_TIMEOUT_S = 3600.0
 #: How long to wait between SIGTERM and SIGKILL when killing a scan on timeout.
+#:
+#: The full worst case on the timeout path is **three** of these — SIGTERM ->
+#: 5s -> SIGKILL -> 5s (``kill_process_group``), then 5s more draining what the
+#: dying group left in the pipes — so a timed-out scan can occupy its job thread
+#: for ~15s past ``timeout_s``. That is deliberate and costs nothing: it happens
+#: on the job thread, never on ``step()`` (which only polls) or on ``teardown()``
+#: (which uses the much tighter ``SHUTDOWN_GRACE_S`` below).
 KILL_GRACE_S = 5.0
 #: The same, on shutdown -- deliberately much shorter.
 #:
@@ -65,6 +83,8 @@ KILL_GRACE_S = 5.0
 #: for SIGKILL would be killed part-way through and orphan the very scan it was
 #: trying to reap. SIGTERM -> 1.5s -> SIGKILL -> 1.5s fits inside the budget.
 SHUTDOWN_GRACE_S = 1.5
+#: Pipe read size. Only latency, never correctness, depends on it.
+_READ_CHUNK = 64 * 1024
 
 SpawnFn = Callable[[list[str]], "subprocess.Popen[str]"]
 
@@ -94,6 +114,70 @@ def default_spawn(argv: list[str]) -> subprocess.Popen[str]:
         errors="replace",
         start_new_session=True,
     )
+
+
+class _BoundedSink:
+    """Collects up to *limit* bytes of a scanner's output, discarding the rest.
+
+    The surplus is **read and thrown away, never left unread**: a reader that
+    simply stopped at the ceiling would block the scanner in ``write()`` on a
+    full pipe buffer until its timeout, turning a bounded overrun into a hung
+    scan. What was dropped is counted, so the degradation is reportable rather
+    than silent (decision 11).
+
+    Written by one reader thread, read by the job thread — hence the lock.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(0, limit)
+        self._lock = threading.Lock()
+        self._chunks: list[bytes] = []
+        self._kept = 0
+        self._dropped = 0
+
+    def write(self, chunk: str | bytes) -> None:
+        # Text-mode pipes hand back str; the ceiling is in bytes either way, so
+        # that is what gets measured.
+        data = chunk.encode("utf-8", "replace") if isinstance(chunk, str) else chunk
+        with self._lock:
+            room = self._limit - self._kept
+            if room > 0:
+                keep = data[:room]
+                self._chunks.append(keep)
+                self._kept += len(keep)
+                data = data[len(keep) :]
+            self._dropped += len(data)
+
+    def snapshot(self) -> tuple[str, int]:
+        """``(text, dropped_bytes)`` — safe to call while a reader is still running."""
+        with self._lock:
+            return b"".join(self._chunks).decode("utf-8", "replace"), self._dropped
+
+
+def _drain_into(stream: Any, sink: _BoundedSink) -> None:
+    """Read *stream* to EOF into *sink*. Never raises.
+
+    Runs on its own daemon thread, one per pipe: reading both from this thread
+    would deadlock as soon as the other pipe filled up.
+    """
+    try:
+        with stream:
+            while True:
+                chunk = stream.read(_READ_CHUNK)
+                if not chunk:
+                    return
+                sink.write(chunk)
+    except Exception:
+        # A closed or broken pipe just means there is nothing more to capture.
+        return
+
+
+def _start_reader(stream: Any, sink: _BoundedSink, name: str) -> threading.Thread | None:
+    if stream is None:
+        return None
+    thread = threading.Thread(target=_drain_into, args=(stream, sink), name=name, daemon=True)
+    thread.start()
+    return thread
 
 
 def _pgid_of(proc: subprocess.Popen[str]) -> int | None:
@@ -164,15 +248,26 @@ class ScanResult:
     timed_out: bool = False
     cancelled: bool = False
     error: str | None = None
+    #: Bytes read off the pipes and discarded above the output ceiling, summed
+    #: over stdout and stderr. Non-zero means the captured output is a prefix.
+    output_dropped_bytes: int = 0
 
 
 class _ScanJob:
     """One scanner subprocess, run to completion in one daemon thread."""
 
-    def __init__(self, *, argv: Sequence[str], timeout_s: float, spawn: SpawnFn) -> None:
+    def __init__(
+        self,
+        *,
+        argv: Sequence[str],
+        timeout_s: float,
+        spawn: SpawnFn,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+    ) -> None:
         self._argv = list(argv)
         self._timeout_s = float(timeout_s)
         self._spawn = spawn
+        self._max_output_bytes = max(0, int(max_output_bytes))
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
         self._cancelled = False
@@ -237,32 +332,68 @@ class _ScanJob:
             self._finish(ScanResult(proc.returncode, "", "", cancelled=True))
             return
 
-        timed_out = False
+        # `communicate()` cannot bound what it buffers, so the pipes are read
+        # directly: one daemon reader per pipe, each capping what it keeps.
+        out_sink = _BoundedSink(self._max_output_bytes)
+        err_sink = _BoundedSink(self._max_output_bytes)
+        readers = [
+            reader
+            for reader in (
+                _start_reader(proc.stdout, out_sink, "scanner-runner-stdout"),
+                _start_reader(proc.stderr, err_sink, "scanner-runner-stderr"),
+            )
+            if reader is not None
+        ]
+
         try:
-            stdout, stderr = proc.communicate(timeout=self._timeout_s)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            kill_process_group(proc)
-            try:
-                stdout, stderr = proc.communicate(timeout=KILL_GRACE_S)
-            except Exception:
-                stdout, stderr = "", ""
+            timed_out = self._await_exit(proc, readers)
         except Exception as exc:
             kill_process_group(proc)
             self._finish(ScanResult(proc.returncode, "", "", error=repr(exc)))
             return
 
+        stdout, dropped_out = out_sink.snapshot()
+        stderr, dropped_err = err_sink.snapshot()
         with self._lock:
             cancelled = self._cancelled
         self._finish(
             ScanResult(
                 proc.returncode,
-                stdout or "",
-                stderr or "",
+                stdout,
+                stderr,
                 timed_out=timed_out,
                 cancelled=cancelled,
+                output_dropped_bytes=dropped_out + dropped_err,
             )
         )
+
+    def _await_exit(self, proc: subprocess.Popen[str], readers: list[threading.Thread]) -> bool:
+        """Wait for EOF on both pipes and then for exit. ``True`` if it timed out.
+
+        EOF first, exit second, exactly like ``communicate()``: a scanner that
+        exits while a forked grandchild still holds the pipe has not finished
+        producing output yet.
+        """
+        deadline = time.monotonic() + self._timeout_s
+        timed_out = False
+        for reader in readers:
+            reader.join(max(0.0, deadline - time.monotonic()))
+            if reader.is_alive():
+                timed_out = True
+                break
+        if not timed_out and not _wait_quietly(proc, max(0.0, deadline - time.monotonic())):
+            timed_out = True
+        if not timed_out:
+            return False
+
+        kill_process_group(proc)
+        # The group is gone, so the pipes are about to hit EOF; give the readers
+        # a bounded moment to notice. They are daemon threads, so even a reader
+        # that never returns cannot hold the worker open.
+        drain_deadline = time.monotonic() + KILL_GRACE_S
+        for reader in readers:
+            reader.join(max(0.0, drain_deadline - time.monotonic()))
+        return True
 
 
 @dataclass
@@ -338,6 +469,13 @@ class ScannerRunnerWorker(Worker):
         except (TypeError, ValueError):
             return DEFAULT_MAX_FINDINGS_PER_RUN
 
+    def _max_output_bytes(self) -> int:
+        raw = self.config.get("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_OUTPUT_BYTES
+
     def _retry_backoff_s(self) -> float:
         return _as_float(self.config.get("retry_backoff_s"), DEFAULT_RETRY_BACKOFF_S)
 
@@ -409,7 +547,12 @@ class ScannerRunnerWorker(Worker):
             return
 
         run_id = str(uuid7())
-        job = _ScanJob(argv=argv, timeout_s=self._timeout_s(name), spawn=self._spawn)
+        job = _ScanJob(
+            argv=argv,
+            timeout_s=self._timeout_s(name),
+            spawn=self._spawn,
+            max_output_bytes=self._max_output_bytes(),
+        )
         # Claim the slot before the run begins, so the scanner is no longer
         # "due" while its own scan is in flight — otherwise every tick of a
         # multi-minute run would report it as skipped against itself.
@@ -556,6 +699,10 @@ class ScannerRunnerWorker(Worker):
                         "finding_count": finding_count,
                         "findings_dropped": findings_dropped,
                         "truncated": findings_dropped > 0,
+                        # Decision 11 again: a run whose output was clipped is
+                        # a degraded run, and must never look like a whole one.
+                        "output_dropped_bytes": result.output_dropped_bytes,
+                        "output_truncated": result.output_dropped_bytes > 0,
                     }
                 ),
             )

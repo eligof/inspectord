@@ -39,3 +39,11 @@ def test_dev_config_scanner_runner_defers_and_spaces_out_scans(tmp_path: Path) -
     assert worker.config["startup_delay_s"] >= 300.0
     for scanner in worker.config["scanners"].values():
         assert scanner["interval_s"] >= 86400.0
+
+
+def test_dev_config_scanner_runner_bounds_captured_output(tmp_path: Path) -> None:
+    """The finding cap bounds emitted events; this bounds resident memory."""
+    worker = next(w for w in dev_config(base=tmp_path).workers if w.name == "scanner_runner")
+
+    ceiling = worker.config["max_output_bytes"]
+    assert 0 < ceiling <= 32 * 1024 * 1024, ceiling

@@ -165,6 +165,9 @@ def dev_config(*, base: Path) -> DaemonConfig:
                         "interval_s": 60.0,
                         "startup_delay_s": 300.0,
                         "max_findings_per_run": 500,
+                        # Bounds the MEMORY of a run, as the finding cap bounds
+                        # its events: a first AIDE check can print a huge diff.
+                        "max_output_bytes": 8 * 1024 * 1024,
                         # Every scanner ships DISABLED: a scan takes minutes, so
                         # this is opt-in per host, never on by default.
                         "scanners": {
