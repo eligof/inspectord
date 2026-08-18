@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import socket
 import time
 
 import pytest
@@ -12,6 +13,7 @@ from inspectord._native import (
     ProcessExecStream,
     ProcessModuleLoadStream,
     ProcessPtraceStream,
+    ProcessRawSocketStream,
 )
 
 
@@ -166,4 +168,87 @@ def test_module_load_stream_captures_both_syscall_variants() -> None:
         assert finits[0]["uid"] == 0
     finally:
         os.sched_setaffinity(0, original_affinity)
+        stream.close()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs CAP_BPF (run as root)")
+def test_process_raw_socket_stream_loads_and_closes() -> None:
+    """The socket_syscall program passes the verifier and attaches."""
+    stream = ProcessRawSocketStream()
+    try:
+        assert stream is not None
+    finally:
+        stream.close()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs CAP_BPF (run as root)")
+def test_raw_socket_stream_captures_af_packet_but_filters_the_rest() -> None:
+    """AF_PACKET is captured; a plain TCP socket and an AF_NETLINK SOCK_RAW
+    socket are dropped by the in-BPF family scope.
+
+    The AF_NETLINK case is the whole point of the family scope: netlink sockets
+    are conventionally SOCK_RAW, need no CAP_NET_RAW, and are opened constantly
+    by ordinary desktop software (iproute2, sd-netlink, NetworkManager), so a
+    type-only filter would flood the stream.
+
+    The two sockets that must be filtered out are created first and the
+    AF_PACKET one last, so that once its record arrives the other two syscalls
+    have provably already run — making their absence an assertion, not a race.
+
+    No CPU pinning here (unlike test_module_load_stream_captures_both_syscall_variants):
+    sys_enter_socket takes three scalar ints and copies nothing from userspace,
+    so it is not one of the faultable tracepoints whose kernel handler is gated
+    on a per-CPU perf event.
+    """
+    af_netlink = 16  # socket.AF_NETLINK, spelled out to keep the filter explicit
+    netlink_route = 0
+
+    stream = ProcessRawSocketStream()
+    tcp_sock = None
+    netlink_sock = None
+    packet_sock = None
+    try:
+        time.sleep(0.2)
+        stream.poll(200)  # drain anything unrelated
+
+        # Must NOT be captured: an ordinary TCP socket is not raw.
+        tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+        # Must NOT be captured: netlink is SOCK_RAW by convention.
+        netlink_sock = socket.socket(af_netlink, socket.SOCK_RAW, netlink_route)
+        # Must be captured: the packet-sniffer socket.
+        packet_sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0)
+
+        records: list[dict] = []
+        for _ in range(10):
+            records.extend(stream.poll(200))
+            if any(r["pid"] == os.getpid() and r["family_name"] == "AF_PACKET" for r in records):
+                break
+
+        mine = [r for r in records if r["pid"] == os.getpid()]
+        packets = [r for r in mine if r["family_name"] == "AF_PACKET"]
+        assert packets, f"no AF_PACKET record captured; got {records}"
+        assert packets[0]["comm"], f"record carries no comm: {packets[0]}"
+        assert packets[0]["uid"] == 0
+        # The base type is SOCK_RAW once the 0xf mask strips the flag bits —
+        # the same mask the BPF filter applies. The record stores the type
+        # *unmasked*, though, so the flags survive as evidence: CPython opens
+        # every socket with SOCK_CLOEXEC, which is exactly what makes the
+        # masked-vs-stored distinction observable here.
+        assert packets[0]["type"] & 0xF == socket.SOCK_RAW, packets[0]
+        assert packets[0]["type"] & socket.SOCK_CLOEXEC, (
+            f"flag bits were masked out of the stored type: {packets[0]}"
+        )
+
+        # The reason the filter is family-scoped at all.
+        assert not [r for r in mine if r["family"] == af_netlink], (
+            f"AF_NETLINK SOCK_RAW leaked past the family scope: {mine}"
+        )
+        # A plain AF_INET SOCK_STREAM socket is not raw and must not appear.
+        assert not [r for r in mine if r["family_name"] == "AF_INET"], (
+            f"non-raw AF_INET socket leaked past the type check: {mine}"
+        )
+    finally:
+        for sock in (tcp_sock, netlink_sock, packet_sock):
+            if sock is not None:
+                sock.close()
         stream.close()
