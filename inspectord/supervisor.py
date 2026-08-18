@@ -27,7 +27,8 @@ from inspectord.evidence.collector import EvidenceCollector
 from inspectord.evidence.store import ForensicStore
 from inspectord.journal import Journal
 from inspectord.log import get
-from inspectord.router import DropPolicy, EventRouter
+from inspectord.parsers.base import build_event
+from inspectord.router import DropPolicy, EventRouter, RouterFull
 from inspectord.rule_engine import RuleEngine
 from inspectord.rules.python_loader import load_python_rules
 from inspectord.rules.registry import Registry
@@ -152,6 +153,11 @@ class Supervisor:
         if self._cfg.notifier_desktop_enabled:
             self._notifier = NotifierWorker()
             self.attach_alert_listener(self._notifier.on_alert)
+        # Started last: it must never see a half-built worker list.
+        self._monitor_thread = threading.Thread(
+            target=self._monitor, name="worker-monitor", daemon=True
+        )
+        self._monitor_thread.start()
 
     def attach_listener(self, fn: Callable[[Event], None]) -> None:
         self._listeners.append(fn)
@@ -161,6 +167,14 @@ class Supervisor:
 
     def _inject_for_test(self, ev: Event) -> None:
         """Test hook: push an event through the same path workers' events take."""
+        self._dispatch(ev)
+
+    def _dispatch(self, ev: Event) -> None:
+        """Enrich, run rules, fan out alerts, publish — the one path every event takes.
+
+        Runs on whichever thread produced the event: the worker reader threads
+        (alert fan-out MUST stay on them) and the worker monitor thread.
+        """
         ev = enrich(ev)
         for alert in self._rule_engine.process(ev):
             if self._evidence_collector is not None:
@@ -171,15 +185,29 @@ class Supervisor:
                     fn(alert)
                 except Exception as exc:
                     log.warning("alert listener raised: %r", exc)
-        self._router.publish(ev)
+        try:
+            self._router.publish(ev)
+        except RouterFull as exc:
+            log.error("router full, dropping %s event from %s: %r", ev.action, ev.module, exc)
 
     def stop(self, timeout: float = 5.0) -> None:
-        self._stop.set()
         deadline = time.monotonic() + timeout
-        for wp in self._procs:
+        # Order matters: the monitor has to be stopped BEFORE any worker is
+        # terminated, or it would helpfully restart them all mid-shutdown.
+        self._stop.set()
+        monitor = self._monitor_thread
+        if monitor is not None:
+            monitor.join(timeout=min(max(0.0, deadline - time.monotonic()), 2.0))
+            if monitor.is_alive():
+                log.warning("worker monitor did not stop within the shutdown budget")
+        # Taking the lock here also closes the last respawn window: a monitor
+        # caught mid-respawn holds it, so the snapshot below sees the new proc.
+        with self._procs_lock:
+            procs = list(self._procs)
+        for wp in procs:
             with contextlib.suppress(Exception):
                 wp.proc.terminate()
-        for wp in self._procs:
+        for wp in procs:
             remaining = max(0.0, deadline - time.monotonic())
             try:
                 wp.proc.wait(timeout=remaining)
@@ -224,6 +252,11 @@ class Supervisor:
         project(ev, self._db, boot_id=self._boot_id)
 
     def _spawn_worker(self, spec: WorkerSpec) -> None:
+        with self._procs_lock:
+            self._procs.append(self._start_worker_proc(spec))
+
+    def _start_worker_proc(self, spec: WorkerSpec) -> _WorkerProc:
+        """Spawn one worker process with its own pair of fresh reader threads."""
         cmd = [sys.executable, "-m", spec.module]
         proc = subprocess.Popen(
             cmd,
@@ -232,15 +265,156 @@ class Supervisor:
             stderr=subprocess.PIPE,
         )
         assert proc.stdin is not None
-        proc.stdin.write((json.dumps(spec.config) + "\n").encode("utf-8"))
-        proc.stdin.flush()
+        # A worker that dies before reading its config breaks the pipe; that is
+        # the monitor's problem to solve (restart), not a reason to fail here.
+        with contextlib.suppress(BrokenPipeError):
+            proc.stdin.write((json.dumps(spec.config) + "\n").encode("utf-8"))
+            proc.stdin.flush()
         proc.stdin.close()
         wp = _WorkerProc(spec, proc)
         wp.threads.append(threading.Thread(target=self._read_stdout, args=(wp,), daemon=True))
         wp.threads.append(threading.Thread(target=self._read_stderr, args=(wp,), daemon=True))
         for t in wp.threads:
             t.start()
-        self._procs.append(wp)
+        return wp
+
+    # --- worker monitor (spec §3.2) -----------------------------------------
+
+    def _monitor(self) -> None:
+        """Poll the children ~every poll_interval_s and restart the dead ones."""
+        while not self._stop.wait(self._poll_interval_s):
+            try:
+                self._monitor_tick()
+            except Exception as exc:  # the monitor must outlive any single failure
+                log.error("worker monitor tick failed: %r", exc)
+
+    def _monitor_tick(self) -> None:
+        now = time.monotonic()
+        with self._procs_lock:
+            snapshot = list(enumerate(self._procs))
+        for index, wp in snapshot:
+            if self._stop.is_set():
+                return
+            if wp.exhausted:
+                continue
+            rc = wp.proc.poll()
+            if rc is None:
+                # Alive: a worker that has stayed up long enough is recovered,
+                # so the next crash starts its backoff from scratch. Without
+                # this a worker crashing once a day would eventually exhaust.
+                if wp.restarts and now - wp.started_at >= self._restart_healthy_after_s:
+                    log.info("worker %s healthy again; restart backoff reset", wp.spec.name)
+                    wp.restarts = 0
+                continue
+            self._handle_dead_worker(index, wp, rc, now)
+
+    def _handle_dead_worker(self, index: int, wp: _WorkerProc, rc: int, now: float) -> None:
+        if not wp.died_reported:
+            wp.died_reported = True
+            # Reap first so the worker's final events reach the router before
+            # worker_died does, and so the reader threads never outlive the child.
+            self._reap(wp)
+            log.warning("worker %s died with exit code %d", wp.spec.name, rc)
+            self._emit_supervisor_event(
+                action="worker_died",
+                severity="medium",
+                type_=["end"],
+                message=f"worker {wp.spec.name} exited with code {rc}",
+                raw={
+                    "worker": wp.spec.name,
+                    "exit_code": rc,
+                    # A negative returncode is -SIGNUM (killed, not exited).
+                    "signal": -rc if rc < 0 else None,
+                    "restarts": wp.restarts,
+                },
+            )
+        if wp.restarts >= self._restart_max_attempts:
+            wp.exhausted = True
+            log.error(
+                "worker %s is permanently down after %d restarts",
+                wp.spec.name,
+                wp.restarts,
+            )
+            self._emit_supervisor_event(
+                action="worker_restart_exhausted",
+                severity="high",
+                type_=["error"],
+                message=(
+                    f"worker {wp.spec.name} stayed down after {wp.restarts} restarts; "
+                    "its telemetry is missing until inspectord is restarted"
+                ),
+                raw={"worker": wp.spec.name, "attempts": wp.restarts},
+            )
+            return
+        attempt = wp.restarts + 1
+        delay = backoff_delay(
+            attempt, base=self._restart_base_delay_s, cap=self._restart_max_delay_s
+        )
+        if wp.restart_at is None:
+            wp.restart_at = now + delay
+        if now < wp.restart_at:
+            return
+        self._respawn(index, wp, attempt=attempt, delay=delay)
+
+    def _respawn(self, index: int, old: _WorkerProc, *, attempt: int, delay: float) -> None:
+        # The attempt is counted before the spawn, so a spawn that fails still
+        # backs off (and can still exhaust) instead of retrying every tick.
+        old.restarts = attempt
+        old.restart_at = None
+        with self._procs_lock:
+            if self._stop.is_set():
+                return
+            try:
+                new = self._start_worker_proc(old.spec)
+            except Exception as exc:
+                log.error("failed to respawn worker %s: %r", old.spec.name, exc)
+                return
+            new.restarts = attempt
+            self._procs[index] = new
+        log.info("restarted worker %s (attempt %d after %.2fs)", old.spec.name, attempt, delay)
+        self._emit_supervisor_event(
+            action="worker_restarted",
+            severity="info",
+            type_=["start"],
+            message=f"restarted worker {old.spec.name} (attempt {attempt}, {delay:g}s backoff)",
+            raw={"worker": old.spec.name, "attempt": attempt, "backoff_s": delay},
+        )
+
+    def _reap(self, wp: _WorkerProc) -> None:
+        """Join a dead child's reader threads and close its pipes — no leaks, no double-read."""
+        for t in wp.threads:
+            if t is not threading.current_thread():
+                t.join(timeout=1.0)
+                if t.is_alive():
+                    log.warning("reader thread for %s did not exit at EOF", wp.spec.name)
+        for stream in (wp.proc.stdin, wp.proc.stdout, wp.proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
+
+    def _emit_supervisor_event(
+        self,
+        *,
+        action: str,
+        severity: str,
+        type_: list[str],
+        message: str,
+        raw: dict[str, Any],
+    ) -> None:
+        try:
+            self._dispatch(
+                build_event(
+                    module="supervisor",
+                    action=action,
+                    category=["process"],
+                    type_=type_,
+                    severity=severity,
+                    message=message,
+                    raw=raw,
+                )
+            )
+        except Exception as exc:
+            log.error("failed to emit supervisor %s event: %r", action, exc)
 
     def _read_stdout(self, wp: _WorkerProc) -> None:
         assert wp.proc.stdout is not None
