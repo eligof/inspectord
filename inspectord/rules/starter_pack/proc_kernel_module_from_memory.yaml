@@ -1,0 +1,20 @@
+version: 1.0.0
+id: proc.kernel_module_from_memory
+name: "kernel module loaded from memory"
+severity: high
+category: process
+why: |
+  A process loaded a kernel module image straight from anonymous memory via
+  init_module(2), with no file descriptor. Since kernel 3.8 every normal
+  loader — kmod/modprobe, systemd-udevd, dracut — uses finit_module(2) with a
+  file descriptor, so loading from memory is the fd-avoidant path a rootkit
+  loader picks precisely to avoid leaving a module file behind.
+false_positives:
+  - "Old or bespoke tooling that still calls init_module(2) directly (pre-3.8-era loaders, some embedded or vendor installers)."
+  - "A test harness or fuzzer deliberately exercising init_module(2) — the tracepoint fires before the kernel validates the image, so calls that fail are recorded too."
+detect:
+  any_of:
+    - event.module == "process_collector_module_load" AND event.action == "module_load_attempt" AND process.module_load_variant == "init_module"
+short: "kernel module loaded from memory by {process.name} (pid {process.pid})"
+detail: "{process.name} (pid {process.pid}, uid {user.id}) called init_module(2), loading a kernel module image from anonymous memory with no file descriptor."
+labels: [process, kernel_module, rootkit]
