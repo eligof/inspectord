@@ -30,8 +30,11 @@ dependencies = [
 dev = [
     "pytest>=8.0,<10",
     "pytest-asyncio>=0.23,<2",
-    "ruff>=0.5,<1",
-    "mypy>=1.10,<3",
+    # Pinned to a minor range: ruff promotes lint rules out of preview between
+    # minors, so a floating range lets an upstream release fail CI with no
+    # change on our side (it did: PLR0917, 2026-08-18).
+    "ruff>=0.15.14,<0.16",
+    "mypy>=1.20.2,<1.21",
     "types-Pillow>=10.0,<13",
     "types-PyYAML",
     "httpx>=0.27,<1",
