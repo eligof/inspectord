@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from inspectord.dependencies.manifest import load_packaged_manifests
+
+_TEMPLATES_ROOT = Path(__file__).parent.parent / "inspectord" / "dependencies" / "templates"
 
 
 def test_all_v1_manifests_load() -> None:
@@ -84,7 +89,57 @@ def test_rkhunter_declares_no_post_install_hooks() -> None:
     """The applier does not execute post_install_hooks; declaring one would be inert."""
     m = load_packaged_manifests()["rkhunter"]
     assert m.post_install_hooks == []
-    assert m.config is None
+
+
+def test_rkhunter_dropin_targets_rkhunter_d_not_rkhunter_conf_d() -> None:
+    """§30.6 names /etc/rkhunter.conf.d/; rkhunter 1.4.6 never reads that path.
+
+    /usr/bin/rkhunter sets `LOCALCONFIGDIR="${configdir}/rkhunter.d"` and globs
+    it for `*.conf`. Shipping to §30.6's path would write a file rkhunter never
+    opens -- a silent no-op that looks configured. This test is the guard rail
+    against someone "fixing" the path back to match the spec text.
+    """
+    m = load_packaged_manifests()["rkhunter"]
+    assert m.config is not None
+    assert m.config.include_dir == "/etc/rkhunter.d/"
+    assert m.config.dropin is not None
+    assert m.config.dropin.filename == "inspectord.conf"
+
+
+def test_rkhunter_dropin_whitelists_exactly_the_three_arch_wrappers() -> None:
+    """SCRIPTWHITELIST is per-path: every entry is an exemption we must justify.
+
+    Each of these three is a genuine shell script on Arch/CachyOS. A fourth
+    entry appearing here without a measurement behind it is a regression, so
+    the set is pinned exactly rather than merely checked for membership.
+    """
+    m = load_packaged_manifests()["rkhunter"]
+    assert m.config is not None and m.config.dropin is not None
+    body = (_TEMPLATES_ROOT / m.config.dropin.template.replace("/", os.sep)).read_text(
+        encoding="utf-8"
+    )
+    whitelisted = {
+        line.split("=", 1)[1].strip()
+        for line in body.splitlines()
+        if line.startswith("SCRIPTWHITELIST=")
+    }
+    assert whitelisted == {"/usr/bin/egrep", "/usr/bin/fgrep", "/usr/bin/ldd"}
+
+
+def test_rkhunter_dropin_declares_no_other_option() -> None:
+    """The drop-in must not smuggle in unrelated rkhunter settings.
+
+    A drop-in is read as ordinary config, so any option here silently overrides
+    /etc/rkhunter.conf. Keeping it to SCRIPTWHITELIST keeps the blast radius
+    equal to what the comment in the file claims it is.
+    """
+    m = load_packaged_manifests()["rkhunter"]
+    assert m.config is not None and m.config.dropin is not None
+    body = (_TEMPLATES_ROOT / m.config.dropin.template.replace("/", os.sep)).read_text(
+        encoding="utf-8"
+    )
+    settings = [line for line in body.splitlines() if line and not line.startswith("#")]
+    assert all(line.startswith("SCRIPTWHITELIST=") for line in settings), settings
 
 
 def test_no_manifest_declares_a_cachyos_key() -> None:

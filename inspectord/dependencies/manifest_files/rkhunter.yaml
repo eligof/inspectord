@@ -11,9 +11,35 @@ optional_when:
 distro_packages:
   arch: [rkhunter]
 service: null
-# §30.6 wants a drop-in at /etc/rkhunter.conf.d/inspectord.conf. Its contents are
-# the scanner adapter's call, so this stays null until that slice lands.
-config: null
+# §30.6 names /etc/rkhunter.conf.d/inspectord.conf. That path is WRONG for the
+# rkhunter we actually ship against: 1.4.6 reads `*.conf` from a `rkhunter.d`
+# directory beside its main config, never from `<config>.conf.d`. Verified in
+# /usr/bin/rkhunter (`LOCALCONFIGDIR="${configdir}/rkhunter.d"`, globbed for
+# `*.conf`), in the /etc/rkhunter.conf header, and live (the run log says
+# `Using local configuration directory '<dir>/rkhunter.d'`). Recorded here as a
+# deliberate deviation from §30.6 rather than silently shipping a dead file.
+#
+# DECLARATIVE TODAY, like `optional_when` above: nothing writes this drop-in yet.
+# `applier.apply_plan` does call `write_sidecar` for every plan item whose
+# manifest has a `config.dropin`, but `planner.build_plan` only ever emits items
+# for manifests that are REQUIRED for the active profile, and then only when a
+# package is missing. rkhunter is optional (§30.13) and, on a host that already
+# has it, would produce no plan item at all — so the applier never sees it.
+# Installing this drop-in is a manual step until the planner grows a "configure
+# an already-installed dependency" item. `validate_cmd` is likewise inert: the
+# field exists in ConfigSpec but no code path executes it.
+config:
+  strategy: sidecar
+  include_dir: /etc/rkhunter.d/
+  dropin:
+    filename: inspectord.conf
+    template: rkhunter/inspectord.conf.j2
+    owner: root
+    # 0644, not the 0600 of /etc/rkhunter.conf: the contents are three
+    # whitelist lines naming stock Arch wrappers, nothing secret, and a config
+    # the user is expected to audit should be readable without sudo.
+    mode: "0644"
+  validate_cmd: [rkhunter, --config-check]
 permissions: null
 verify:
   binary_paths: [/usr/bin/rkhunter]
