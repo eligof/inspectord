@@ -29,6 +29,39 @@ no                   0            clean
 no                   non-zero     failure
 ===================  ===========  =========
 
+**A filename can forge a warning header.** Normally only a column-0
+``Warning:`` opens a finding — but the only bytes a Linux filename may not
+contain are ``/`` and NUL, and rkhunter prints the paths it reports *inside*
+its warning text. A file named ``legit<newline>Warning: FAKE (attacker)`` is
+therefore delivered to us as two physical lines, the second of which opens a
+second block: a **spoofed extra finding riding inside a genuine detection**,
+with attacker-chosen ``indicator_value`` and ``message``. Measured; not
+theoretical.
+
+The parser narrows this as far as a line-based parser can — it splits on
+``\\n`` alone, so ``\\r``, ``\\v``, ``\\f``, ``\\x85`` and U+2028 in a filename no
+longer forge a header the way ``str.splitlines`` let them, and every finding's
+text is stripped of control characters so nothing downstream re-interprets
+them — but it cannot undo a split that already happened: once the newline is
+there, the forged block is byte-for-byte indistinguishable from a real one.
+
+What the residue can and cannot do:
+
+* it **cannot** flip a ``failure`` into ``findings``. Under
+  ``--report-warnings-only`` attacker text only reaches stdout when a genuine
+  ``Warning:`` block already exists, and the refusal diagnostics above carry no
+  attacker-controlled text at all;
+* it **cannot** suppress a real finding. The real block is already recorded
+  when the injected line is read; only that block's *trailing continuation
+  text* is cut short;
+* it **can** add one attacker-worded finding alongside a genuine one, which
+  could mislead someone reading the events during an incident, or a rule
+  matching on ``threat.indicator.value``.
+
+Guessing at "unexpected" headers was rejected deliberately: a parser that
+sometimes drops a real rootkit warning would be far worse than one that
+sometimes shows an extra.
+
 Two flags are not optional:
 
 * **``--report-warnings-only``** makes stdout the exact finding set, which is
@@ -55,7 +88,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome
+from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome, sanitize_text
 
 #: Flags every run carries. See the module docstring for why each is mandatory.
 BASE_FLAGS = (
@@ -165,11 +198,19 @@ def _warning_blocks(stdout: str) -> list[tuple[str, list[str]]]:
     the open block; anything else closes it and is dropped. Dropping those
     non-warning lines is exactly what makes ``interpret_outcome`` call a refusal
     a failure.
+
+    Lines are split on ``\\n`` **only** — not ``str.splitlines``, which also
+    breaks on ``\\r``, ``\\v``, ``\\f``, ``\\x85`` and U+2028, every one of them
+    legal in a filename rkhunter is about to print — and each line is then
+    stripped of control characters. That leaves a raw newline in a filename as
+    the one remaining way to forge a header; see "A filename can forge a
+    warning header" in the module docstring for what that can and cannot do.
     """
     blocks: list[tuple[str, list[str]]] = []
     details: list[str] | None = None
 
-    for line in stdout.splitlines():
+    for raw_line in stdout.split("\n"):
+        line = sanitize_text(raw_line)
         match = _WARNING_RE.match(line)
         if match is not None:
             details = []

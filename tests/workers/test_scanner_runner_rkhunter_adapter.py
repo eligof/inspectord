@@ -279,6 +279,84 @@ def test_parse_closes_a_block_on_an_unindented_line() -> None:
 
 
 # --------------------------------------------------------------------------
+# a newline in a scanned filename -- the forged-header exposure
+#
+# `/` and NUL are the only bytes a Linux filename may not contain, and rkhunter
+# prints the paths it reports inside its warning text. These tests PIN the
+# bounded exposure that leaves, so nobody later reads the parser and concludes
+# a forged header is impossible. See the adapter's module docstring.
+# --------------------------------------------------------------------------
+
+# A genuine detection whose reported path is a file the attacker named
+# `innocuous\nWarning: FAKE_INJECTED (attacker)`.
+FORGED_HEADER = (
+    "Warning: The command '/usr/bin/egrep' has been replaced by a script:\n"
+    "         see also /tmp/innocuous\nWarning: FAKE_INJECTED (attacker)\n"
+)
+
+
+def test_a_newline_in_a_filename_forges_an_extra_finding() -> None:
+    """The split cannot be undone once rkhunter has printed the name.
+
+    By the time `parse` runs, the forged line is byte-for-byte a real header,
+    so it becomes a second finding with attacker-chosen text. Pinned, not
+    fixed: guessing at "unexpected" headers would risk dropping real warnings.
+    """
+    findings = _adapter().parse(FORGED_HEADER, "")
+    assert len(findings) == 2
+    assert findings[1].indicator_value == "FAKE_INJECTED (attacker)"
+
+
+def test_the_real_finding_survives_the_forged_header() -> None:
+    """The bound that matters: an injection can ADD a finding, never hide one.
+
+    The genuine block is already recorded when the forged line is read; only
+    its trailing continuation text is cut short.
+    """
+    findings = _adapter().parse(FORGED_HEADER, "")
+    assert findings[0].indicator_value.startswith("The command '/usr/bin/egrep' has been replaced")
+    assert findings[0].path == "/usr/bin/egrep"
+    assert findings[0].category == "file"
+
+
+def test_a_forged_header_cannot_turn_a_refusal_into_findings() -> None:
+    """The other bound: attacker text needs a genuine warning to ride in on.
+
+    Under `--report-warnings-only` a refused run prints a diagnostic and no
+    `Warning:` line at all, and that diagnostic carries no path we scanned --
+    so a run with nothing genuine to report stays a `failure`.
+    """
+    refusal = "'all' cannot be used in the disabled test list.\n"
+    assert _adapter().interpret_outcome(1, refusal, "") is ScanOutcome.failure
+
+
+@pytest.mark.parametrize(
+    "break_char", ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+def test_only_a_raw_newline_forges_a_header(break_char: str) -> None:
+    """`str.splitlines` breaks on eight characters beyond `\\n`, and a filename
+    may contain every one of them. Splitting on `\\n` alone narrows the forgery
+    to the single byte that no parser can defend against."""
+    findings = _adapter().parse(f"Warning: replaced '/tmp/x{break_char}Warning: FAKE'\n", "")
+    assert len(findings) == 1
+
+
+def test_control_characters_never_reach_a_finding() -> None:
+    """Sanitized so nothing downstream -- a terminal, a log tailer -- can
+    re-interpret them. NUL and a stray CR are the ones actually measured."""
+    text = "Warning: \x00bad \x1b[31mred\x1b[0m '/tmp/a\x00b'\n         \rdetail\x07\n"
+    findings = _adapter().parse(text, "")
+    assert len(findings) == 1
+    for field in (
+        findings[0].indicator_value,
+        findings[0].raw_line,
+        findings[0].message or "",
+        findings[0].path or "",
+    ):
+        assert not any(ch < " " or "\x7f" <= ch <= "\x9f" for ch in field), repr(field)
+
+
+# --------------------------------------------------------------------------
 # malformed input -- `inspectord/parsers/base.py`: parsers NEVER raise
 # --------------------------------------------------------------------------
 

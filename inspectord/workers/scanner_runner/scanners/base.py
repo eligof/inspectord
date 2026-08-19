@@ -38,10 +38,31 @@ always a failure, never a silent ``clean``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
+
+# Everything a scanner prints is untrusted: it embeds filenames, and the only
+# bytes a Linux filename cannot contain are `/` and NUL. A control character
+# that survives into an event gets re-interpreted by whatever reads it next --
+# a terminal, a log tailer, a line-oriented consumer -- so none of them ever
+# reach an event. TAB is kept; it is ordinary whitespace in scanner output.
+# DEL, C1 (\x7f-\x9f) and U+2028/U+2029 are in the set because `str.splitlines`
+# treats several of them as line breaks.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def sanitize_text(text: str) -> str:
+    """Strip control characters from untrusted scanner text. Never raises.
+
+    Sanitizing does **not** undo a line split that already happened: text an
+    attacker got a newline into has already become two lines by the time a
+    parser sees it. See the rkhunter adapter's "A filename can forge a warning
+    header" for what that does and does not allow.
+    """
+    return _CONTROL_RE.sub("", text)
 
 
 class ScanOutcome(StrEnum):
