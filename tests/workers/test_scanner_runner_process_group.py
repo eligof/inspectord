@@ -48,7 +48,10 @@ class SleepAdapter:
         trap = 'trap "" TERM; ' if self._ignore_sigterm else ""
         return ["sh", "-c", f"{trap}sleep 300 & echo $! > {self._pidfile}; sleep 300"]
 
-    def interpret_exit(self, code: int) -> ScanOutcome:
+    def preflight(self, config: Mapping[str, Any]) -> str | None:
+        return None
+
+    def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome:
         return ScanOutcome.clean if code == 0 else ScanOutcome.failure
 
     def parse(self, stdout: str, stderr: str) -> list[Finding]:

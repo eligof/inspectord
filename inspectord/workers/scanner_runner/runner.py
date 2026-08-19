@@ -46,6 +46,7 @@ from inspectord.workers.scanner_runner.scanners.base import (
     Finding,
     ScannerAdapter,
     ScanOutcome,
+    sanitize_text,
 )
 
 _DEFAULT_HOSTNAME = socket.gethostname()
@@ -63,6 +64,15 @@ DEFAULT_MAX_FINDINGS_PER_RUN = 500
 #: parsed. 8 MiB is far more than any healthy scanner prints and far less than a
 #: first-run AIDE diff.
 DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+#: How much scanner output a FAILED run carries on its ``scan_completed`` event.
+#:
+#: `reason="scanner_error", exit_code=1` tells an operator that a scan broke but
+#: not what broke: one uncompilable `.yar` file fails the whole yara run, and
+#: without the scanner's own message there is no way to tell which rule file it
+#: was. A few hundred characters is one such message; anything longer is either
+#: a per-file error list (unbounded when sweeping a tree) or the finding set
+#: itself, which belongs in `scan_finding` events. Successful runs carry none.
+MAX_FAILURE_OUTPUT_CHARS = 400
 #: The single retry after a failure (§4.4).
 DEFAULT_RETRY_BACKOFF_S = 60.0
 DEFAULT_SCAN_INTERVAL_S = 86400.0
@@ -542,6 +552,18 @@ class ScannerRunnerWorker(Worker):
             return
 
         try:
+            # A per-scanner prerequisite the runner cannot know about (YARA with
+            # no rulesets shipped yet, say). An ordinary state like that must be
+            # an explicit skip, not an argv that fails in a confusing way.
+            reason = adapter.preflight(config)
+        except Exception:
+            # Adapters promise not to raise; the runner assumes they will anyway.
+            reason = "preflight_error"
+        if reason is not None:
+            self._skip_slot(name, str(reason), now)
+            return
+
+        try:
             argv = [str(part) for part in adapter.argv(config)]
         except Exception:
             self._skip_slot(name, "argv_error", now)
@@ -650,8 +672,10 @@ class ScannerRunnerWorker(Worker):
         if reason is not None or exit_code is None:
             return ScanOutcome.failure, reason or "no_exit_status"
         try:
-            # Decision 10: never a `code == 0` boolean — the adapter decides.
-            outcome = run.adapter.interpret_exit(int(exit_code))
+            # Decision 10: never a `code == 0` boolean — the adapter decides,
+            # and it decides from the OUTPUT as well as the code, because for
+            # rkhunter exit 1 means both "found something" and "refused to run".
+            outcome = run.adapter.interpret_outcome(int(exit_code), result.stdout, result.stderr)
         except Exception:
             return ScanOutcome.failure, "exit_interpretation_error"
         return outcome, "scanner_error" if outcome is ScanOutcome.failure else None
@@ -731,6 +755,10 @@ class ScannerRunnerWorker(Worker):
                         # a degraded run, and must never look like a whole one.
                         "output_dropped_bytes": result.output_dropped_bytes,
                         "output_truncated": result.output_dropped_bytes > 0,
+                        # Why it failed, in the scanner's own words. Failures
+                        # only: a successful run's output is the finding set,
+                        # which is already an event per finding.
+                        "output_excerpt": _failure_excerpt(result) if failed else None,
                     }
                 ),
             )
@@ -829,6 +857,27 @@ def _as_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _failure_excerpt(result: ScanResult) -> str | None:
+    """A short, sanitized head of a failed run's output — stderr, else stdout.
+
+    stderr first because that is where every scanner puts the reason it could
+    not run (yara's compile error, rkhunter's refusal is on stdout instead).
+    The text is untrusted scanner output embedding attacker-influenceable
+    filenames, so it is stripped of control characters and hard-capped; it is a
+    diagnostic breadcrumb, never the finding set.
+    """
+    for text in (result.stderr, result.stdout):
+        excerpt = " ".join(
+            piece for piece in (sanitize_text(line).strip() for line in text.split("\n")) if piece
+        )
+        if not excerpt:
+            continue
+        if len(excerpt) > MAX_FAILURE_OUTPUT_CHARS:
+            return excerpt[:MAX_FAILURE_OUTPUT_CHARS] + " [truncated]"
+        return excerpt
+    return None
 
 
 def _prune(data: dict[str, Any]) -> dict[str, Any]:

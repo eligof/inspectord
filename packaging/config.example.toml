@@ -101,3 +101,16 @@ max_output_bytes = 8388608
 enabled = false
 interval_s = 86400.0
 timeout_s = 3600.0
+[workers.config.scanners.rkhunter]
+enabled = false
+interval_s = 86400.0
+timeout_s = 1800.0
+[workers.config.scanners.yara]
+enabled = false
+interval_s = 86400.0
+timeout_s = 1800.0
+# We ship the rulesets; with none installed the scanner skips with a reason
+# rather than failing. `target` is ONE path -- yara takes exactly one target,
+# so point it at a common ancestor rather than expecting a list.
+rules_dir = "/var/lib/inspectord/yara"
+target = "/home"

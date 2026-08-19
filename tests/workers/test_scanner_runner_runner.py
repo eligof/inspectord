@@ -18,7 +18,13 @@ from collections.abc import Callable, Mapping, Sequence
 from io import BytesIO
 from typing import Any
 
-from inspectord.workers.scanner_runner.runner import ScannerRunnerWorker, _ActiveRun
+from inspectord.workers.scanner_runner.runner import (
+    MAX_FAILURE_OUTPUT_CHARS,
+    ScannerRunnerWorker,
+    ScanResult,
+    _ActiveRun,
+    _failure_excerpt,
+)
 from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome
 
 
@@ -40,11 +46,15 @@ class FakeAdapter:
         self.parse_calls = 0
         self.last_stdout = ""
         self.last_stderr = ""
+        self.preflight_reason: str | None = None
 
     def argv(self, config: Mapping[str, Any]) -> list[str]:
         return list(self._argv)
 
-    def interpret_exit(self, code: int) -> ScanOutcome:
+    def preflight(self, config: Mapping[str, Any]) -> str | None:
+        return self.preflight_reason
+
+    def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome:
         if code == 0:
             return ScanOutcome.clean
         if code == 1:
@@ -377,6 +387,46 @@ def test_missing_binary_emits_scan_skipped_once_per_due_cycle() -> None:
     assert events[0]["raw"]["binary"] == "inspectord-no-such-binary-6f3a1c"
 
 
+def test_preflight_reason_emits_scan_skipped_and_consumes_the_slot() -> None:
+    """A scanner that cannot run yet (YARA with no rulesets) is an explicit skip.
+
+    Not a failed scan and not silence: the reason the adapter gave is what the
+    event carries, so "no rules shipped" never masquerades as a broken scanner.
+    """
+    adapter = FakeAdapter(argv=["sh", "-c", "exit 0"])
+    adapter.preflight_reason = "rules_empty"
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        for _ in range(5):
+            worker.step()
+    finally:
+        worker.teardown()
+
+    events = _events(buf)
+    assert _actions(events) == ["scan_skipped"]
+    assert events[0]["raw"]["reason"] == "rules_empty"
+    assert adapter.parse_calls == 0
+
+
+def test_preflight_raising_is_reported_as_a_skip_not_a_crash() -> None:
+    """Adapters promise not to raise; the runner assumes they will anyway."""
+
+    class ExplodingPreflight(FakeAdapter):
+        def preflight(self, config: Mapping[str, Any]) -> str | None:
+            raise RuntimeError("boom")
+
+    adapter = ExplodingPreflight(argv=["sh", "-c", "exit 0"])
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        worker.step()
+    finally:
+        worker.teardown()
+
+    events = _events(buf)
+    assert _actions(events) == ["scan_skipped"]
+    assert events[0]["raw"]["reason"] == "preflight_error"
+
+
 # --------------------------------------------------------------------------
 # finding cap (design decision 12)
 # --------------------------------------------------------------------------
@@ -576,6 +626,98 @@ def test_a_parser_that_raises_is_reported_as_a_failed_scan() -> None:
     completed = _completed(events)[0]
     assert completed["outcome"] == "failure"
     assert completed["raw"]["reason"] == "parse_error"
+
+
+def test_an_outcome_interpreter_that_raises_is_reported_as_a_failed_scan() -> None:
+    """The third adapter method the runner guards, alongside preflight and parse."""
+
+    class ExplodingAdapter(FakeAdapter):
+        def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome:
+            raise ValueError("boom")
+
+    worker, buf = _make_worker([ExplodingAdapter(argv=["sh", "-c", "exit 0"])], _base_config())
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert completed["outcome"] == "failure"
+    assert completed["raw"]["reason"] == "exit_interpretation_error"
+
+
+# --------------------------------------------------------------------------
+# why a failed scan failed
+#
+# `reason="scanner_error", exit_code=1` says a scan broke, not what broke: one
+# uncompilable `.yar` file fails an entire yara run. Failed runs therefore
+# carry a bounded, sanitized excerpt of the scanner's own message.
+# --------------------------------------------------------------------------
+
+
+def test_a_failed_scan_reports_what_the_scanner_said() -> None:
+    adapter = FakeAdapter(
+        argv=["sh", "-c", "echo 'rules(3): error: syntax error' >&2; exit 2"],
+    )
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert completed["outcome"] == "failure"
+    assert completed["raw"]["reason"] == "scanner_error"
+    assert "rules(3): error: syntax error" in completed["raw"]["output_excerpt"]
+
+
+def test_a_successful_scan_carries_no_output_excerpt() -> None:
+    """A successful run's output IS the finding set -- already one event each."""
+    adapter = FakeAdapter(argv=["sh", "-c", "echo noise >&2; exit 0"])
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert completed["outcome"] == "success"
+    assert "output_excerpt" not in completed["raw"]
+
+
+def test_the_failure_excerpt_falls_back_to_stdout() -> None:
+    """rkhunter prints its refusal on stdout and only shell noise on stderr."""
+    adapter = FakeAdapter(
+        argv=["sh", "-c", "echo \"'all' cannot be used in the disabled test list.\"; exit 2"],
+    )
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert "cannot be used in the disabled test list" in completed["raw"]["output_excerpt"]
+
+
+def test_the_failure_excerpt_is_bounded_and_marked_when_cut() -> None:
+    excerpt = _failure_excerpt(ScanResult(exit_code=1, stdout="", stderr="x" * 100_000))
+    assert excerpt is not None
+    assert excerpt.endswith("[truncated]")
+    assert len(excerpt) <= MAX_FAILURE_OUTPUT_CHARS + len(" [truncated]")
+
+
+def test_the_failure_excerpt_strips_control_characters() -> None:
+    """Same untrusted scanner output as the rkhunter parser sees, same rule."""
+    result = ScanResult(exit_code=1, stdout="", stderr="\x1b[31mboom\x00\r\nsecond line\n")
+    excerpt = _failure_excerpt(result)
+    assert excerpt is not None
+    assert "boom" in excerpt and "second line" in excerpt
+    assert not any(ch < " " or "\x7f" <= ch <= "\x9f" for ch in excerpt), repr(excerpt)
+
+
+def test_no_output_at_all_means_no_excerpt_key() -> None:
+    assert _failure_excerpt(ScanResult(exit_code=1, stdout="", stderr="   \n\n")) is None
 
 
 def test_a_finding_that_fails_to_emit_still_yields_scan_completed() -> None:
