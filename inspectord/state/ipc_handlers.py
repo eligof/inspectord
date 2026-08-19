@@ -316,7 +316,9 @@ def handle_list_scan_runs(*, params: dict[str, Any], db_path: Path) -> dict[str,
     the runner's reason, stays distinct from.
     """
     limit = int(params.get("limit", 50))
-    incomplete_after_s = float(params.get("incomplete_after_s", INCOMPLETE_AFTER_S))
+    # Clamped: a zero or negative bound would report every in-flight scan as
+    # interrupted, which is the one thing this state exists to avoid saying wrongly.
+    incomplete_after_s = max(0.0, float(params.get("incomplete_after_s", INCOMPLETE_AFTER_S)))
     with Database(db_path) as db:
         rows = db.query(
             "SELECT run_id, scanner, status, reason, exit_code, duration_s, finding_count, "

@@ -268,3 +268,17 @@ def test_feed_daemon_unreachable(tmp_path: Path) -> None:
     response = client.get("/scanners/feed")
     assert response.status_code == 200
     assert "daemon unreachable" in response.text
+
+
+def test_populated_table_says_a_missing_scanner_is_not_clean(ipc_factory) -> None:
+    """A short table must not read as "these are all the scanners".
+
+    The panel can only list scanners that have produced an event; the roster
+    lives in the worker's stdin config and there is no IPC->worker channel. So a
+    configured-but-never-run scanner is simply absent, and the page has to say so
+    — otherwise one green row implies coverage the daemon does not have.
+    """
+    client = ipc_factory([_runs(_run(scanner="aide")), _findings()])
+    body = client.get("/scanners/feed").text
+    assert "has never run" in body
+    assert "not the same as clean" in body

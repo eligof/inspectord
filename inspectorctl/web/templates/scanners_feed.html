@@ -9,6 +9,10 @@
 {% if error %}
 <div class="error">⚠ {{ error }}</div>
 {% elif scanners %}
+<p class="note">
+  Only scanners that have run at least once appear below. A configured scanner
+  missing from this table has never run — that is not the same as clean.
+</p>
 <table>
   <thead>
     <tr>
