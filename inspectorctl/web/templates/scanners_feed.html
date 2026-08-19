@@ -1,0 +1,95 @@
+{% from "_macros.html" import status_badge %}
+{#
+  Everything below is scanner-derived and therefore untrusted: a filename can
+  forge a report line, so a finding's path, rule name and message — and a failed
+  run's reason and output excerpt — may be attacker-chosen text. This template
+  relies on Jinja2 autoescaping and must NEVER use |safe, |e(...) with a
+  non-HTML target, or render scanner output as markup.
+#}
+{% if error %}
+<div class="error">⚠ {{ error }}</div>
+{% elif scanners %}
+<table>
+  <thead>
+    <tr>
+      <th>Scanner</th>
+      <th>Last run</th>
+      <th>State</th>
+      <th>Duration</th>
+      <th>Findings</th>
+      <th>Detail</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in scanners %}
+    <tr>
+      <td>{{ s.scanner }}</td>
+      <td class="mono muted">{{ s.started_at or '' }}</td>
+      <td>{{ status_badge(s.state) }}</td>
+      <td class="mono">{% if s.duration_s is not none %}{{ '%.1f'|format(s.duration_s) }}s{% endif %}</td>
+      <td class="mono">{% if s.finding_count is not none %}{{ s.finding_count }}{% endif %}</td>
+      <td>
+        {%- if s.state == 'failure' %}
+        <div>failed: {{ s.reason or 'unknown reason' }}{% if s.exit_code is not none %} (exit {{ s.exit_code }}){% endif %}</div>
+        {%- if s.output_excerpt %}
+        <pre class="mono">{{ s.output_excerpt }}</pre>
+        {%- endif %}
+        {%- elif s.state == 'skipped' %}
+        <div>did not run: {{ s.reason or 'unknown reason' }}</div>
+        {%- elif s.state == 'interrupted' %}
+        <div>no scan_completed event — the daemon stopped mid-scan</div>
+        {%- elif s.state == 'running' %}
+        <div class="muted">in progress</div>
+        {%- endif %}
+        {%- if s.truncated %}
+        <div class="muted">finding list truncated — {{ s.findings_dropped }} dropped</div>
+        {%- endif %}
+        {%- if s.output_truncated %}
+        <div class="muted">scanner output was clipped — this run is degraded</div>
+        {%- endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Findings</h2>
+<p class="muted">
+  Scanner output is untrusted input: a filename can forge a report line, so a finding's
+  path, rule name and message may be attacker-chosen. Shown verbatim as text, never
+  interpreted.
+</p>
+{% if findings %}
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Scanner</th>
+      <th>Scanner severity</th>
+      <th>Indicator</th>
+      <th>Path</th>
+      <th>Message</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for f in findings %}
+    <tr>
+      <td class="mono muted">{{ f.ts or '' }}</td>
+      <td>{{ f.scanner or '' }}</td>
+      <td class="mono muted">{{ f.scanner_severity or '' }}</td>
+      <td class="mono">{{ f.indicator_value or '' }}{% if f.indicator_type %} <span class="muted">({{ f.indicator_type }})</span>{% endif %}</td>
+      <td class="mono">{{ f.path or '' }}</td>
+      <td>{{ f.message or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No findings from the runs above.</div>
+{% endif %}
+{% else %}
+<div class="empty">
+  No scan runs recorded yet. A scanner that has never run has no row here at all —
+  it is not being reported as clean.
+</div>
+{% endif %}
