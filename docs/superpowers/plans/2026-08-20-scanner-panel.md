@@ -148,6 +148,10 @@ message and `file.path` can be attacker-chosen text (see `scanners/aide.py`,
   at the age bound; skipped row surfaced with its reason; empty DB.
 - `tests/web/test_scanners.py` — shell renders; feed renders each of the five states;
   empty state; daemon unreachable; **XSS test**.
+- `tests/test_scanner_panel_e2e.py` — drives the **real** `ScannerRunnerWorker` (fake
+  adapter, real subprocess) and projects exactly what it emits, so drift between the
+  runner's `raw` keys and the projector's reads fails loudly rather than silently
+  blanking the panel.
 
 ## 7. Explicitly not in this slice
 
