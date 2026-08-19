@@ -47,6 +47,55 @@ unavoidable when scanning ``/home`` unprivileged). Non-zero means a compile
 error or an unusable target. Hence the outcome table shared with the rkhunter
 adapter: matches ⇒ ``findings``; no matches and 0 ⇒ ``clean``; no matches and
 non-zero ⇒ ``failure``, never a silent "nothing found".
+
+**A filename can forge a match line.** Requiring the path portion to start with
+``/`` does **not** make this parser structurally immune — a review said it did,
+and a live yara run says otherwise. The injected fragment supplies a plausible
+**rule name** first and the slash *after* it, so the check is satisfied; and the
+slashes cost the attacker nothing, because a *directory* name can carry the line
+break plus the fake rule name while the rest of the fake path is just
+directories nested under it. ``<target>/x<VT>Evil_Rule /etc/shadow`` is one real
+tree any unprivileged user can ``mkdir``.
+
+Measured against **yara 4.5.7** with exactly that tree: yara escapes only
+newline and CR in the path it prints (they arrive as the two characters
+``\\n`` / ``\\r``) and passes VT, FF, ``\\x1c``-``\\x1e``, ``\\x85``, U+2028,
+U+2029, ESC and TAB through **raw**. ``str.splitlines`` breaks on the first
+eight of those, so the parser as first shipped turned one honest scan of ten
+planted files into **eighteen findings, eight of them a fabricated
+``Evil_Rule /etc/shadow``** — attacker-chosen ``threat.indicator.value`` *and*
+``file.path``, which is worse than the rkhunter forgery, where only the warning
+text is attacker-worded.
+
+Splitting on ``\\n`` alone closes all eight (the same tree now yields ten
+findings, every one genuine), and every line is stripped of control characters
+so an ESC or a NUL never reaches an event for a terminal or a log tailer to
+re-interpret. What is deliberately **not** relied on is yara's own escaping of
+newlines: it is undocumented, printer- and version-specific. The residual case —
+any yara that prints a raw newline in a path — is therefore assumed reachable
+and bounded instead:
+
+* it **cannot** change the outcome classification. stdout carries match lines
+  and nothing else (``-w`` silences compile warnings; per-file open errors and
+  compile errors go to stderr, which is never parsed), so attacker text only
+  reaches us riding inside a genuine match line — and that line already made
+  the run ``findings``. A ``clean`` or a ``failure`` run has nothing to inject
+  into. The genuine match can, however, be *self-planted*: a file matching a
+  shipped rule is cheap to write, so a forged finding needs a real **match**,
+  not a real compromise;
+* it **cannot** suppress a real match. Lines are parsed independently and
+  appended, so the genuine line is already a finding — rule name and meta
+  ``severity`` intact — by the time the injected line is read;
+* it **can** truncate that genuine finding's ``path`` (and its ``raw_line`` and
+  ``message``) at the break, so a real detection may name a *prefix* of the real
+  path — possibly an innocent file that exists;
+* it **can** add one fabricated finding beside it.
+
+Guessing which match lines look "unexpected" was rejected deliberately: a parser
+that sometimes drops a real YARA hit would be far worse than one that sometimes
+shows an extra. The tests pin the exposure instead — unit tests over all nine
+break characters plus a live one that plants the VT tree — so nobody later reads
+the ``startswith("/")`` check and concludes a forged line is impossible.
 """
 
 from __future__ import annotations
@@ -57,7 +106,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome
+from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome, sanitize_text
 
 #: Spec §30.6 — the rulesets are ours, under /var/lib/inspectord.
 DEFAULT_RULES_DIR = "/var/lib/inspectord/yara"
@@ -145,11 +194,19 @@ class YaraAdapter:
 
         *stderr* is ignored — it holds compile diagnostics and per-file open
         errors, neither of which is a finding.
+
+        Lines are split on ``\\n`` **only** — not ``str.splitlines``, which also
+        breaks on ``\\r``, ``\\v``, ``\\f``, ``\\x1c``-``\\x1e``, ``\\x85`` and
+        U+2028/9, every one of them legal in a filename yara is about to print —
+        and each line is then stripped of control characters. That leaves a raw
+        newline in a matched filename as the one remaining way to forge a match
+        line; see "A filename can forge a match line" in the module docstring
+        for what that can and cannot do.
         """
         del stderr
         findings: list[Finding] = []
-        for line in stdout.splitlines():
-            parsed = _match_line(line)
+        for raw_line in stdout.split("\n"):
+            parsed = _match_line(sanitize_text(raw_line))
             if parsed is not None:
                 findings.append(parsed)
         return findings

@@ -166,6 +166,55 @@ def test_live_yara_clean_target_reports_success_with_no_findings(tmp_path: Path)
 
 
 @requires_yara
+@pytest.mark.parametrize(
+    "break_char", ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+def test_live_yara_a_break_char_in_a_path_forges_nothing(tmp_path: Path, break_char: str) -> None:
+    """The forgery this parser was wrongly called immune to, planted for real.
+
+    `/` cannot appear in a name, but a DIRECTORY named `x<break>Evil_Rule ` with
+    `etc/shadow` nested under it makes yara print
+    `<rule> …/x<break>Evil_Rule /etc/shadow` -- and yara 4.5.7 passes every one
+    of these characters through raw (only newline and CR are escaped, which the
+    adapter deliberately does not rely on). Under `str.splitlines` that was one
+    real scan yielding a fabricated `Evil_Rule` finding on `/etc/shadow`.
+    """
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    (rules / "live.yar").write_text(RULE)
+    target = tmp_path / "target"
+    nested = target / f"x{break_char}Evil_Rule " / "etc"
+    nested.mkdir(parents=True)
+    (nested / "shadow").write_text("padding INSPECTORD_LIVE_TEST_MARKER padding\n")
+
+    events = _run_worker(
+        {
+            "interval_s": 0.01,
+            "startup_delay_s": 0.0,
+            "scanners": {
+                "yara": {
+                    "enabled": True,
+                    "interval_s": 1000.0,
+                    "timeout_s": 60.0,
+                    "rules_dir": str(rules),
+                    "target": str(target),
+                }
+            },
+        },
+        [YaraAdapter()],
+    )
+
+    findings = [e for e in events if e["action"] == "scan_finding"]
+    # Exactly one, and it is the REAL rule on the REAL (whole) path -- not a
+    # second `Evil_Rule` finding on a bare `/etc/shadow`.
+    assert len(findings) == 1, findings
+    assert findings[0]["threat"]["indicator"]["value"] == "Inspectord_Live_Test_Rule", findings
+    path = findings[0]["file"]["path"]
+    assert path.startswith(str(target)) and path.endswith("/etc/shadow"), path
+    assert not any(char < " " or "\x7f" <= char <= "\x9f" for char in path), repr(path)
+
+
+@requires_yara
 def test_live_yara_with_no_rules_skips_instead_of_failing(tmp_path: Path) -> None:
     """The state this adapter's preflight exists for: rules not shipped yet.
 

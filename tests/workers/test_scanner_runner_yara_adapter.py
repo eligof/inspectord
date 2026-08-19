@@ -270,6 +270,103 @@ def test_parse_message_names_the_rule_and_the_file() -> None:
 
 
 # --------------------------------------------------------------------------
+# a line break in a scanned path -- the forged match-line exposure
+#
+# Requiring the path to start with `/` does NOT make this parser immune: the
+# injected fragment supplies the rule name first and the slash after it, and
+# the slashes of the fake path are just nested directories under a directory
+# whose NAME carries the break. Measured live against yara 4.5.7 (see the
+# adapter's module docstring and the live tests): eight of the nine characters
+# `str.splitlines` breaks on reach us raw and forged a match line; only newline
+# and CR are escaped by yara itself, and that escaping is not relied on. These
+# tests PIN what is closed and what remains.
+# --------------------------------------------------------------------------
+
+# The residual shape: a path yara printed with a RAW newline in it. yara 4.5.7
+# escapes newlines, so this needs a yara that does not -- assumed reachable
+# rather than argued away.
+FORGED_MATCH = "Real_Rule /tmp/legit\nEvil_Rule /etc/shadow\n"
+
+
+def test_a_newline_in_a_filename_forges_an_extra_match() -> None:
+    """The split cannot be undone once yara has printed the name.
+
+    By the time `parse` runs the forged line is byte-for-byte a real match
+    line, so it becomes a second finding naming an attacker-chosen rule on an
+    attacker-chosen path -- both `threat.indicator.value` and `file.path`.
+    Pinned, not fixed: guessing which match lines look "unexpected" would risk
+    dropping real YARA hits.
+    """
+    findings = _adapter().parse(FORGED_MATCH, "")
+    assert len(findings) == 2
+    assert findings[1].indicator_value == "Evil_Rule"
+    assert findings[1].path == "/etc/shadow"
+
+
+def test_the_real_match_survives_the_forged_line() -> None:
+    """The bound that matters: an injection can ADD a match, never hide one.
+
+    Lines are parsed independently and appended, so the genuine line is already
+    a finding -- rule name and meta severity intact -- when the forged line is
+    read. Only the tail of its `path` is lost with the newline, which is the
+    one way a real detection can be made to name a shorter, innocent-looking
+    path.
+    """
+    findings = _adapter().parse(FORGED_MATCH, "")
+    assert findings[0].indicator_value == "Real_Rule"
+    assert findings[0].path == "/tmp/legit"
+    assert findings[0].category == "file"
+
+    with_meta = _adapter().parse('Real_Rule [severity="high"] /tmp/legit\nEvil_Rule /x\n', "")
+    assert with_meta[0].severity == "high"
+
+
+def test_a_forged_match_line_cannot_change_the_outcome() -> None:
+    """The other bound: attacker text needs a genuine match to ride in on.
+
+    `-w` silences compile warnings and per-file open errors go to stderr, which
+    is never parsed, so stdout carries match lines only -- a run with nothing
+    genuine to report has nothing to inject into and keeps its classification.
+    """
+    adapter = _adapter()
+    assert adapter.interpret_outcome(0, "", "") is ScanOutcome.clean
+    assert adapter.interpret_outcome(1, "", COMPILE_ERROR_STDERR) is ScanOutcome.failure
+    # The forged line rides inside a genuine match, which was already `findings`.
+    assert adapter.interpret_outcome(0, FORGED_MATCH, "") is ScanOutcome.findings
+
+
+@pytest.mark.parametrize(
+    "break_char", ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+def test_only_a_raw_newline_forges_a_match_line(break_char: str) -> None:
+    """`str.splitlines` breaks on eight characters beyond `\\n`, and a path may
+    contain every one of them -- yara 4.5.7 was measured printing VT, FF,
+    `\\x1c`-`\\x1e`, `\\x85` and U+2028/9 raw, so these eight forged real
+    findings before the fix. Splitting on `\\n` alone closes all of them and
+    narrows the forgery to the one character no line-based parser can defend
+    against."""
+    findings = _adapter().parse(f"Real_Rule /tmp/x{break_char}Evil_Rule /etc/shadow\n", "")
+    assert len(findings) == 1
+    assert findings[0].indicator_value == "Real_Rule"
+
+
+def test_control_characters_never_reach_a_finding() -> None:
+    """Sanitized so nothing downstream -- a terminal, a log tailer -- can
+    re-interpret them. NUL and an ESC sequence are the ones actually measured."""
+    text = 'Demo_Rule [severity="hi\x00gh"] /scan/tgt/\x1b[31ma\x00b\x07.txt\n'
+    findings = _adapter().parse(text, "")
+    assert len(findings) == 1
+    assert findings[0].severity == "high"
+    for field in (
+        findings[0].indicator_value,
+        findings[0].raw_line,
+        findings[0].message or "",
+        findings[0].path or "",
+    ):
+        assert not any(ch < " " or "\x7f" <= ch <= "\x9f" for ch in field), repr(field)
+
+
+# --------------------------------------------------------------------------
 # malformed input -- `inspectord/parsers/base.py`: parsers NEVER raise
 # --------------------------------------------------------------------------
 
