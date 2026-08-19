@@ -31,3 +31,25 @@ def test_ebpf_features_is_verify_only() -> None:
     m = load_packaged_manifests()["ebpf_features"]
     assert m.distro_packages.get("arch", []) == []
     assert m.config is None
+
+
+def test_aide_is_not_auto_installable() -> None:
+    """aide is AUR-only on Arch/CachyOS: `pacman -S aide` fails."""
+    m = load_packaged_manifests()["aide"]
+    assert m.manual_install is not None
+    assert m.manual_install.reason
+    assert m.manual_install.instructions
+
+
+def test_aide_keeps_package_name_for_detection() -> None:
+    """An AUR install still registers in the pacman DB, so keep the name."""
+    m = load_packaged_manifests()["aide"]
+    assert m.distro_packages.get("arch", []) == ["aide"]
+    assert m.distro_packages.get("cachyos", []) == ["aide"]
+
+
+def test_yara_stays_auto_installable() -> None:
+    """yara really is in the official repos — it must not be marked manual."""
+    m = load_packaged_manifests()["yara"]
+    assert m.manual_install is None
+    assert m.distro_packages.get("arch", []) == ["yara"]

@@ -5,9 +5,18 @@ required_when:
   profiles: [minimal, standard]
 optional_when:
   profiles: []
+# Detection only — see manual_install below. An AUR or source install registers
+# under this same name, so `pacman -Qi aide` keeps working once the user has it.
 distro_packages:
   arch: [aide]
   cachyos: [aide]
+manual_install:
+  reason: >-
+    AIDE is not in the Arch/CachyOS official repositories — it is packaged only in
+    the AUR, and inspectord will not build or install unreviewed third-party PKGBUILDs.
+  instructions: >-
+    Install AIDE yourself, e.g. `paru -S aide` (or any AUR helper, or build the PKGBUILD
+    by hand after reading it), then re-run `inspectorctl deps status`.
 minimum_version: "0.18"
 service: null
 config: null

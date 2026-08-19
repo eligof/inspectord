@@ -108,6 +108,27 @@ class RollbackSpec(BaseModel):
     remove_group_membership: bool = False
 
 
+class ManualInstallSpec(BaseModel):
+    """Marks a dependency the daemon must never install itself.
+
+    The presence of this block *is* the flag: a manifest carrying it is excluded
+    from every generated install command, and the planner emits an ``action="manual"``
+    item instead. Used for tools that exist for the distro but not in a repository we
+    are willing to install from — e.g. AIDE on Arch/CachyOS, which is AUR-only, and
+    building an unreviewed third-party PKGBUILD is not something a security tool does.
+
+    ``distro_packages`` is still filled in for such a manifest: detection is unaffected
+    (an AUR- or source-installed package lands in the same package database), only the
+    install path is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    reason: str
+    """Why the daemon will not install it, in one human-readable sentence."""
+    instructions: str
+    """What the user should do instead — concrete enough to copy and run."""
+
+
 class DependencyManifest(BaseModel):
     """One YAML manifest under inspectord/dependencies/manifest_files/."""
 
@@ -118,6 +139,7 @@ class DependencyManifest(BaseModel):
     required_when: WhenCondition = Field(default_factory=WhenCondition)
     optional_when: WhenCondition = Field(default_factory=WhenCondition)
     distro_packages: dict[str, list[str]] = Field(default_factory=dict)
+    manual_install: ManualInstallSpec | None = None
     minimum_version: str | None = None
     service: ServiceSpec | None = None
     config: ConfigSpec | None = None
@@ -130,13 +152,17 @@ class DependencyManifest(BaseModel):
 class DependencyPlanItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
-    action: str  # "install" | "configure" | "verify"
+    action: str  # "install" | "configure" | "verify" | "manual"
     packages: list[str] = Field(default_factory=list)
     expected_command: str | None = None
     config_dropin: str | None = None
     service_actions: list[str] = Field(default_factory=list)
     permission_actions: list[str] = Field(default_factory=list)
     post_install_hooks: list[str] = Field(default_factory=list)
+    manual_reason: str | None = None
+    """action="manual" only: why the daemon will not install this itself."""
+    manual_instructions: str | None = None
+    """action="manual" only: what the user has to run instead."""
 
 
 class DependencyPlan(BaseModel):

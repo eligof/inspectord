@@ -46,6 +46,25 @@ def build_plan(
         if not _is_required(manifest, profile, flags):
             continue
         packages = _packages_for(distro, manifest)
+        manual = manifest.manual_install
+        if manual is not None:
+            # We will not install this one; `packages` names it for *detection* only
+            # (an AUR- or source-installed package still lands in the package DB).
+            # Already there -> nothing to say. Missing, or nothing we can even look
+            # up on this distro -> tell the user, rather than dropping it silently.
+            if packages and all(backend.is_installed(pkg) for pkg in packages):
+                continue
+            items.append(
+                DependencyPlanItem(
+                    name=name,
+                    action="manual",
+                    packages=[],
+                    expected_command=None,
+                    manual_reason=manual.reason,
+                    manual_instructions=manual.instructions,
+                )
+            )
+            continue
         if not packages:
             continue
         missing = [pkg for pkg in packages if not backend.is_installed(pkg)]
