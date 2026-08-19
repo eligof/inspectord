@@ -187,20 +187,20 @@ binary is `0700 root:root`.
 `tests/workers/test_scanner_runner_aide_adapter.py`, `tests/workers/test_scanner_runner_runner.py`,
 `tests/workers/test_scanner_runner_process_group.py`
 
-- [ ] **Step 1: Update the AIDE tests first** — call `interpret_outcome(code, "", "")`, add the
+- [x] **Step 1: Update the AIDE tests first** — call `interpret_outcome(code, "", "")`, add the
       `(24, failure)` and `(25, failure)` rows, and add
       `test_preflight_is_none_because_aide_needs_no_setup`.
-- [ ] **Step 2: Run; expect FAIL** (`AttributeError: 'AideAdapter' object has no attribute
+- [x] **Step 2: Run; expect FAIL** (`AttributeError: 'AideAdapter' object has no attribute
       'interpret_outcome'`).
-- [ ] **Step 3: Change `base.py`** (rename + `preflight`, with the rationale in the docstrings),
+- [x] **Step 3: Change `base.py`** (rename + `preflight`, with the rationale in the docstrings),
       **`aide.py`** (rename, `del stdout, stderr`, `preflight` → `None`, docstring: codes 24/25,
       "verified against installed AIDE 0.19.3", the measured 18/15), and **`runner.py`** (pass the
       output to `interpret_outcome`; call `preflight` in `_start_run` with a `preflight_error`
       guard).
-- [ ] **Step 4: Update the two fake adapters** in the runner tests, and add
+- [x] **Step 4: Update the two fake adapters** in the runner tests, and add
       `test_preflight_reason_skips_the_scanner` (asserting `scan_skipped` with that exact reason
       and that the slot is consumed) plus `test_preflight_raising_is_reported_as_a_skip`.
-- [ ] **Step 5:** full unit gate green. Commit — `refactor(scanner_runner): output-aware
+- [x] **Step 5:** full unit gate green. Commit — `refactor(scanner_runner): output-aware
       interpret_outcome + adapter preflight`.
 
 ---
@@ -245,7 +245,7 @@ binary is `0700 root:root`.
 - Value/message/raw are length-capped; scanner output is untrusted and a single line is
   attacker-influenceable.
 
-- [ ] **Step 1: Write the failing tests**, fixtures verbatim from the captured runs:
+- [x] **Step 1: Write the failing tests**, fixtures verbatim from the captured runs:
       `PROPERTIES_WARNINGS` (5 blocks / continuations), `CLEAN` (empty), `DISABLE_ALL_ERROR`,
       `UNKNOWN_TEST_ERROR`, `NOLOG_ERROR`, `STDERR_NOISE`.
   - `test_argv_*` — the five mandatory flags; `--enable` joins a list with commas; a string is
@@ -262,8 +262,8 @@ binary is `0700 root:root`.
   - `test_parse_ignores_stderr_noise`.
   - malformed: empty, `"\n\n\n"`, NUL/high bytes, a block truncated mid-continuation, a lone
     continuation line with no header, a 100 kB single line, `"Warning:"` with nothing after it.
-- [ ] **Step 2: Run; expect FAIL** (`ModuleNotFoundError`).
-- [ ] **Step 3: Write the adapter. Step 4:** tests green. **Step 5:** register in
+- [x] **Step 2: Run; expect FAIL** (`ModuleNotFoundError`).
+- [x] **Step 3: Write the adapter. Step 4:** tests green. **Step 5:** register in
       `default_adapters()`; gates; commit — `feat(scanner_runner): rkhunter adapter`.
 
 ---
@@ -310,7 +310,7 @@ break it — both measured as real possibilities. `severity` from meta becomes `
 (the *scanner's* severity, preserved as data — decision 7); `indicator_type="yara_rule"`,
 `indicator_value` = the rule name, `path` = the matched file, `category="file"`.
 
-- [ ] **Step 1: Write the failing tests** with the captured fixtures (plain, `-m`, `[]`-meta,
+- [x] **Step 1: Write the failing tests** with the captured fixtures (plain, `-m`, `[]`-meta,
       `-s`-with-string-lines, the `we ird/a]b c.txt` path, the stderr `error scanning …` line).
   - `test_argv_expands_the_rules_directory_to_files` (sorted, `.yar` **and** `.yara`, non-rule
     files ignored, target last, exactly one target).
@@ -324,7 +324,7 @@ break it — both measured as real possibilities. `severity` from meta becomes `
     `test_parse_handles_commas_and_escaped_quotes_inside_meta`.
   - malformed: empty, NUL bytes, `"Rule"` alone, `"Rule ["` truncated, a relative path, a 100 kB
     line, a line that is only brackets.
-- [ ] **Step 2: FAIL. Step 3:** write it. **Step 4:** green. **Step 5:** register; gates; commit —
+- [x] **Step 2: FAIL. Step 3:** write it. **Step 4:** green. **Step 5:** register; gates; commit —
       `feat(scanner_runner): YARA adapter`.
 
 ---
@@ -339,7 +339,7 @@ minutes and a `/home` YARA sweep is unbounded I/O, so neither may run on a devel
 without an explicit opt-in. `interval_s = 86400`, `timeout_s = 1800` (spec §4.4), plus
 `rules_dir`/`target` for yara so the shipped config documents where rules live.
 
-- [ ] **Step 1:** failing presence + `enabled is False` tests for both. **Step 2:** FAIL.
+- [x] **Step 1:** failing presence + `enabled is False` tests for both. **Step 2:** FAIL.
       **Step 3:** wire both files in one commit (`test_config_example.py` asserts set equality).
       **Step 4:** green. **Step 5:** commit — `feat(config): register the rkhunter and yara
       scanners (disabled)`.
@@ -366,7 +366,7 @@ without an explicit opt-in. `interval_s = 86400`, `timeout_s = 1800` (spec §4.4
     `parse(...) == []`. This is the regression test for the whole point of the PR — an ambiguous
     exit 1 that must **not** look like a detection.
   - Neither test writes to `/var/log`; nothing runs `--propupd` or `--update`.
-- [ ] **Step 1:** write. **Step 2:** run non-root (yara passes, rkhunter skips). **Step 3:** run
+- [x] **Step 1:** write. **Step 2:** run non-root (yara passes, rkhunter skips). **Step 3:** run
       `sudo .venv/bin/python -m pytest tests/workers/test_scanner_runner_live_scanners.py -v` and
       record the real output in the report. **Step 4:** commit — `test(scanner_runner): live
       rkhunter and YARA adapter tests`.
@@ -375,7 +375,7 @@ without an explicit opt-in. `interval_s = 86400`, `timeout_s = 1800` (spec §4.4
 
 ### Task 7: full gates
 
-- [ ] `.venv/bin/python -m pytest -m "not integration and not ebpf_load" -q` (exit 0) ·
+- [x] `.venv/bin/python -m pytest -m "not integration and not ebpf_load" -q` (exit 0) ·
       `.venv/bin/ruff check inspectord tests` · `.venv/bin/ruff format --check inspectord tests` ·
       `.venv/bin/mypy inspectord`. Then report. **Do not push, do not open a PR, do not merge.**
 
@@ -399,3 +399,35 @@ without an explicit opt-in. `interval_s = 86400`, `timeout_s = 1800` (spec §4.4
   are tempting but unrequested (`--skip-larger`, `--threads`, `--timeout`); rkhunter `--dbdir` /
   `--tmpdir` config keys. `-r` follows symlinks and yara 4.5.7 offers no flag to stop it — noted,
   not worked around.
+
+
+---
+
+## Execution notes (what actually changed vs. the plan)
+
+Executed 2026-08-19 on branch `scanner-runner-pr2`. All seven tasks done; gates green
+(1011 passed / 11 skipped / 8 deselected, ruff + mypy clean). Six commits, one per task.
+
+Deltas worth a reviewer's eye:
+
+1. **`--nolog` was discovered mid-plan, not after.** The first exploratory run passed `--nolog` to
+   keep the live tests out of `/var/log`, and rkhunter answered `The logfile has been disabled -
+   unable to report warnings.` with exit 1 and zero warnings. That is itself a perfect specimen of
+   the ambiguity this PR exists to handle, so it became a fixture (`NOLOG_ERROR`) and the adapter
+   uses a `logfile` config key instead of ever disabling the log.
+2. **`--no-mail-on-warning` is passed unconditionally**, which the plan justified only briefly. A
+   host `rkhunter.conf` with `MAIL-ON-WARNING` set would make an inspectord-initiated scan send
+   mail off the box; that is egress, and parent §18.1 enumerates none. It is not a config key
+   because there is no legitimate value other than "never".
+3. **Two fixtures are written as adjacent string literals**, not one triple-quoted block: three of
+   the captured rkhunter lines exceed the repo's 100-column limit. The bytes are unchanged —
+   verified by diffing the reconstructed constant against the raw capture — and the alternative
+   (a per-file `E501` ignore in `ruff.toml`) would have loosened a repo-wide gate for one file.
+4. **The live YARA tests are not root-only and are not marked**, so they run in the ordinary gate
+   whenever `yara` is installed and skip otherwise. Only rkhunter needs root, and only because its
+   binary is `0700 root:root`.
+5. **`test_dev_config_declares_every_known_scanner`** was added beyond the plan: it pins
+   `dev_config`'s scanner set equal to `default_adapters()`, so a future adapter cannot ship
+   registered-but-unmentioned, running at the adapter defaults with nobody able to see it.
+6. **Still deferred, as planned:** §4.3 scanner-data staleness; the rkhunter dependency manifest
+   (see the first Self-Review note); yara tuning flags.
