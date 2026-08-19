@@ -628,6 +628,24 @@ def test_a_parser_that_raises_is_reported_as_a_failed_scan() -> None:
     assert completed["raw"]["reason"] == "parse_error"
 
 
+def test_an_outcome_interpreter_that_raises_is_reported_as_a_failed_scan() -> None:
+    """The third adapter method the runner guards, alongside preflight and parse."""
+
+    class ExplodingAdapter(FakeAdapter):
+        def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome:
+            raise ValueError("boom")
+
+    worker, buf = _make_worker([ExplodingAdapter(argv=["sh", "-c", "exit 0"])], _base_config())
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert completed["outcome"] == "failure"
+    assert completed["raw"]["reason"] == "exit_interpretation_error"
+
+
 # --------------------------------------------------------------------------
 # why a failed scan failed
 #
