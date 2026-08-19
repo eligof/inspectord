@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 
+from inspectord.dependencies.schemas import DependencyManifest
 from inspectord.workers.dependency_manager.__main__ import DependencyManagerWorker
 
 
@@ -61,3 +62,46 @@ def test_worker_emits_state_events() -> None:
     actions = {ev["action"] for ev in lines}
     assert "dep_verified" in actions or "dep_misconfigured" in actions
     assert all(ev["module"] == "dependency_manager" for ev in lines)
+
+
+def _manifest(name: str, *, required: bool) -> DependencyManifest:
+    """A manifest whose probe always fails (the path does not exist)."""
+    return DependencyManifest.model_validate(
+        {
+            "name": name,
+            "description": f"{name} — worker test manifest",
+            "required_when": {"profiles": ["minimal"] if required else []},
+            "optional_when": {"profiles": [] if required else ["minimal"]},
+            "verify": {
+                "health_probe": {"kind": "file_exists", "path": "/nonexistent/inspectord-test"},
+            },
+        }
+    )
+
+
+def _run_once(manifests: dict[str, DependencyManifest]) -> list[dict[str, object]]:
+    stdout = io.BytesIO()
+    w = DependencyManagerWorker(
+        name="dependency_manager",
+        stdout=stdout,
+        stderr=io.BytesIO(),
+        runner=_Runner({}),
+        manifests=manifests,
+        config={"interval_s": 0.05},
+    )
+    w.step()
+    return [
+        json.loads(line) for line in stdout.getvalue().decode("utf-8").splitlines() if line.strip()
+    ]
+
+
+def test_missing_required_dep_is_high_severity() -> None:
+    events = _run_once({"req": _manifest("req", required=True)})
+    assert [e["severity"] for e in events] == ["high"]
+    assert [e["action"] for e in events] == ["dep_misconfigured"]
+
+
+def test_missing_optional_dep_is_not_high_severity() -> None:
+    """An optional tool the user never installed is not a misconfigured host."""
+    events = _run_once({"opt": _manifest("opt", required=False)})
+    assert [e["severity"] for e in events] == ["low"]
