@@ -85,8 +85,39 @@ name = "persistence_snapshotter"
 module = "inspectord.workers.persistence_snapshotter"
 
 # scanner_runner is the first worker whose job takes MINUTES. Every scanner
-# ships disabled: flip `enabled` per host once the scanner is installed and its
-# database initialized. See docs/superpowers/specs/2026-08-19-scanner-runner-design.md.
+# ships ENABLED -- a scanner nobody turns on detects nothing -- and one that is
+# not set up yet emits `scan_skipped` with a reason instead of failing.
+#
+# inspectord NEVER creates a scanner baseline for you: `aide --init`,
+# `rkhunter --propupd` and installing YARA rulesets are your decisions, and
+# scanner database updates are forbidden outright (design decision 8, parent
+# spec §18.1 -- no network egress). So `enabled = true` means "run it once it is
+# ready", not "set it up for me". Until you do the three steps below, AIDE and
+# YARA skip daily and only rkhunter actually scans.
+#
+# What you still have to do by hand, once, per host:
+#   aide     Write /var/lib/inspectord/aide/aide.conf (database_in,
+#            database_out, report_url=stdout, plus the trees to watch), then
+#            `aide --config /var/lib/inspectord/aide/aide.conf --init` on a
+#            machine you believe is clean and move database_out into place.
+#            Until then: scan_skipped "config_missing" (or "database_missing").
+#   yara     Put .yar/.yara rulesets in /var/lib/inspectord/yara.
+#            Until then: scan_skipped "rules_missing".
+#   rkhunter `rkhunter --propupd`, on a machine you believe is clean, to create
+#            the file-properties baseline. Until then rkhunter warns about the
+#            missing rkhunter.dat on every scan.
+#
+# Cost of the rkhunter default on a healthy Arch/CachyOS box, measured end to
+# end: five warnings per scan (the egrep/fgrep/ldd shell-wrapper warnings, the
+# missing rkhunter.dat baseline and the standing --propupd notice) become FIVE
+# separate `medium` alerts per night. They do NOT collapse into one: the dedup
+# key is per finding -- the file path, or the event id when the warning names no
+# path, and an event id can never dedup at all -- and the dedup window is 600s
+# against a daily interval. They are enumerated in
+# av_rkhunter_warning_or_worse.yaml's false_positives. `--propupd` retires two;
+# set `enabled = false` here if the rest are not worth the noise to you.
+#
+# See docs/superpowers/specs/2026-08-19-scanner-runner-design.md.
 [[workers]]
 name = "scanner_runner"
 module = "inspectord.workers.scanner_runner"
@@ -98,15 +129,15 @@ max_findings_per_run = 500
 # dropped, and `scan_completed` says so.
 max_output_bytes = 8388608
 [workers.config.scanners.aide]
-enabled = false
+enabled = true
 interval_s = 86400.0
 timeout_s = 3600.0
 [workers.config.scanners.rkhunter]
-enabled = false
+enabled = true
 interval_s = 86400.0
 timeout_s = 1800.0
 [workers.config.scanners.yara]
-enabled = false
+enabled = true
 interval_s = 86400.0
 timeout_s = 1800.0
 # We ship the rulesets; with none installed the scanner skips with a reason

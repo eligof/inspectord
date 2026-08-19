@@ -168,21 +168,51 @@ def dev_config(*, base: Path) -> DaemonConfig:
                         # Bounds the MEMORY of a run, as the finding cap bounds
                         # its events: a first AIDE check can print a huge diff.
                         "max_output_bytes": 8 * 1024 * 1024,
-                        # Every scanner ships DISABLED: a scan takes minutes, so
-                        # this is opt-in per host, never on by default.
+                        # Every scanner ships ENABLED -- a scanner nobody turns
+                        # on detects nothing -- and each one that is not set up
+                        # yet SKIPS with a reason rather than failing. Neither
+                        # the daemon nor this config ever creates a baseline:
+                        # `aide --init`, `rkhunter --propupd` and installing
+                        # YARA rulesets are all the user's decision (design
+                        # decision 8), so "enabled" means "run it once it is
+                        # ready", never "set it up for me".
+                        #
+                        # What that costs on a stock host, measured 2026-08-19:
+                        #   aide     -> scan_skipped "config_missing" daily; no
+                        #               config ships yet. Nothing runs, nothing
+                        #               fails.
+                        #   yara     -> scan_skipped "rules_missing" daily;
+                        #               /var/lib/inspectord/yara does not exist.
+                        #   rkhunter -> actually RUNS, and a healthy Arch box
+                        #               yields five warnings per scan (the
+                        #               egrep/fgrep/ldd wrapper warnings, the
+                        #               missing rkhunter.dat baseline and the
+                        #               --propupd notice). Those become five
+                        #               SEPARATE `medium` alerts per night under
+                        #               av.rkhunter_warning_or_worse -- measured
+                        #               end to end, not inferred. They do not
+                        #               collapse: the dedup key is per finding
+                        #               (file path, or the event id when the
+                        #               warning names no path, which can never
+                        #               dedup at all) and its window is 600s
+                        #               against an 86400s interval. That rule's
+                        #               `why` and false_positives spell it out;
+                        #               `rkhunter --propupd`, run by the user on
+                        #               a machine they believe is clean, retires
+                        #               two of the five.
                         "scanners": {
                             "aide": {
-                                "enabled": False,
+                                "enabled": True,
                                 "interval_s": 86400.0,
                                 "timeout_s": 3600.0,
                             },
                             "rkhunter": {
-                                "enabled": False,
+                                "enabled": True,
                                 "interval_s": 86400.0,
                                 "timeout_s": 1800.0,
                             },
                             "yara": {
-                                "enabled": False,
+                                "enabled": True,
                                 "interval_s": 86400.0,
                                 "timeout_s": 1800.0,
                                 # We ship the rulesets (§30.6). With none

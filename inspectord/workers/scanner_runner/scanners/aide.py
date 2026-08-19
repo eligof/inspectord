@@ -4,6 +4,12 @@ AIDE's database is ours and lives under ``/var/lib/inspectord/aide/`` (parent
 spec §30.6), so this scanner is fully deterministic and fully offline: nothing
 here ever updates a signature database (design decision 8).
 
+**But we do not create it.** Nothing in this repo ships an AIDE config yet and
+``aide --init`` is the user's decision, not the daemon's — so on a fresh host
+AIDE has neither a config nor a database. ``preflight`` reports those two states
+as ``config_missing`` / ``database_missing`` skips; without it the scanner would
+exit 18 and report a ``failure`` every night forever. See ``preflight`` below.
+
 **Exit status is a bitmask, not a boolean** (design decision 10).  The
 documented ``EXIT STATUS`` section of the AIDE manual (0.16-0.18 series; the
 dependency manifest pins ``minimum_version: "0.18"``) defines::
@@ -119,12 +125,22 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome, sanitize_text
 
 # Spec §30.6: the AIDE database and config are ours, under /var/lib/inspectord.
 DEFAULT_CONFIG_PATH = "/var/lib/inspectord/aide/aide.conf"
+
+#: Ceiling on the bytes of config `preflight` reads looking for `database_in`.
+#: An AIDE config is a page or two; anything past this is not one, and a
+#: preflight must stay cheap enough to run before every scheduled scan.
+MAX_CONFIG_BYTES = 1024 * 1024
+
+#: `database_in=file:/path`, or the pre-0.19 `database=` spelling. Spaces around
+#: the `=` are accepted -- AIDE 0.19.3 accepts them, measured.
+_DATABASE_IN_RE = re.compile(r"^[ \t]*database(?:_in)?[ \t]*=[ \t]*(?P<url>\S.*?)[ \t]*$")
 
 # Section headers in an `aide --check` report. Compared against the stripped,
 # lower-cased line, so the Summary block's `  Added entries:\t\t1` (which has a
@@ -169,8 +185,53 @@ class AideAdapter:
         return [self.binary, "--config", config_path, "--check"]
 
     def preflight(self, config: Mapping[str, Any]) -> str | None:
-        """Always ready: AIDE's config path is a plain argv value, not a set to expand."""
-        del config
+        """Report "not set up yet" as a skip reason instead of a nightly failure.
+
+        AIDE cannot bootstrap itself and inspectord will never bootstrap it:
+        ``aide --init`` writes a baseline of the machine as it is *right now*,
+        and a daemon that does that on the user's behalf silently certifies
+        whatever is already on the disk. So the two not-set-up states below are
+        the ordinary condition of a fresh install, not errors — and both are
+        indistinguishable from a real fault if we let AIDE report them.
+
+        Measured against the installed AIDE 0.19.3 (2026-08-19), each of these
+        exits **18** (IO error), which ``interpret_outcome`` correctly but
+        uselessly calls a ``failure``::
+
+            aide --config /nonexistent.conf --check
+              ERROR: cannot open config file '/nonexistent.conf': ...
+            aide --config <ours> --check          # database_in file absent
+              ERROR: <ours>:1: open (read-only) failed for file '<db>': ...
+
+        An enabled-but-unconfigured AIDE would therefore emit a ``failure``
+        every single night, forever, saying only "exit 18". These two reasons
+        say what is actually missing:
+
+        ``config_missing``
+            The config named by ``config_path`` (default
+            ``/var/lib/inspectord/aide/aide.conf``) does not exist. Nothing in
+            this repo ships one yet, so this is the state of every host today.
+        ``database_missing``
+            The config exists and names a local ``database_in`` file that does
+            not. Run ``aide --config <ours> --init`` yourself, on a machine you
+            believe is clean, and move the resulting ``database_out`` into
+            place.
+
+        Undecidable cases return ``None`` and let AIDE speak for itself rather
+        than inventing a reason: a non-``file:`` ``database_in`` (``stdin``, an
+        ``https://`` URL — both legal per ``man aide.conf``), a path built from
+        an ``@@{...}`` variable, a config that pulls the setting in through
+        ``@@include``, or a config we cannot read. MUST NOT raise, so every
+        filesystem and decoding error resolves to one of these answers.
+        """
+        config_path = str(config.get("config_path") or DEFAULT_CONFIG_PATH)
+        if not _is_file(config_path):
+            return "config_missing"
+        database = _database_in(config_path)
+        if database is None:
+            return None
+        if not _exists(database):
+            return "database_missing"
         return None
 
     def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome:
@@ -264,3 +325,55 @@ def _finding(change: str, path: str, raw_line: str) -> Finding:
         severity=None,  # AIDE has no severity of its own.
         message=f"AIDE: {change} {path}",
     )
+
+
+def _is_file(path: str) -> bool:
+    """``True`` when *path* is an existing regular file. Never raises."""
+    try:
+        return Path(path).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def _exists(path: str) -> bool:
+    """``True`` when *path* exists at all. Never raises."""
+    try:
+        return Path(path).exists()
+    except (OSError, ValueError):
+        return False
+
+
+def _database_in(config_path: str) -> str | None:
+    """The local ``database_in`` file *config_path* names, or ``None``.
+
+    ``None`` means "not decidable here", never "not configured": an unreadable
+    config, a database URL that is not a local file (``stdin``, ``https://…`` —
+    both legal per ``man aide.conf``), or a path built from an ``@@{...}``
+    variable this parser deliberately does not expand. The caller then lets AIDE
+    speak for itself rather than skipping on a guess.
+
+    ``man aide.conf``: "There can only be one of these lines. If there are
+    multiple database lines then the **first** is used." — so this stops at the
+    first match, matching AIDE rather than out-guessing it. Never raises.
+    """
+    try:
+        with Path(config_path).open("r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(MAX_CONFIG_BYTES)
+    except (OSError, ValueError):
+        return None
+
+    for line in text.split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
+        match = _DATABASE_IN_RE.match(line)
+        if match is None:
+            continue
+        url = match.group("url")
+        if "@@" in url:
+            # An `@@{DBDIR}`-style variable. Expanding AIDE's config language is
+            # not this parser's job, and a wrong expansion would skip a scanner
+            # that could have run.
+            return None
+        path = url.removeprefix("file:")
+        return path if path.startswith("/") else None
+    return None

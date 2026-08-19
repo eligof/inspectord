@@ -11,6 +11,8 @@ broken scan.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from inspectord.workers.scanner_runner.scanners.aide import AideAdapter
@@ -151,10 +153,109 @@ def test_interpret_outcome_ignores_the_output() -> None:
     assert adapter.interpret_outcome(18, REPORT, "") is ScanOutcome.failure
 
 
-def test_preflight_is_none_because_aide_needs_no_setup() -> None:
-    """AIDE's config path is a plain argv value; there is nothing to expand or count."""
-    assert AideAdapter().preflight({}) is None
-    assert AideAdapter().preflight({"config_path": "/nope/aide.conf"}) is None
+# --------------------------------------------------------------------------
+# preflight
+# --------------------------------------------------------------------------
+
+
+def _conf(tmp_path: Path, body: str) -> str:
+    conf = tmp_path / "aide.conf"
+    conf.write_text(body, encoding="utf-8")
+    return str(conf)
+
+
+def test_preflight_reports_config_missing_rather_than_a_nightly_failure() -> None:
+    """The state of every host today: nothing ships an AIDE config yet.
+
+    Measured against AIDE 0.19.3, `--config /nonexistent --check` exits 18,
+    which `interpret_outcome` correctly calls a failure -- so without this the
+    enabled-by-default scanner would report "exit 18" every night forever.
+    """
+    assert AideAdapter().preflight({}) == "config_missing"
+    assert AideAdapter().preflight({"config_path": "/nope/aide.conf"}) == "config_missing"
+
+
+def test_preflight_reports_database_missing_when_the_config_names_an_absent_db(
+    tmp_path: Path,
+) -> None:
+    """`aide --init` is the user's decision, so an uninitialized database skips.
+
+    Measured: AIDE 0.19.3 exits 18 here too, with an "open (read-only) failed"
+    diagnostic -- indistinguishable, from the exit code alone, from a disk fault.
+    """
+    conf = _conf(tmp_path, f"database_in=file:{tmp_path}/aide.db\nreport_url=stdout\n")
+    assert AideAdapter().preflight({"config_path": conf}) == "database_missing"
+
+
+def test_preflight_passes_once_the_database_exists(tmp_path: Path) -> None:
+    (tmp_path / "aide.db").write_text("", encoding="utf-8")
+    conf = _conf(tmp_path, f"database_in=file:{tmp_path}/aide.db\n")
+    assert AideAdapter().preflight({"config_path": conf}) is None
+
+
+def test_preflight_accepts_the_pre_0_19_database_spelling(tmp_path: Path) -> None:
+    conf = _conf(tmp_path, f"database=file:{tmp_path}/aide.db\n")
+    assert AideAdapter().preflight({"config_path": conf}) == "database_missing"
+
+
+def test_preflight_tolerates_spaces_around_the_equals(tmp_path: Path) -> None:
+    # AIDE 0.19.3 accepts `database_in = file:...`; measured.
+    conf = _conf(tmp_path, f"database_in = file:{tmp_path}/aide.db\n")
+    assert AideAdapter().preflight({"config_path": conf}) == "database_missing"
+
+
+def test_preflight_uses_the_first_database_line_like_aide_does(tmp_path: Path) -> None:
+    """`man aide.conf`: "If there are multiple database lines then the first is used"."""
+    (tmp_path / "second.db").write_text("", encoding="utf-8")
+    conf = _conf(
+        tmp_path,
+        f"database_in=file:{tmp_path}/first.db\ndatabase_in=file:{tmp_path}/second.db\n",
+    )
+    assert AideAdapter().preflight({"config_path": conf}) == "database_missing"
+
+
+def test_preflight_ignores_a_commented_out_database_line(tmp_path: Path) -> None:
+    conf = _conf(tmp_path, f"# database_in=file:{tmp_path}/aide.db\nreport_url=stdout\n")
+    assert AideAdapter().preflight({"config_path": conf}) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "stdin",  # legal per `man aide.conf`
+        "https://example.com/aide.db",  # also legal; not a local file
+        "file:@@{DBDIR}/aide.db",  # a config variable this parser does not expand
+        "file:relative/aide.db",  # not absolute -- we cannot resolve it
+    ],
+)
+def test_preflight_lets_aide_speak_when_the_database_is_undecidable(
+    tmp_path: Path, url: str
+) -> None:
+    """Undecidable is NOT "not configured" -- skipping on a guess would silence a
+    scanner that could have run, which is the failure mode this whole worker exists
+    to avoid."""
+    conf = _conf(tmp_path, f"database_in={url}\n")
+    assert AideAdapter().preflight({"config_path": conf}) is None
+
+
+def test_preflight_lets_aide_speak_when_the_config_declares_no_database(
+    tmp_path: Path,
+) -> None:
+    # e.g. a config that pulls the setting in through `@@include`.
+    conf = _conf(tmp_path, "@@include /etc/aide.conf.d\nreport_url=stdout\n")
+    assert AideAdapter().preflight({"config_path": conf}) is None
+
+
+def test_preflight_never_raises_on_a_hostile_config(tmp_path: Path) -> None:
+    """Adapters promise not to raise; a directory, a NUL and undecodable bytes."""
+    adapter = AideAdapter()
+    (tmp_path / "dir.conf").mkdir()
+    assert adapter.preflight({"config_path": str(tmp_path / "dir.conf")}) == "config_missing"
+    assert adapter.preflight({"config_path": "/nope\x00/aide.conf"}) == "config_missing"
+
+    binary = tmp_path / "binary.conf"
+    binary.write_bytes(b"database_in=file:/\xff\xfe/aide.db\n")
+    assert adapter.preflight({"config_path": str(binary)}) == "database_missing"
 
 
 # --------------------------------------------------------------------------

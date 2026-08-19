@@ -1,0 +1,47 @@
+version: 1.0.0
+id: av.yara_match
+name: "YARA rule matched a file"
+severity: low
+category: malware
+why: |
+  A YARA rule you installed matched a file during a scheduled scan. That is all
+  this rule asserts — not that the file is malicious, not that the matching rule
+  thought so. It is the catch-all, and its whole point is that **a ruleset which
+  declares no severity still produces something.**
+
+  `av.yara_high_confidence_hit` only fires when the matching rule carries a
+  `severity` meta of `high` or `critical`. Plenty of public rulesets carry no
+  `severity` meta at all, so importing one and relying on that rule alone can
+  leave you with a scanner that matches files nightly and never raises a single
+  alert — a silence indistinguishable from a clean machine. This rule closes
+  that: every YARA hit surfaces, at `low`, whatever the rule's meta says.
+
+  **A high or critical hit deliberately fires BOTH rules** — this one at `low`
+  and `av.yara_high_confidence_hit` at `high`. That is not a bug and not a
+  misconfiguration: the pair is a floor plus a ceiling. Every hit gets a
+  low-severity record, and the ones whose author called them severe get a
+  high-severity alert on top. If you want only the loud half, disable this rule;
+  if your rulesets declare no severity, this is the only one that will ever
+  fire.
+
+  `low` is the honest grade for a bare match. YARA does not know why a file is
+  on your disk, and the rules that matched are ones you chose to install — this
+  is a lead to look at, not a verdict.
+
+  The match is keyed on structure only: the emitting module, the action, and
+  which adapter ran (`threat.indicator.source`, set by the worker from its own
+  state). It never keys on the rule name or on the declared severity, because
+  both of those are scanner-supplied text that a forged match line controls.
+  *That the YARA adapter reported a match* is trustworthy; the rule name,
+  severity and path rendered below are not.
+false_positives:
+  - "Almost anything, by design — this rule is a floor, not a judgement. Malware research, reverse-engineering samples, a security-tool cache, an email archive or a downloads directory holding a genuine specimen you put there on purpose all match, and so does any file that trips a broad rule. `low` is the grade that says so."
+  - "A broad or badly written rule in an imported ruleset. Nothing ships in /var/lib/inspectord/yara by default, so every rule that can fire this alert was added by you. If one rule floods this alert, remove it from the rules directory rather than turning the scanner off."
+  - "A fabricated hit. A directory name inside the scanned tree can carry a line break, which splits one yara match line into two so the tail reads as a second match with an attacker-chosen rule name and file path. It needs a genuine match to ride on — but a genuine match is cheap to self-plant by writing a file that trips one of your own rules. So an unprivileged local user who can create a directory under the scan target can manufacture this alert naming a file they never touched. Confirm the named path really matches before acting: `yara -r <your-rules> <path>`."
+  - "A truncated path. The same line break shortens the genuine finding's path at the break, so a real detection can name a prefix of the real path — which may itself be an innocent file that exists."
+detect:
+  any_of:
+    - event.module == "scanner_runner" AND event.action == "scan_finding" AND threat.indicator.source == "yara"
+short: "YARA match: {threat.indicator.value}"
+detail: "YARA rule {threat.indicator.value} matched {file.path} during a scheduled scan. Rule name and path are scanner-supplied text: confirm the match before acting on it. A high- or critical-severity rule also raises av.yara_high_confidence_hit; that pair is expected."
+labels: [scanner, yara, malware]
