@@ -131,3 +131,39 @@ def test_probe_kind_enum_values() -> None:
 
 def test_config_strategy_enum_values() -> None:
     assert {s.value for s in ConfigStrategy} == {"sidecar", "edit-with-backup"}
+
+
+def test_manifest_manual_install_defaults_to_none() -> None:
+    m = DependencyManifest.model_validate(_minimal_manifest_dict())
+    assert m.manual_install is None
+
+
+def test_manifest_manual_install_validates() -> None:
+    d = _minimal_manifest_dict()
+    d["manual_install"] = {
+        "reason": "AUR-only; we do not build unreviewed PKGBUILDs",
+        "instructions": "paru -S aide",
+    }
+    m = DependencyManifest.model_validate(d)
+    assert m.manual_install is not None
+    assert m.manual_install.reason.startswith("AUR-only")
+    assert m.manual_install.instructions == "paru -S aide"
+
+
+def test_manifest_manual_install_requires_both_fields() -> None:
+    d = _minimal_manifest_dict()
+    d["manual_install"] = {"reason": "AUR-only"}
+    with pytest.raises(ValidationError):
+        DependencyManifest.model_validate(d)
+
+
+def test_plan_item_carries_manual_hint() -> None:
+    item = DependencyPlanItem(
+        name="aide",
+        action="manual",
+        manual_reason="AUR-only",
+        manual_instructions="paru -S aide",
+    )
+    assert item.packages == []
+    assert item.expected_command is None
+    assert item.manual_instructions == "paru -S aide"

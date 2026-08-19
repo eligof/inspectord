@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from inspectord.dependencies.manifest import load_packaged_manifests
 from inspectord.dependencies.probes import ProbeResult, run_probe
+from inspectord.dependencies.schemas import DependencyManifest
 from inspectord.ids import uuid7
 from inspectord.schemas.versions import EVENT_SCHEMA_VERSION
 from inspectord.workers.contract import Worker, read_config_from_stdin
@@ -46,11 +47,12 @@ class DependencyManagerWorker(Worker):
         *,
         name: str,
         runner: _Runner | None = None,
+        manifests: dict[str, DependencyManifest] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(name=name, **kwargs)
         self._runner: _Runner = runner if runner is not None else _DefaultRunner()
-        self._manifests = load_packaged_manifests()
+        self._manifests = manifests if manifests is not None else load_packaged_manifests()
 
     def step_interval_s(self) -> float:
         return float(self.config.get("interval_s", 300.0))
@@ -63,7 +65,16 @@ class DependencyManagerWorker(Worker):
                 version_cmd=manifest.verify.version_cmd,
                 runner=self._runner,
             )
-            severity = "info" if probe.ok else "high"
+            # A required dependency that fails its probe is a broken host. An
+            # *optional* one the user never installed is not — it must not raise
+            # a high-severity alert every interval just for being absent.
+            required = bool(manifest.required_when.profiles)
+            if probe.ok:
+                severity = "info"
+            elif required:
+                severity = "high"
+            else:
+                severity = "low"
             self.emit_event(
                 {
                     "schema_version": EVENT_SCHEMA_VERSION,

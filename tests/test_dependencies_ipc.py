@@ -123,7 +123,8 @@ def test_handle_apply_dependency_plan_invokes_applier(
             ("pacman", "-Qi", "aide"): _missing(),
             ("pacman", "-Qi", "yara"): _missing(),
             ("pacman", "-Sy"): _ok,
-            ("pacman", "-S", "--noconfirm", "--needed", "audit", "aide", "yara"): _ok,
+            # aide is AUR-only: it is planned as `manual`, never handed to pacman.
+            ("pacman", "-S", "--noconfirm", "--needed", "audit", "yara"): _ok,
             ("systemctl", "enable", "--now", "auditd.service"): _ok,
             ("systemctl", "enable", "--now", "systemd-journald.service"): _ok,
             ("systemctl", "is-active", "auditd.service"): subprocess.CompletedProcess(

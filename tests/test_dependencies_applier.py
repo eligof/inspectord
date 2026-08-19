@@ -178,3 +178,69 @@ def test_apply_plan_install_failure_skips_dropin(tmp_path: Path) -> None:
     )
     assert result.ok is False
     assert not (sidecar_root / "inspectord.rules").exists()
+
+
+_MANUAL_PLAN_ID = "01930000-0000-7000-8000-000000000004"
+
+
+def _seed_manual_plan(db_path: Path) -> None:
+    """A plan whose single item is a manual (not auto-installable) dependency."""
+    with Database(db_path) as db:
+        run_migrations(db)
+        created = datetime.now(UTC)
+        items = [
+            {
+                "name": "aide",
+                "action": "manual",
+                "packages": [],
+                "expected_command": None,
+                "config_dropin": None,
+                "service_actions": [],
+                "permission_actions": [],
+                "post_install_hooks": [],
+                "manual_reason": "AUR-only",
+                "manual_instructions": "paru -S aide",
+            }
+        ]
+        db.execute(
+            "INSERT INTO pending_dep_plans (plan_id, created_at, created_by, distro, "
+            "package_manager, items_json, estimated_disk_mb, expires_at, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                _MANUAL_PLAN_ID,
+                created,
+                "test",
+                "arch",
+                "pacman",
+                json.dumps(items),
+                0,
+                created + timedelta(hours=1),
+                "pending",
+            ],
+        )
+
+
+def test_apply_plan_never_installs_or_marks_a_manual_item(tmp_path: Path) -> None:
+    db_path = tmp_path / "t.duckdb"
+    _seed_manual_plan(db_path)
+    runner = _Runner({})
+    backend = PacmanBackend(
+        runner=runner,
+        lock_path=tmp_path / "absent.lck",
+        helper_command=["__in_process__"],
+        db_path=db_path,
+    )
+    result = apply_plan(
+        plan_id=_MANUAL_PLAN_ID,
+        db_path=db_path,
+        manifests=load_packaged_manifests(),
+        backend=backend,
+        runner=runner,
+        chown=False,
+    )
+    assert result.ok is True
+    assert not any(call[:2] == ("pacman", "-S") for call in runner.calls)
+    # It is NOT installed — dep_state must not claim otherwise.
+    with Database(db_path) as db:
+        rows = db.query("SELECT name FROM dep_state WHERE name = 'aide'").fetchall()
+    assert rows == []

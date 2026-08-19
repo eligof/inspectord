@@ -7,7 +7,6 @@ optional_when:
   profiles: []
 distro_packages:
   arch: []
-  cachyos: []
 service:
   systemd_unit: systemd-journald.service
   enable: true

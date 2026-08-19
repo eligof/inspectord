@@ -60,6 +60,11 @@ def apply_plan(
     items = _load_items(db_path, plan_id)
     notes: list[str] = []
 
+    # `manual` items are advisory: the daemon cannot install those dependencies, so it
+    # must not install, configure, or record any state for them. They stay in the plan
+    # purely so a human reading it knows what is still missing and how to get it.
+    items = [i for i in items if i.action != "manual"]
+
     install_items = [i for i in items if i.action == "install" and i.packages]
     if install_items:
         all_pkgs = [pkg for i in install_items for pkg in i.packages]

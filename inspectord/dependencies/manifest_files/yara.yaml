@@ -7,7 +7,6 @@ optional_when:
   profiles: []
 distro_packages:
   arch: [yara]
-  cachyos: [yara]
 minimum_version: "4.0.0"
 service: null
 config: null

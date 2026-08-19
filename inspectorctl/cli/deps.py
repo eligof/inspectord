@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich import print as rprint
@@ -23,6 +23,20 @@ _DEFAULT_SOCKET = Path("var") / "inspectord.sock"
 
 def _client(socket: Path) -> IpcClient:
     return IpcClient(socket_path=socket)
+
+
+def _installable(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Plan items the daemon can actually act on — `manual` ones it cannot."""
+    return [i for i in items if i.get("action") != "manual"]
+
+
+def _print_manual_item(item: dict[str, Any]) -> None:
+    """Render an `action="manual"` item: we will not install it, the user must."""
+    rprint(f"  [yellow]{item['name']}: MANUAL — inspectord cannot install this for you[/yellow]")
+    if item.get("manual_reason"):
+        rprint(f"      why: {item['manual_reason']}")
+    if item.get("manual_instructions"):
+        rprint(f"      do this: {item['manual_instructions']}")
 
 
 @app.command("status")
@@ -93,12 +107,18 @@ def plan_cmd(
         rprint("[green]Nothing to install — all required deps are already present.[/green]")
         return
     for item in items:
+        if item.get("action") == "manual":
+            _print_manual_item(item)
+            continue
         rprint(
             f"  {item['name']}: install {item['packages']}; "
             f"service_actions={item['service_actions']}; "
             f"dropin={item.get('config_dropin') or '—'}"
         )
-    rprint(f"\n[dim]Run `inspectorctl deps install --plan-id {result['plan_id']}` to apply.[/dim]")
+    if _installable(items):
+        rprint(
+            f"\n[dim]Run `inspectorctl deps install --plan-id {result['plan_id']}` to apply.[/dim]"
+        )
 
 
 @app.command("install")
@@ -118,12 +138,18 @@ def install_cmd(
             {"profile": profile, "flags": flags, "actor": "cli@local"},
         )
         plan_id = plan_result["plan_id"]
-        if not plan_result["items"]:
+        items = plan_result["items"]
+        for item in items:
+            if item.get("action") == "manual":
+                _print_manual_item(item)
+        installable = _installable(items)
+        if not installable:
+            # Manual items are advisory only; applying the plan would do nothing.
             rprint("[green]Nothing to install.[/green]")
             return
         if not yes:
             rprint(f"[yellow]Plan {plan_id} created. Items:[/yellow]")
-            for item in plan_result["items"]:
+            for item in installable:
                 rprint(f"  {item['name']}: install {item['packages']}")
             confirm = typer.confirm("Apply this plan?", default=False)
             if not confirm:

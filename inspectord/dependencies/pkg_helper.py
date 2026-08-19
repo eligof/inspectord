@@ -75,15 +75,27 @@ def _load_plan(db: Database, plan_id: str) -> tuple[str, str, list[DependencyPla
     return distro, pm, items
 
 
-def _validate_against_manifest(items: list[DependencyPlanItem]) -> None:
+def _validate_against_manifest(items: list[DependencyPlanItem], *, distro: str) -> None:
+    """Reject any package the static manifest does not declare for this distro.
+
+    This is the privileged helper's containment boundary: the plan comes from
+    the database, so it is not trusted to name packages on its own.
+
+    The allow-list is keyed on the plan's own distro rather than the previous
+    hardcoded `arch` + `cachyos` union. That union could never match anything
+    but Arch, and its `cachyos` half was dead: `Distro` has no `cachyos`
+    member — CachyOS is mapped onto `arch` at detection — so no plan ever
+    carried that value. `run_helper` already refuses a non-arch plan before
+    reaching here, so this is about not encoding the distro twice, not about
+    fixing a reachable bug.
+    """
     manifests = load_packaged_manifests()
     for item in items:
         if item.name not in manifests:
             raise PkgHelperError(
                 f"plan references unknown dep {item.name!r}; not in static manifest"
             )
-        allowed = set(manifests[item.name].distro_packages.get("arch", []))
-        allowed |= set(manifests[item.name].distro_packages.get("cachyos", []))
+        allowed = set(manifests[item.name].distro_packages.get(distro, []))
         for pkg in item.packages:
             if pkg not in allowed:
                 raise PkgHelperError(
@@ -126,7 +138,7 @@ def run_helper(*, plan_id: str, db_path: Path, runner: _Runner | None = None) ->
             raise PkgHelperError(f"helper only handles pacman, plan says {pm!r}")
         if distro != "arch":
             raise PkgHelperError(f"pacman backend requires arch family; got distro={distro!r}")
-        _validate_against_manifest(items)
+        _validate_against_manifest(items, distro=distro)
 
         refresh = runner.run(["pacman", "-Sy"])
         _audit(
