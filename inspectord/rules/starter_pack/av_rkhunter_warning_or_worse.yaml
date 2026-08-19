@@ -19,6 +19,19 @@ why: |
   Severity is `medium` rather than `high` on purpose: measured on this host
   (rkhunter 1.4.6, Arch), a healthy machine produces five warnings per scan —
   see the false positives. Read the warning, then decide.
+
+  KNOW WHAT THIS COSTS YOU, because rkhunter now ships enabled and daily. Those
+  five warnings arrive as **five separate `medium` alerts, every scan** — they
+  do not collapse into one. Measured, not inferred: the dedup key is per
+  finding, so the three `replaced by a script` warnings key on their own file
+  paths and the two that name no path key on their event id (which is unique per
+  event, so they can never dedup at all). And the dedup window is 600s against a
+  86400s scan interval, so nothing from last night is ever in scope tonight.
+  `rkhunter --propupd`, run by you on a machine you believe is clean, retires
+  two of the five; the other three are Arch packaging and stay. If that is not
+  worth the noise to you, set `enabled = false` for rkhunter rather than
+  disabling this rule — a rule that fires on nothing you look at is worse than a
+  scanner you decided not to run.
 false_positives:
   - "Arch ships /usr/bin/egrep and /usr/bin/fgrep as POSIX-shell wrappers (from `grep`) and /usr/bin/ldd as a bash script (from `glibc`). rkhunter warns that each `has been replaced by a script` — three warnings, every scan, on a perfectly healthy system. Measured here 2026-08-19."
   - "`Checking for prerequisites [ Warning ]` — `The file of stored file properties (rkhunter.dat) does not exist`. The file-properties baseline has never been initialized. inspectord will never initialize it for you: `rkhunter --propupd` rewrites a system baseline file and is forbidden by the scanner design (decision 8), so this warns on every scan until you run it yourself, on a machine you believe is clean."
