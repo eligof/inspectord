@@ -1,0 +1,143 @@
+# inspectord AIDE configuration — install to /var/lib/inspectord/aide/aide.conf
+# ============================================================================
+#
+# Parent spec §30.6: AIDE gets no system config drop-in because "we own its
+# database under /var/lib/inspectord/aide/". This is that config. It is the file
+# the `aide` scanner adapter passes to `aide --config <this> --check`
+# (DEFAULT_CONFIG_PATH in inspectord/workers/scanner_runner/scanners/aide.py).
+#
+# `packaging/scripts/setup.sh` copies this file into place if nothing is there
+# yet, exactly as it does for config.example.toml -> /etc/inspectord/config.toml.
+# It is an example, not a managed file: once installed it is yours to edit, and
+# nothing overwrites it.
+#
+# ---------------------------------------------------------------------------
+# THE DATABASE IS OURS, AND SEPARATE FROM THE DISTRO'S
+# ---------------------------------------------------------------------------
+# The Arch `aide` package ships /etc/aide.conf, /var/lib/aide/ and its own
+# aidecheck.timer + aidecheck.service. Those keep working and are untouched:
+# every path below is under /var/lib/inspectord/aide/, so the two databases
+# never collide and a user who was already running aidecheck.timer does not
+# suddenly find its baseline rewritten by us.
+#
+# ---------------------------------------------------------------------------
+# WHAT YOU STILL HAVE TO DO — inspectord will NOT do it for you
+# ---------------------------------------------------------------------------
+# `aide --init` writes a baseline of the machine as it is RIGHT NOW. A daemon
+# that runs it on your behalf silently certifies whatever is already on the
+# disk, including anything that was there before you installed inspectord. So
+# it is your call, on a machine you believe is clean:
+#
+#     sudo aide --config /var/lib/inspectord/aide/aide.conf --init
+#     sudo mv /var/lib/inspectord/aide/aide.db.new \
+#             /var/lib/inspectord/aide/aide.db
+#
+# Until then the adapter reports `scan_skipped` with reason `database_missing`
+# every scheduled cycle — never a failure, and never silence.
+#
+# After a deliberate system change (a pacman -Syu, say) the next check reports
+# everything that moved. Re-baseline the same way; there is no `--update` step
+# here, because updating a database on a schedule is how an integrity checker
+# quietly stops checking anything.
+#
+# ---------------------------------------------------------------------------
+# WHAT THE ADAPTER NEEDS FROM THIS FILE — do not change these four
+# ---------------------------------------------------------------------------
+#   report_url=stdout          the adapter parses stdout; a file: or syslog:
+#                              URL would leave it with an empty report and a
+#                              nonzero exit it cannot explain.
+#   report_format=plain        the parser is written against the plain report.
+#                              `json` would parse to zero findings.
+#   report_grouped=yes         the parser is section-driven: it keys off the
+#                              "Added entries:" / "Removed entries:" /
+#                              "Changed entries:" headers.
+#   report_level               must be at least `list_entries`, or the report
+#                              carries counts but no paths.
+#
+# ---------------------------------------------------------------------------
+# AIDE 0.19 PREDEFINES ALMOST NOTHING
+# ---------------------------------------------------------------------------
+# The only built-in groups are R, L, >, H, X and E (`aide --version` lists
+# them). `NORMAL`, `PERMS`, `DATAONLY` and friends are NOT built in — they are
+# conventions that distro configs happen to define. A rule naming an undefined
+# group is a hard config error:
+#
+#     ERROR: aide.conf:20: group 'NORMAL' is not defined (line: '/usr/bin NORMAL')
+#
+# So every group used below is defined below. Group names may contain only
+# A-Za-z0-9 (no underscores), hence the run-together names.
+
+# --- database -------------------------------------------------------------
+database_in=file:/var/lib/inspectord/aide/aide.db
+database_out=file:/var/lib/inspectord/aide/aide.db.new
+
+# --- report ---------------------------------------------------------------
+# Report options only take effect if they are set BEFORE report_url.
+report_level=changed_attributes
+report_format=plain
+report_grouped=yes
+report_summarize_changes=yes
+report_base16=yes
+report_url=stdout
+
+# --- groups ---------------------------------------------------------------
+# X is a built-in: acl+xattrs+e2fsattrs (whichever were compiled in).
+InspectordOwnerMode = p+u+g+ftype
+InspectordSize      = s+b
+InspectordHashes    = sha256+sha512
+InspectordEntry     = InspectordOwnerMode+n+i+InspectordSize+l+X
+
+# Everything that must not change between package transactions: contents,
+# ownership, mode, timestamps.
+InspectordStatic    = InspectordEntry+m+c+InspectordHashes
+
+# Directories, deliberately WITHOUT size/mtime/ctime/inode. Otherwise every
+# added or removed file in /etc/foo.d also reports its parent directory as
+# changed — a second finding that says nothing the first one did not. Files
+# appearing in or disappearing from these directories are still fully reported;
+# only "this directory's mtime moved" is dropped.
+InspectordDir       = InspectordOwnerMode+n+l+X
+
+# /boot is very often a vfat ESP, which has no ACLs, no xattrs, no ext2 attrs,
+# no ctime, and synthetic inode numbers that can change across a remount.
+# Checking those there produces noise, not signal — so hashes, size, mtime,
+# ownership and type only.
+InspectordBoot      = InspectordOwnerMode+n+l+InspectordSize+m+InspectordHashes
+
+# --- what we watch --------------------------------------------------------
+# A regular rule matches by path prefix (an implicit ^ is added), so `/usr/bin`
+# covers everything beneath it. The `d`-restricted rule must come first: AIDE
+# picks the deepest matching node, then the first matching rule inside it.
+#
+# Deliberately NOT covered here: /usr/lib and /usr/share. They are far larger
+# than everything below combined and would push a daily hash sweep past the
+# adapter's 1h timeout on a slow disk. Add them if you want and raise
+# `timeout_s` for the aide scanner in config.toml to match:
+#     /usr/lib  d InspectordDir
+#     /usr/lib  InspectordStatic
+
+/usr/bin  d InspectordDir
+/usr/bin  InspectordStatic
+
+/usr/sbin d InspectordDir
+/usr/sbin InspectordStatic
+
+/etc      d InspectordDir
+/etc      InspectordStatic
+
+/boot     d InspectordDir
+/boot     InspectordBoot
+
+# --- exclusions -----------------------------------------------------------
+# `!` excludes the match but still recurses into directories beneath it.
+# Each of these changes on its own, as part of normal operation, and reporting
+# it every night is what trains a person to stop reading the report.
+!/etc/mtab$
+!/etc/resolv\.conf$
+!/etc/adjtime$
+!/etc/ld\.so\.cache$
+!/etc/\.updated$
+!/etc/\.pwd\.lock$
+# pacman's keyring: rewritten on every key refresh, and holds lock files and
+# gpg-agent sockets whose very existence is transient.
+!/etc/pacman\.d/gnupg

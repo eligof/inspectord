@@ -1652,7 +1652,7 @@ class PackageBackend(Protocol):
       "action": "install",
       "packages": ["rkhunter"],
       "expected_command": "pacman -S --noconfirm --needed rkhunter",
-      "config_dropin": "/etc/rkhunter.conf.d/inspectord.conf",
+      "config_dropin": "/etc/rkhunter.d/inspectord.conf",
       "post_install_hooks": ["rkhunter --propupd"]
     }
   ],
@@ -1675,7 +1675,7 @@ Indicative drop-ins (illustrative — final wording lives in the templates):
 | auditd | `/etc/audit/rules.d/inspectord.rules` | Audit rules for `execve`, `connect`, `ptrace`, `finit_module`, `setuid` changes (whatever isn't covered by eBPF). |
 | systemd-journald | `/etc/systemd/journald.conf.d/inspectord.conf` | Ensure persistent storage (`Storage=persistent`). |
 | rsyslog (optional) | `/etc/rsyslog.d/30-inspectord.conf` | Tap `auth.*` to a dedicated file we tail (only when journald not used as the source). |
-| rkhunter | `/etc/rkhunter.conf.d/inspectord.conf` | Whitelist tuning + a log location we read. |
+| rkhunter | `/etc/rkhunter.d/inspectord.conf` | Whitelist tuning + a log location we read. **Corrected 2026-08-19:** this said `rkhunter.conf.d`, which rkhunter never reads. rkhunter 1.4.6 sets `LOCALCONFIGDIR="${configdir}/rkhunter.d"` and globs `*.conf` there; the string `rkhunter.conf.d` does not appear anywhere in the program. |
 | AIDE | (no system config drop-in; we own its database under `/var/lib/inspectord/aide/`) | We invoke aide with our own config file we ship. |
 | ClamAV | `/etc/clamav/clamd.d/inspectord.conf`, `/etc/clamav/freshclam.d/inspectord.conf` | Schedule + paths. |
 | YARA | (no system config) | We ship rulesets under `/var/lib/inspectord/yara/`. |

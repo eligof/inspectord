@@ -23,6 +23,12 @@ single narrow `--enable` group (~6s) and one invalid invocation (~0.4s). Nothing
 here touches the network (design decision 8: no `--update`, ever), writes to
 `/var/log` (the log goes to `tmp_path`) or runs `--propupd`, which would rewrite
 a system baseline file.
+
+The drop-in tests at the bottom are the same shape: they copy
+`/etc/rkhunter.conf` into `tmp_path` and put the rendered
+`rkhunter.d/inspectord.conf` beside the copy, because rkhunter resolves its
+local config directory relative to the config file it was handed. **Nothing is
+ever written under `/etc`.**
 """
 
 from __future__ import annotations
@@ -38,6 +44,8 @@ from typing import Any
 
 import pytest
 
+from inspectord.dependencies.manifest import load_packaged_manifests
+from inspectord.dependencies.sidecar import write_sidecar
 from inspectord.workers.scanner_runner.runner import ScannerRunnerWorker
 from inspectord.workers.scanner_runner.scanners.aide import AideAdapter
 from inspectord.workers.scanner_runner.scanners.base import ScanOutcome
@@ -464,3 +472,114 @@ def test_live_rkhunter_clean_check_is_clean(tmp_path: Path) -> None:
         assert adapter.parse(proc.stdout, proc.stderr) == []
     else:  # this host has something to report even here; then it must be findings
         assert outcome is ScanOutcome.findings, proc.stdout
+
+
+# --------------------------------------------------------------------------
+# The rkhunter drop-in -- root only, and never installed into /etc
+# --------------------------------------------------------------------------
+
+
+def _rkhunter_lab(tmp_path: Path) -> Path:
+    """A private copy of /etc/rkhunter.conf, so the drop-in can be exercised.
+
+    rkhunter looks for its local config directory BESIDE the config file it was
+    given (`${configdir}/rkhunter.d`), so pointing `--configfile` at a copy under
+    `tmp_path` makes `tmp_path/rkhunter.d/` the include directory. Nothing under
+    /etc is created, read-modified or removed: the host stays exactly as it was,
+    which is the only way to test a drop-in that ships as a manual step.
+    """
+    lab = tmp_path / "rkh"
+    lab.mkdir()
+    conf = lab / "rkhunter.conf"
+    shutil.copyfile("/etc/rkhunter.conf", conf)
+    return conf
+
+
+def _script_warnings(stdout: str) -> set[str]:
+    """The paths rkhunter reported as "replaced by a script"."""
+    return {
+        f.path
+        for f in RkhunterAdapter().parse(stdout, "")
+        if f.path and "replaced by a script" in (f.message or "")
+    }
+
+
+@requires_root_rkhunter
+def test_live_rkhunter_dropin_suppresses_only_the_script_replacement_warnings(
+    tmp_path: Path,
+) -> None:
+    """The whole justification for shipping the drop-in, measured end to end.
+
+    Two real `--enable properties` runs against the real binary, identical apart
+    from the presence of `rkhunter.d/inspectord.conf` rendered from the real
+    manifest and the real template. The assertions pin BOTH halves of the claim
+    the shipped file makes about itself:
+
+    * the three Arch shell-wrapper warnings go away, and
+    * nothing else does -- the missing-`rkhunter.dat` warning and the standing
+      `--propupd` notice survive, because only `rkhunter --propupd` retires
+      those and inspectord will never run it (design decision 8 forbids scanner
+      database updates; a baseline is the user's call).
+
+    Measured on a healthy Arch/CachyOS host: 5 warnings before, 2 after.
+    """
+    manifest = load_packaged_manifests()["rkhunter"]
+    assert manifest.config is not None and manifest.config.dropin is not None
+
+    conf = _rkhunter_lab(tmp_path)
+    base = {"configfile": str(conf), "enable": ["properties"]}
+
+    before = _run_rkhunter({**base, "logfile": str(tmp_path / "before.log")}, timeout_s=600.0)
+    scripted = _script_warnings(before.stdout)
+    if not scripted:
+        pytest.skip("this host reports no script-replacement warnings to suppress")
+
+    include_dir = conf.parent / "rkhunter.d"
+    include_dir.mkdir()
+    write_sidecar(manifest, include_dir=include_dir, chown=False)
+
+    after = _run_rkhunter({**base, "logfile": str(tmp_path / "after.log")}, timeout_s=600.0)
+
+    # The drop-in was actually read -- otherwise this test proves nothing.
+    assert "rkhunter.d" in (tmp_path / "after.log").read_text(errors="replace")
+
+    # Only whitelisted paths lost their warning; a non-whitelisted one must not.
+    whitelisted = {"/usr/bin/egrep", "/usr/bin/fgrep", "/usr/bin/ldd"}
+    assert _script_warnings(after.stdout) == scripted - whitelisted
+
+    # Everything that is not a script-replacement warning is untouched, so the
+    # rkhunter.dat + --propupd pair still reaches the user.
+    def _other(stdout: str) -> list[str]:
+        return sorted(
+            f.indicator_value
+            for f in RkhunterAdapter().parse(stdout, "")
+            if "replaced by a script" not in (f.message or "")
+        )
+
+    assert _other(after.stdout) == _other(before.stdout)
+    assert _other(after.stdout), "expected the un-suppressible baseline warnings to remain"
+
+
+@requires_root_rkhunter
+def test_live_rkhunter_accepts_the_dropin_as_valid_config(tmp_path: Path) -> None:
+    """`rkhunter --config-check` must exit 0 with our drop-in in place.
+
+    This is the manifest's `validate_cmd`. Nothing executes it today (no code
+    path reads `ConfigSpec.validate_cmd`), so the check lives here instead of
+    being an inert claim in a YAML file.
+    """
+    manifest = load_packaged_manifests()["rkhunter"]
+    conf = _rkhunter_lab(tmp_path)
+    include_dir = conf.parent / "rkhunter.d"
+    include_dir.mkdir()
+    write_sidecar(manifest, include_dir=include_dir, chown=False)
+
+    proc = subprocess.run(
+        ["rkhunter", "--config-check", "--configfile", str(conf)],
+        capture_output=True,
+        text=True,
+        timeout=300.0,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr

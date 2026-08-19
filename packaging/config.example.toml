@@ -96,16 +96,21 @@ module = "inspectord.workers.persistence_snapshotter"
 # YARA skip daily and only rkhunter actually scans.
 #
 # What you still have to do by hand, once, per host:
-#   aide     Write /var/lib/inspectord/aide/aide.conf (database_in,
-#            database_out, report_url=stdout, plus the trees to watch), then
-#            `aide --config /var/lib/inspectord/aide/aide.conf --init` on a
-#            machine you believe is clean and move database_out into place.
-#            Until then: scan_skipped "config_missing" (or "database_missing").
+#   aide     We now ship the config: packaging/aide.conf.example, installed to
+#            /var/lib/inspectord/aide/aide.conf by packaging/scripts/setup.sh.
+#            It watches /usr/bin, /usr/sbin, /etc and /boot, keeps its database
+#            out of the distro's /var/lib/aide, and reports to stdout. You still
+#            build the baseline yourself, on a machine you believe is clean:
+#              sudo aide --config /var/lib/inspectord/aide/aide.conf --init
+#              sudo mv /var/lib/inspectord/aide/aide.db{.new,}
+#            Until the config is installed: scan_skipped "config_missing".
+#            Until the baseline exists:     scan_skipped "database_missing".
 #   yara     Put .yar/.yara rulesets in /var/lib/inspectord/yara.
 #            Until then: scan_skipped "rules_missing".
-#   rkhunter `rkhunter --propupd`, on a machine you believe is clean, to create
-#            the file-properties baseline. Until then rkhunter warns about the
-#            missing rkhunter.dat on every scan.
+#   rkhunter Install the drop-in we ship (see below), then `rkhunter --propupd`,
+#            on a machine you believe is clean, to create the file-properties
+#            baseline. Until then rkhunter warns about the missing rkhunter.dat
+#            on every scan.
 #
 # Cost of the rkhunter default on a healthy Arch/CachyOS box, measured end to
 # end: five warnings per scan (the egrep/fgrep/ldd shell-wrapper warnings, the
@@ -114,8 +119,19 @@ module = "inspectord.workers.persistence_snapshotter"
 # key is per finding -- the file path, or the event id when the warning names no
 # path, and an event id can never dedup at all -- and the dedup window is 600s
 # against a daily interval. They are enumerated in
-# av_rkhunter_warning_or_worse.yaml's false_positives. `--propupd` retires two;
-# set `enabled = false` here if the rest are not worth the noise to you.
+# av_rkhunter_warning_or_worse.yaml's false_positives.
+#
+# Two manual steps retire all five, and both are yours to take:
+#   1. Install the drop-in rendered from
+#      inspectord/dependencies/templates/rkhunter/inspectord.conf.j2 to
+#      /etc/rkhunter.d/inspectord.conf (NOT /etc/rkhunter.conf.d/ -- rkhunter
+#      1.4.6 does not read that path). It whitelists the three Arch shell
+#      wrappers for the SCRIPT-REPLACEMENT check ONLY; their hashes are still
+#      compared once a baseline exists. Measured: 5 warnings -> 2.
+#   2. `rkhunter --propupd`. Measured: the remaining 2 -> 0.
+# Nothing in inspectord performs either step: writing a system config and
+# certifying the current disk as the baseline are both the user's calls.
+# Set `enabled = false` here if the noise is not worth it to you meanwhile.
 #
 # See docs/superpowers/specs/2026-08-19-scanner-runner-design.md.
 [[workers]]

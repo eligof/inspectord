@@ -1,0 +1,73 @@
+# inspectord-managed rkhunter drop-in — managed file, do not edit.
+#
+# WHERE THIS GOES: /etc/rkhunter.d/inspectord.conf
+#
+# rkhunter 1.4.6 reads every `*.conf` in a directory named `rkhunter.d` that
+# sits BESIDE its main config file — so /etc/rkhunter.d/ for /etc/rkhunter.conf.
+# It is NOT `/etc/rkhunter.conf.d/`, which parent spec §30.6 names: rkhunter
+# never looks there. Verified two ways against the installed 1.4.6:
+#   * /usr/bin/rkhunter sets `LOCALCONFIGDIR="${configdir}/rkhunter.d"` and then
+#     globs `${LOCALCONFIGDIR}/*.conf` (and skips symlinks and unreadable files);
+#   * a live run logs `Info: Using local configuration directory
+#     '<dir>/rkhunter.d': 1 file found`.
+# The header of /etc/rkhunter.conf says the same in prose.
+#
+# WHY: on Arch and CachyOS these three files genuinely ARE shell scripts.
+# /usr/bin/egrep and /usr/bin/fgrep are POSIX shell wrappers around `grep -E` /
+# `grep -F`, and /usr/bin/ldd is a bash script. rkhunter's file-properties test
+# reports each as "has been replaced by a script", which is true and, here,
+# entirely expected — three `medium` alerts every single night that can never be
+# resolved, because the distro is not going to stop shipping wrappers.
+#
+# ============================ READ THIS ============================
+# WHAT SCRIPTWHITELIST SUPPRESSES — and, more importantly, what it does NOT.
+#
+# It suppresses ONE check, the "script replacement" check, for ONLY the exact
+# paths listed below. It is not a general exemption and it does not remove these
+# files from monitoring.
+#
+# Evidence, from /usr/bin/rkhunter (1.4.6) itself. SCRIPTWHITELIST is consulted
+# at exactly one place in the whole program, inside the `if [ $SKIP_SCRIPT -eq
+# 0 ]` block that implements the script-replacement check:
+#
+#     if [ -n "`echo \"${SCRIPTWHITELIST}\" | grep \"^${FNAMEGREP}$\"`" ]; then
+#             WL_FILE="whitelisted"
+#             WHITELIST_RESULT="${WHITELIST_RESULT} script"
+#     fi
+#     if [ -z "${WL_FILE}" ]; then
+#             ... run the `file` command and, if it says "script",
+#                 TEST_RESULT="${TEST_RESULT} script"
+#     fi
+#
+# A match therefore does two things and nothing else: it skips the `file`
+# invocation, and it appends " script" to WHITELIST_RESULT — a variable that is
+# only ever written to the log at verbose level, never to a warning. The hash,
+# permission, uid, gid, inode, size, mtime and symlink-target comparisons are
+# separate blocks that append to TEST_RESULT independently, and rkhunter warns
+# whenever TEST_RESULT is non-empty. Each of those has its OWN whitelist
+# (ATTRWHITELIST, WRITEWHITELIST, IMMUTWHITELIST) that this file does not touch.
+#
+# A live run confirms the scoping in the log, per file:
+#     Info: Found file '/usr/bin/egrep': it is whitelisted for the
+#           'script replacement' check.
+#
+# So: if someone replaces /usr/bin/ldd with a malicious script, rkhunter will
+# still report it — as a CHANGED HASH, not as a script replacement. That
+# fallback only exists once a baseline exists. `/var/lib/rkhunter/db/rkhunter.dat`
+# is NOT shipped by the Arch package, and inspectord will never create it
+# (`rkhunter --propupd` certifies the machine as it is right now — that is the
+# user's call, not a daemon's). Until you run `rkhunter --propupd` on a machine
+# you believe is clean, the properties comparison does not run at all and these
+# three files are effectively unmonitored by rkhunter.
+#
+# WHAT THIS FILE DOES NOT SUPPRESS: the two remaining warnings on a stock host —
+# the missing rkhunter.dat baseline and rkhunter's standing --propupd
+# responsibility notice. Measured on a healthy Arch/CachyOS box with
+# `--check --enable properties --report-warnings-only`: 5 warnings without this
+# file, 2 with it. Only `rkhunter --propupd` retires the other two.
+# ==================================================================
+#
+# `rkhunter --config-check` exits 0 with this file in place (measured).
+SCRIPTWHITELIST=/usr/bin/egrep
+SCRIPTWHITELIST=/usr/bin/fgrep
+SCRIPTWHITELIST=/usr/bin/ldd
