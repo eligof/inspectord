@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from inspectord.state.baseline import capture_baseline
@@ -14,6 +15,8 @@ from inspectord.state.ipc_handlers import (
     handle_list_listeners,
     handle_list_persistence,
     handle_list_processes,
+    handle_list_scan_findings,
+    handle_list_scan_runs,
     handle_list_services,
 )
 from inspectord.storage.db import Database
@@ -434,3 +437,230 @@ def test_capture_baseline_handler(tmp_path: Path) -> None:
     _seed_service(db_path, "sshd.service", "active")
     result = handle_capture_baseline(params={"kind": "service"}, db_path=db_path)
     assert result["captured"] == 1
+
+
+# -- scanner panel (plan 2026-08-20-scanner-panel §4) ---------------------------
+
+
+def _seed_scan_run(db_path: Path, **cols: object) -> None:
+    row: dict[str, object] = {
+        "run_id": "run-1",
+        "scanner": "aide",
+        "status": "success",
+        "reason": None,
+        "exit_code": 0,
+        "duration_s": 12.5,
+        "finding_count": 0,
+        "findings_dropped": 0,
+        "truncated": False,
+        "output_truncated": False,
+        "output_excerpt": None,
+        "started_at": datetime(2026, 8, 20, 2, 0, 0),
+        "completed_at": datetime(2026, 8, 20, 2, 0, 12),
+        "last_event_id": "e1",
+    }
+    row.update(cols)
+    names = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    with Database(db_path) as db:
+        db.execute(f"INSERT INTO scan_run ({names}) VALUES ({marks})", list(row.values()))
+
+
+def _seed_finding_event(db_path: Path, event_id: str, payload: dict[str, object]) -> None:
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO events_enriched (event_id, ts, kind, module, action, severity, "
+            "payload_json) VALUES (?, ?, 'event', 'scanner_runner', 'scan_finding', 'low', ?)",
+            [event_id, datetime(2026, 8, 20, 2, 0, 5), json.dumps(payload)],
+        )
+
+
+def test_list_scan_runs_empty(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    result = handle_list_scan_runs(params={}, db_path=db_path)
+    assert result["scanners"] == []
+
+
+def test_list_scan_runs_returns_only_the_latest_run_per_scanner(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_scan_run(db_path, run_id="old", started_at=datetime(2026, 8, 19, 2, 0, 0))
+    _seed_scan_run(db_path, run_id="new", started_at=datetime(2026, 8, 20, 2, 0, 0))
+    _seed_scan_run(db_path, run_id="rk", scanner="rkhunter")
+    result = handle_list_scan_runs(params={}, db_path=db_path)
+    by_scanner = {s["scanner"]: s for s in result["scanners"]}
+    assert set(by_scanner) == {"aide", "rkhunter"}
+    assert by_scanner["aide"]["run_id"] == "new"
+
+
+def test_list_scan_runs_reports_a_successful_run(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_scan_run(db_path, finding_count=4)
+    item = handle_list_scan_runs(params={}, db_path=db_path)["scanners"][0]
+    assert item["state"] == "success"
+    assert item["finding_count"] == 4
+    assert item["duration_s"] == 12.5
+    assert item["started_at"] == "2026-08-20T02:00:00"
+
+
+def test_list_scan_runs_reports_a_failed_run_with_its_reason(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_scan_run(
+        db_path,
+        status="failure",
+        reason="timeout",
+        exit_code=None,
+        output_excerpt="aide: IO error",
+    )
+    item = handle_list_scan_runs(params={}, db_path=db_path)["scanners"][0]
+    assert item["state"] == "failure"
+    assert item["reason"] == "timeout"
+    assert item["output_excerpt"] == "aide: IO error"
+
+
+def test_list_scan_runs_reports_a_skipped_run_with_its_reason(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_scan_run(
+        db_path,
+        run_id="skip:e9",
+        status="skipped",
+        reason="binary_not_found",
+        exit_code=None,
+        duration_s=None,
+        finding_count=None,
+    )
+    item = handle_list_scan_runs(params={}, db_path=db_path)["scanners"][0]
+    assert item["state"] == "skipped"
+    assert item["reason"] == "binary_not_found"
+    assert item["finding_count"] is None
+
+
+def test_list_scan_runs_keeps_a_recent_running_run_running(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    started = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(seconds=60)
+    _seed_scan_run(
+        db_path,
+        status="running",
+        started_at=started,
+        completed_at=None,
+        duration_s=None,
+        finding_count=None,
+        exit_code=None,
+    )
+    item = handle_list_scan_runs(params={}, db_path=db_path)["scanners"][0]
+    assert item["state"] == "running"
+
+
+def test_list_scan_runs_derives_interrupted_for_a_run_that_never_completed(
+    tmp_path: Path,
+) -> None:
+    db_path = _fresh(tmp_path)
+    started = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(seconds=100_000)
+    _seed_scan_run(
+        db_path,
+        status="running",
+        started_at=started,
+        completed_at=None,
+        duration_s=None,
+        finding_count=None,
+        exit_code=None,
+    )
+    item = handle_list_scan_runs(params={}, db_path=db_path)["scanners"][0]
+    # Never 'success' (only a real scan_completed writes that) and never
+    # 'running' forever — the age bound flips an abandoned run to 'interrupted'.
+    assert item["state"] == "interrupted"
+
+
+def test_list_scan_runs_incomplete_bound_is_configurable(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    started = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(seconds=60)
+    _seed_scan_run(
+        db_path,
+        status="running",
+        started_at=started,
+        completed_at=None,
+        duration_s=None,
+        finding_count=None,
+        exit_code=None,
+    )
+    item = handle_list_scan_runs(params={"incomplete_after_s": 10}, db_path=db_path)["scanners"][0]
+    assert item["state"] == "interrupted"
+
+
+def test_list_scan_findings_empty(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    assert handle_list_scan_findings(params={}, db_path=db_path)["findings"] == []
+
+
+def test_list_scan_findings_decodes_the_event_payload(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    _seed_finding_event(
+        db_path,
+        "f1",
+        {
+            "message": "changed: /etc/passwd",
+            "file": {"path": "/etc/passwd"},
+            "threat": {
+                "indicator": {
+                    "type": "aide_change",
+                    "value": "changed",
+                    "source": "aide",
+                    "severity": "medium",
+                }
+            },
+            "raw": {"scanner": "aide", "run_id": "run-1", "line": "f+++: /etc/passwd"},
+        },
+    )
+    item = handle_list_scan_findings(params={}, db_path=db_path)["findings"][0]
+    assert item["scanner"] == "aide"
+    assert item["run_id"] == "run-1"
+    assert item["path"] == "/etc/passwd"
+    assert item["indicator_type"] == "aide_change"
+    assert item["indicator_value"] == "changed"
+    assert item["scanner_severity"] == "medium"
+    assert item["message"] == "changed: /etc/passwd"
+
+
+def test_list_scan_findings_filters_by_run_ids(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    for i, run_id in enumerate(("run-1", "run-2")):
+        _seed_finding_event(
+            db_path, f"f{i}", {"raw": {"scanner": "aide", "run_id": run_id}, "message": run_id}
+        )
+    result = handle_list_scan_findings(params={"run_ids": ["run-2"]}, db_path=db_path)
+    assert [f["run_id"] for f in result["findings"]] == ["run-2"]
+
+
+def test_list_scan_findings_respects_limit(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    for i in range(5):
+        _seed_finding_event(db_path, f"f{i}", {"raw": {"scanner": "aide", "run_id": "run-1"}})
+    result = handle_list_scan_findings(params={"limit": 2}, db_path=db_path)
+    assert len(result["findings"]) == 2
+
+
+def test_list_scan_findings_survives_a_malformed_payload(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO events_enriched (event_id, ts, kind, module, action, severity, "
+            "payload_json) VALUES ('bad', ?, 'event', 'scanner_runner', 'scan_finding', "
+            "'low', 'not json')",
+            [datetime(2026, 8, 20, 2, 0, 0)],
+        )
+    _seed_finding_event(db_path, "f1", {"raw": {"scanner": "aide", "run_id": "run-1"}})
+    # A row the panel cannot decode is skipped, never fatal — the parser rule in
+    # inspectord/parsers/base.py applied to the read path.
+    result = handle_list_scan_findings(params={}, db_path=db_path)
+    assert [f["scanner"] for f in result["findings"]] == ["aide"]
+
+
+def test_list_scan_findings_ignores_non_finding_events(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO events_enriched (event_id, ts, kind, module, action, severity, "
+            "payload_json) VALUES ('c1', ?, 'event', 'scanner_runner', 'scan_completed', "
+            "'info', ?)",
+            [datetime(2026, 8, 20, 2, 0, 0), json.dumps({"raw": {"scanner": "aide"}})],
+        )
+    assert handle_list_scan_findings(params={}, db_path=db_path)["findings"] == []
