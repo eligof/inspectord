@@ -17,7 +17,7 @@ from inspectord.config import dev_config
 from inspectord.parsers.base import build_event
 from inspectord.schemas.event import Event, EventKind, Severity
 from inspectord.storage.db import Database
-from inspectord.supervisor import Supervisor
+from inspectord.supervisor import PERSIST_FAILURE_STREAK_ALERT, Supervisor
 
 
 def test_supervisor_starts_and_routes_events(tmp_path: Path) -> None:
@@ -255,6 +255,23 @@ def _reverse_shell_event() -> Event:
     )
 
 
+def _state_event(event_id: str, pid: int) -> Event:
+    """A process_start event the projector materializes into process_state."""
+    return Event(
+        ts=datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
+        event_id=event_id,
+        kind=EventKind.event,
+        category=["process"],
+        type=["start"],
+        action="process_start",
+        severity=Severity.info,
+        module="process_collector",
+        process={"pid": pid, "name": "bash", "command_line": "bash -i"},
+        user={"id": "1000"},
+        raw={"source": "ebpf"},
+    )
+
+
 def _fake_worker(lines: list[bytes]) -> Any:
     """A stand-in _WorkerProc whose stdout is a canned byte stream."""
     return SimpleNamespace(
@@ -342,5 +359,86 @@ def test_reader_survives_a_malformed_line_and_reports_it_accurately(
         assert any(e.event_id == ev.event_id for e in seen), (
             "a malformed line stopped the reader from dispatching the next one"
         )
+    finally:
+        sup.stop(timeout=5.0)
+
+
+# --------------------------------------------------------------------------
+# _drain: one failing event must never take the persistence thread with it
+# --------------------------------------------------------------------------
+
+
+def test_drain_keeps_persisting_after_a_persist_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """_persist raising must not kill the only thread that writes storage.
+
+    event_id is a PRIMARY KEY, journal I/O can fail, the disk can fill. An
+    unguarded raise here used to end persistence for the lifetime of the
+    daemon -- silently, with everything else still running.
+    """
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        real_persist = sup._persist  # type: ignore[attr-defined]
+
+        def flaky(ev: Event) -> None:
+            if ev.event_id == "poison-1":
+                raise RuntimeError("disk full")
+            real_persist(ev)
+
+        monkeypatch.setattr(sup, "_persist", flaky)
+
+        with caplog.at_level(logging.ERROR):
+            sup._inject_for_test(_state_event("poison-1", 5551))
+            sup._inject_for_test(_state_event("good-1", 5552))
+
+        deadline = time.monotonic() + 5.0
+        rows: list = []
+        while time.monotonic() < deadline:
+            with Database(cfg.storage.db_path) as db:
+                rows = db.query("SELECT status FROM process_state WHERE pid=5552").fetchall()
+            if rows:
+                break
+            time.sleep(0.05)
+        assert rows == [("running",)], (
+            "the event after the failing one was never persisted -- the drain thread died"
+        )
+        assert "failed to persist" in caplog.text
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def test_drain_reports_a_persistent_persistence_outage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A streak of failures is surfaced as an event, not only logged to a file."""
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+
+        def always_fails(_ev: Event) -> None:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(sup, "_persist", always_fails)
+        seen: list[Event] = []
+        sup.attach_listener(seen.append)
+
+        for i in range(PERSIST_FAILURE_STREAK_ALERT):
+            sup._inject_for_test(_state_event(f"poison-{i}", 5600 + i))
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not any(
+            e.action == "persistence_failing" for e in seen
+        ):
+            time.sleep(0.05)
+        outage = [e for e in seen if e.action == "persistence_failing"]
+        assert outage, "a dead persistence layer was never reported to the user"
+        assert outage[0].severity is Severity.high
+        assert outage[0].raw["consecutive_failures"] == PERSIST_FAILURE_STREAK_ALERT
     finally:
         sup.stop(timeout=5.0)

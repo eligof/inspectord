@@ -58,6 +58,13 @@ RESTART_HEALTHY_AFTER_S = 60.0
 # supervisor gives up and leaves the worker dead.
 RESTART_MAX_ATTEMPTS = 8
 
+# --- persistence resilience -------------------------------------------------
+# Consecutive _persist failures before the supervisor stops treating them as
+# bad luck (a duplicate event_id, a transient DuckDB conflict) and tells the
+# user that persistence itself is down. Emitted once per failure streak: a
+# single success resets the counter, so a healthy daemon never sees it.
+PERSIST_FAILURE_STREAK_ALERT = 10
+
 
 def backoff_delay(
     attempt: int,
@@ -270,18 +277,62 @@ class Supervisor:
         threading.Thread(target=self._drain, args=(store_sub,), daemon=True).start()
 
     def _drain(self, sub) -> None:  # type: ignore[no-untyped-def]
+        """Persist every routed event; the ONLY thread that writes storage.
+
+        _persist raises for ordinary reasons -- events_enriched.event_id is a
+        PRIMARY KEY so a duplicate id conflicts, journal I/O fails, the disk
+        fills, DuckDB hits a transaction conflict. Letting any of those escape
+        would kill this thread, and with it every subsequent write to the
+        database and the journal, silently: the daemon keeps running, workers
+        keep emitting, and nothing is ever stored again.
+        """
+        persist_failures = 0
         while not self._stop.is_set():
             try:
                 ev = sub.get_nowait()
             except QueueEmpty:
                 time.sleep(0.01)
                 continue
-            self._persist(ev)
+            try:
+                self._persist(ev)
+            except Exception as exc:
+                persist_failures += 1
+                log.error(
+                    "failed to persist %s event %s from %s (%d in a row): %r",
+                    ev.action,
+                    ev.event_id,
+                    ev.module,
+                    persist_failures,
+                    exc,
+                )
+                if persist_failures == PERSIST_FAILURE_STREAK_ALERT:
+                    self._report_persistence_down(persist_failures, exc)
+            else:
+                persist_failures = 0
             for fn in list(self._listeners):
                 try:
                     fn(ev)
                 except Exception as exc:
                     log.warning("listener raised: %r", exc)
+
+    def _report_persistence_down(self, failures: int, exc: BaseException) -> None:
+        """Surface a persistence outage as an event instead of a log line nobody reads.
+
+        The event cannot be stored either -- persistence is what is broken --
+        but it still reaches the alert path and the live listeners (IPC, tray),
+        which is the whole point: a monitor that has silently stopped recording
+        is exactly the blind spot the user needs told about.
+        """
+        self._emit_supervisor_event(
+            action="persistence_failing",
+            severity="high",
+            type_=["error"],
+            message=(
+                f"failed to persist {failures} consecutive events; "
+                "the database and journal are not being written"
+            ),
+            raw={"consecutive_failures": failures, "error": repr(exc)},
+        )
 
     def _persist(self, ev: Event) -> None:
         payload = ev.model_dump_json()
