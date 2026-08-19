@@ -13,6 +13,7 @@ overrides so the suite never waits real seconds.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -305,6 +306,40 @@ def test_stop_during_a_restart_window_does_not_resurrect(
     assert sup._monitor_thread is not None and not sup._monitor_thread.is_alive()
     assert sup._procs[0].proc.pid == dead_pid, "monitor resurrected a worker during shutdown"
     assert not collector.actions("worker_restarted")
+
+
+def test_stop_is_bounded_even_with_stuck_reader_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """stop(timeout=T) must finish in ~T no matter how many readers are wedged.
+
+    Joining each reader thread on a flat per-thread timeout costs 2 seconds per
+    worker on top of the caller's budget; the joins have to come out of the
+    deadline instead.
+    """
+    mod = _install_worker(tmp_path, monkeypatch, "sup_restart_stuck", _LIVES_SRC)
+    wedged = threading.Event()
+
+    def blocking_reader(self: Supervisor, wp: Any) -> None:
+        wedged.wait(60.0)
+
+    monkeypatch.setattr(Supervisor, "_read_stdout", blocking_reader)
+    monkeypatch.setattr(Supervisor, "_read_stderr", blocking_reader)
+
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = [WorkerSpec(name=f"stuck{i}", module=mod, config={}) for i in range(4)]
+    sup = Supervisor(cfg, poll_interval_s=0.02)
+    sup.start()
+    try:
+        assert len(sup._procs) == 4
+        started = time.monotonic()
+        sup.stop(timeout=1.0)
+        elapsed = time.monotonic() - started
+        # 4 workers x 2 wedged readers would be 8s of flat joins.
+        assert elapsed < 2.0, f"stop() overran its budget: {elapsed:.2f}s"
+        assert all(wp.proc.poll() is not None for wp in sup._procs)
+    finally:
+        wedged.set()
 
 
 def test_stop_without_start_is_harmless(tmp_path: Path) -> None:

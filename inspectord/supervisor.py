@@ -216,30 +216,48 @@ class Supervisor:
                     log.warning("alert listener raised: %r", exc)
 
     def stop(self, timeout: float = 5.0) -> None:
+        """Shut everything down within roughly ``timeout`` seconds.
+
+        Every blocking step below is clamped to what is left of the budget, so
+        a stuck reader thread or a monitor caught mid-respawn delays shutdown
+        but cannot hang it.
+        """
         deadline = time.monotonic() + timeout
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         # Order matters: the monitor has to be stopped BEFORE any worker is
         # terminated, or it would helpfully restart them all mid-shutdown.
         self._stop.set()
         monitor = self._monitor_thread
         if monitor is not None:
-            monitor.join(timeout=min(max(0.0, deadline - time.monotonic()), 2.0))
+            monitor.join(timeout=min(remaining(), 2.0))
             if monitor.is_alive():
                 log.warning("worker monitor did not stop within the shutdown budget")
         # Taking the lock here also closes the last respawn window: a monitor
         # caught mid-respawn holds it, so the snapshot below sees the new proc.
-        with self._procs_lock:
+        # If it cannot be taken in time we snapshot anyway -- list() is atomic,
+        # and _respawn kills its own child when it finds _stop set after the
+        # spawn, so a proc that lands after this snapshot still gets cleaned up.
+        locked = self._procs_lock.acquire(timeout=remaining()) if remaining() else False
+        try:
             procs = list(self._procs)
+        finally:
+            if locked:
+                self._procs_lock.release()
+        if not locked:
+            log.warning("shutdown budget expired waiting for the worker list lock")
         for wp in procs:
             with contextlib.suppress(Exception):
                 wp.proc.terminate()
         for wp in procs:
-            remaining = max(0.0, deadline - time.monotonic())
             try:
-                wp.proc.wait(timeout=remaining)
+                wp.proc.wait(timeout=remaining())
             except subprocess.TimeoutExpired:
                 wp.proc.kill()
             for t in wp.threads:
-                t.join(timeout=1.0)
+                t.join(timeout=remaining())
         self._journal.close()
         self._db.close()
 
@@ -396,6 +414,14 @@ class Supervisor:
                 return
             new.restarts = attempt
             self._procs[index] = new
+            if self._stop.is_set():
+                # stop() raced past the pre-spawn check above and may already
+                # have snapshotted the worker list: kill our own child rather
+                # than leave it running past shutdown.
+                with contextlib.suppress(Exception):
+                    new.proc.terminate()
+                log.info("discarded respawn of worker %s: shutting down", old.spec.name)
+                return
         log.info("restarted worker %s (attempt %d after %.2fs)", old.spec.name, attempt, delay)
         self._emit_supervisor_event(
             action="worker_restarted",
