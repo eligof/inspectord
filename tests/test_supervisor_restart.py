@@ -98,6 +98,21 @@ sys.stdin.readline()
 time.sleep(3600)
 """
 
+# Exits immediately the first time it is spawned, then stays up forever. Lets a
+# test get a *live* respawned child, which is what a shutdown leak looks like.
+_DIES_ONCE_THEN_LIVES_SRC = """
+import os
+import sys
+import time
+sys.stdin.readline()
+marker = os.path.join(os.environ["SUP_MARKER_DIR"], "spawned")
+first = not os.path.exists(marker)
+open(marker, "a").close()
+if first:
+    sys.exit(3)
+time.sleep(3600)
+"""
+
 
 def _install_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, src: str) -> str:
     """Write a throwaway worker module and make `python -m <name>` find it."""
@@ -340,6 +355,53 @@ def test_stop_is_bounded_even_with_stuck_reader_threads(
         assert all(wp.proc.poll() is not None for wp in sup._procs)
     finally:
         wedged.set()
+
+
+def test_stop_while_the_monitor_is_inside_a_respawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hard interleaving: stop() lands while the spawn is already underway.
+
+    The monitor is past _respawn's stop check and holding _procs_lock when
+    stop() is called, and the spawn only completes afterwards. Neither the
+    shutdown budget nor the no-live-workers guarantee may give way.
+    """
+    monkeypatch.setenv("SUP_MARKER_DIR", str(tmp_path))
+    mod = _install_worker(tmp_path, monkeypatch, "sup_restart_inside", _DIES_ONCE_THEN_LIVES_SRC)
+    sup = _supervisor(tmp_path, mod)
+    collector = _Collector()
+    sup.attach_listener(collector)
+    sup.start()
+
+    inside = threading.Event()  # the monitor has entered the respawn's spawn
+    release = threading.Event()  # ...and the test lets it finish
+    spawned: list[Any] = []
+    real_spawn = sup._start_worker_proc
+
+    def gated(spec: WorkerSpec) -> Any:
+        inside.set()
+        assert release.wait(30.0)
+        wp = real_spawn(spec)
+        spawned.append(wp)
+        return wp
+
+    monkeypatch.setattr(sup, "_start_worker_proc", gated)
+    try:
+        assert inside.wait(20.0), "the monitor never entered a respawn"
+        started = time.monotonic()
+        sup.stop(timeout=1.0)
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, f"stop() overran its budget: {elapsed:.2f}s"
+    finally:
+        release.set()
+
+    assert _wait_for(lambda: bool(spawned), timeout=20.0), "the gated respawn never completed"
+    child = spawned[0].proc
+    assert _wait_for(lambda: child.poll() is not None, timeout=20.0), (
+        "the respawned worker outlived shutdown"
+    )
+    assert all(wp.proc.poll() is not None for wp in sup._procs)
+    assert not collector.actions("worker_restarted")
 
 
 def test_stop_without_start_is_harmless(tmp_path: Path) -> None:
