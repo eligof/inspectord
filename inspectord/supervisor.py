@@ -442,7 +442,11 @@ class Supervisor:
                     log.warning("reader thread for %s did not exit at EOF", wp.spec.name)
         if stuck:
             # Closing a pipe out from under a thread still blocked in readline
-            # would kill that thread with a ValueError; leave the fds to stop().
+            # would kill that thread with a ValueError, so leave the fds alone.
+            # stop() will not pick them up either: a respawn replaces this
+            # _WorkerProc in _procs and the shutdown snapshot only sees the
+            # current generation. They are released when the straggler thread
+            # finally returns and drops the last reference to the dead Popen.
             return
         for stream in (wp.proc.stdin, wp.proc.stdout, wp.proc.stderr):
             if stream is not None:
