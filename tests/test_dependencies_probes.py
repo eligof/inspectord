@@ -146,3 +146,28 @@ def test_journal_pattern_recent_missing() -> None:
     )
     probe = HealthProbe(kind=ProbeKind.journal_pattern_recent, pattern="needle", window_s=60)
     assert run_probe(probe, runner=runner).ok is False
+
+
+def test_file_exists_probe_sees_a_binary_the_caller_may_not_execute(tmp_path: Path) -> None:
+    """Why rkhunter uses `file_exists`: /usr/bin/rkhunter is 0700 root:root.
+
+    `binary_exists_and_runs` gates on ``os.access(X_OK)``, which is false for a file
+    with no execute bits — for root as well as for anyone else — so an unprivileged
+    daemon or test run would report a perfectly healthy install as misconfigured.
+    """
+    bin_path = tmp_path / "rkhunter"
+    bin_path.write_text("")
+    bin_path.chmod(0o600)
+
+    not_runnable = run_probe(
+        HealthProbe(kind=ProbeKind.binary_exists_and_runs),
+        binary_paths=[str(bin_path)],
+        runner=_FakeRunner({}),
+    )
+    assert not_runnable.ok is False
+
+    present = run_probe(
+        HealthProbe(kind=ProbeKind.file_exists, path=str(bin_path)),
+        runner=_FakeRunner({}),
+    )
+    assert present.ok is True

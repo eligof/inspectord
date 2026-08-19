@@ -1,0 +1,34 @@
+version: 1.0.0
+name: rkhunter
+description: rkhunter — rootkit checker. Optional periodic scanner; we read its report, never update its database.
+# Spec §30.13 lists rkhunter under "Optional (asked)", not under required deps:
+# a host without it is fully functional, so the planner must never install it
+# unasked. `optional_when` is declarative today — nothing auto-plans optional deps.
+required_when:
+  profiles: []
+optional_when:
+  profiles: [minimal, standard]
+distro_packages:
+  arch: [rkhunter]
+  cachyos: [rkhunter]
+service: null
+# §30.6 wants a drop-in at /etc/rkhunter.conf.d/inspectord.conf. Its contents are
+# the scanner adapter's call, so this stays null until that slice lands.
+config: null
+permissions: null
+verify:
+  binary_paths: [/usr/bin/rkhunter]
+  # /usr/bin/rkhunter is 0700 root:root, so `binary_exists_and_runs` (which gates on
+  # os.access(X_OK) and then runs --version) reports a healthy install as broken for
+  # any non-root caller. Presence is all this manifest can honestly assert; actually
+  # running rkhunter is scanner_runner's job, and it runs as root.
+  health_probe:
+    kind: file_exists
+    path: /usr/bin/rkhunter
+# §30.5's example carries `rkhunter --propupd`. It is a local baseline refresh (not
+# `--update`, which is network and is forbidden outright by the scanner-runner design,
+# decision 8) — but the applier never executes post_install_hooks, so declaring one
+# here would be an inert claim. It belongs with the scanner adapter that needs it.
+post_install_hooks: []
+rollback:
+  remove_dropin: false

@@ -264,3 +264,19 @@ def test_aide_is_planned_as_manual_when_missing(tmp_path: Path) -> None:
     yara = next(i for i in plan.items if i.name == "yara")
     assert yara.action == "install"
     assert yara.packages == ["yara"]
+
+
+def test_optional_only_dep_is_never_auto_planned(tmp_path: Path) -> None:
+    """rkhunter is optional (spec §30.13): missing is fine, we do not plan it."""
+    manifests = load_packaged_manifests()
+    backend = PacmanBackend(runner=_FakeRunner({}), lock_path=tmp_path / "absent.lck")
+    for profile in ("minimal", "standard"):
+        plan = build_plan(
+            manifests=manifests,
+            backend=backend,
+            distro=Distro.arch,
+            profile=profile,
+            flags=set(),
+            created_by="test",
+        )
+        assert "rkhunter" not in {item.name for item in plan.items}

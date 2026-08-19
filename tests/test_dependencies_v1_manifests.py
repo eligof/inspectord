@@ -1,11 +1,11 @@
-"""Tests that the six v1 manifests load and have expected shape."""
+"""Tests that the shipped v1 manifests load and have the expected shape."""
 
 from __future__ import annotations
 
 from inspectord.dependencies.manifest import load_packaged_manifests
 
 
-def test_all_six_v1_manifests_load() -> None:
+def test_all_v1_manifests_load() -> None:
     manifests = load_packaged_manifests()
     expected = {"auditd", "journald", "aide", "yara", "libudev", "ebpf_features"}
     assert set(manifests) >= expected
@@ -53,3 +53,37 @@ def test_yara_stays_auto_installable() -> None:
     m = load_packaged_manifests()["yara"]
     assert m.manual_install is None
     assert m.distro_packages.get("arch", []) == ["yara"]
+
+
+def test_rkhunter_manifest_loads() -> None:
+    assert "rkhunter" in load_packaged_manifests()
+
+
+def test_rkhunter_is_optional_not_required() -> None:
+    """Spec §30.13 lists rkhunter under "Optional (asked)", never under required."""
+    m = load_packaged_manifests()["rkhunter"]
+    assert m.required_when.profiles == []
+    assert "minimal" in m.optional_when.profiles
+
+
+def test_rkhunter_is_auto_installable_from_the_official_repos() -> None:
+    """`pacman -Si rkhunter` resolves (extra) — unlike aide, it needs no manual step."""
+    m = load_packaged_manifests()["rkhunter"]
+    assert m.manual_install is None
+    assert m.distro_packages.get("arch", []) == ["rkhunter"]
+    assert m.distro_packages.get("cachyos", []) == ["rkhunter"]
+
+
+def test_rkhunter_probe_does_not_execute_the_binary() -> None:
+    """/usr/bin/rkhunter is 0700 root:root: probing it by execution fails unprivileged."""
+    m = load_packaged_manifests()["rkhunter"]
+    assert m.verify.health_probe.kind.value == "file_exists"
+    assert m.verify.health_probe.path == "/usr/bin/rkhunter"
+    assert m.verify.version_cmd is None
+
+
+def test_rkhunter_declares_no_post_install_hooks() -> None:
+    """The applier does not execute post_install_hooks; declaring one would be inert."""
+    m = load_packaged_manifests()["rkhunter"]
+    assert m.post_install_hooks == []
+    assert m.config is None
