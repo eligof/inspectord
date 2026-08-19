@@ -22,6 +22,8 @@ dependency manifest pins ``minimum_version: "0.18"``) defines::
     21  file lock error
     22  memory allocation error
     23  thread error
+    24  database error
+    25  received SIGINT, SIGTERM or SIGHUP
 
 So a non-zero status in ``1..7`` means the scan **succeeded and found
 something** — reporting it as a failure would turn every real detection into a
@@ -32,12 +34,16 @@ rather than an enumeration of the error codes: a future AIDE that adds a new
 error code is then reported as a failure (safe) instead of being silently
 misread, while the low-bit range stays exact.
 
-Verified 2026-08-19 against the published AIDE manual page (Debian bookworm
-``aide(1)``, ``EXIT STATUS``): 1/2/4 are additive difference flags and the error
-codes run 14-23.  AIDE is not installed on this machine, so this is the
-documented contract rather than an observation of a local binary — but the
-range check needs no revision: codes 8-13 are unallocated and fall through to
-``failure``, which is the safe direction.
+Verified 2026-08-19 against the **installed** AIDE 0.19.3 (``man aide``,
+``EXIT STATUS``): 1/2/4 are additive difference flags and the error codes run
+14-25 — two more than PR1 recorded, because 0.19 added 24 (database error) and
+25 (killed by SIGINT/SIGTERM/SIGHUP). The range check needed no revision: both
+already fell through to ``failure``, which is the safe direction, as do the
+unallocated codes 8-13. Also measured here: ``--config /nonexistent --check``
+exits 18 and an unknown flag exits 15.
+
+Unlike rkhunter, AIDE needs no output to be classified, so
+``interpret_outcome`` ignores its ``stdout``/``stderr`` arguments deliberately.
 """
 
 from __future__ import annotations
@@ -93,8 +99,19 @@ class AideAdapter:
         config_path = str(config.get("config_path") or DEFAULT_CONFIG_PATH)
         return [self.binary, "--config", config_path, "--check"]
 
-    def interpret_exit(self, code: int) -> ScanOutcome:
-        """Map AIDE's exit bitmask to an outcome. See the module docstring."""
+    def preflight(self, config: Mapping[str, Any]) -> str | None:
+        """Always ready: AIDE's config path is a plain argv value, not a set to expand."""
+        del config
+        return None
+
+    def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome:
+        """Map AIDE's exit bitmask to an outcome. See the module docstring.
+
+        The output is ignored on purpose — AIDE's status says everything, and a
+        verdict must not depend on a report body that embeds attacker-
+        controllable file paths.
+        """
+        del stdout, stderr
         if code == 0:
             return ScanOutcome.clean
         if 1 <= code <= 7:

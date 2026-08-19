@@ -40,11 +40,15 @@ class FakeAdapter:
         self.parse_calls = 0
         self.last_stdout = ""
         self.last_stderr = ""
+        self.preflight_reason: str | None = None
 
     def argv(self, config: Mapping[str, Any]) -> list[str]:
         return list(self._argv)
 
-    def interpret_exit(self, code: int) -> ScanOutcome:
+    def preflight(self, config: Mapping[str, Any]) -> str | None:
+        return self.preflight_reason
+
+    def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome:
         if code == 0:
             return ScanOutcome.clean
         if code == 1:
@@ -375,6 +379,46 @@ def test_missing_binary_emits_scan_skipped_once_per_due_cycle() -> None:
     assert _actions(events) == ["scan_skipped"]
     assert events[0]["raw"]["reason"] == "binary_not_found"
     assert events[0]["raw"]["binary"] == "inspectord-no-such-binary-6f3a1c"
+
+
+def test_preflight_reason_emits_scan_skipped_and_consumes_the_slot() -> None:
+    """A scanner that cannot run yet (YARA with no rulesets) is an explicit skip.
+
+    Not a failed scan and not silence: the reason the adapter gave is what the
+    event carries, so "no rules shipped" never masquerades as a broken scanner.
+    """
+    adapter = FakeAdapter(argv=["sh", "-c", "exit 0"])
+    adapter.preflight_reason = "rules_empty"
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        for _ in range(5):
+            worker.step()
+    finally:
+        worker.teardown()
+
+    events = _events(buf)
+    assert _actions(events) == ["scan_skipped"]
+    assert events[0]["raw"]["reason"] == "rules_empty"
+    assert adapter.parse_calls == 0
+
+
+def test_preflight_raising_is_reported_as_a_skip_not_a_crash() -> None:
+    """Adapters promise not to raise; the runner assumes they will anyway."""
+
+    class ExplodingPreflight(FakeAdapter):
+        def preflight(self, config: Mapping[str, Any]) -> str | None:
+            raise RuntimeError("boom")
+
+    adapter = ExplodingPreflight(argv=["sh", "-c", "exit 0"])
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        worker.step()
+    finally:
+        worker.teardown()
+
+    events = _events(buf)
+    assert _actions(events) == ["scan_skipped"]
+    assert events[0]["raw"]["reason"] == "preflight_error"
 
 
 # --------------------------------------------------------------------------

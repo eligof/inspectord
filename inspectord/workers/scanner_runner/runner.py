@@ -542,6 +542,18 @@ class ScannerRunnerWorker(Worker):
             return
 
         try:
+            # A per-scanner prerequisite the runner cannot know about (YARA with
+            # no rulesets shipped yet, say). An ordinary state like that must be
+            # an explicit skip, not an argv that fails in a confusing way.
+            reason = adapter.preflight(config)
+        except Exception:
+            # Adapters promise not to raise; the runner assumes they will anyway.
+            reason = "preflight_error"
+        if reason is not None:
+            self._skip_slot(name, str(reason), now)
+            return
+
+        try:
             argv = [str(part) for part in adapter.argv(config)]
         except Exception:
             self._skip_slot(name, "argv_error", now)
@@ -650,8 +662,10 @@ class ScannerRunnerWorker(Worker):
         if reason is not None or exit_code is None:
             return ScanOutcome.failure, reason or "no_exit_status"
         try:
-            # Decision 10: never a `code == 0` boolean — the adapter decides.
-            outcome = run.adapter.interpret_exit(int(exit_code))
+            # Decision 10: never a `code == 0` boolean — the adapter decides,
+            # and it decides from the OUTPUT as well as the code, because for
+            # rkhunter exit 1 means both "found something" and "refused to run".
+            outcome = run.adapter.interpret_outcome(int(exit_code), result.stdout, result.stderr)
         except Exception:
             return ScanOutcome.failure, "exit_interpretation_error"
         return outcome, "scanner_error" if outcome is ScanOutcome.failure else None

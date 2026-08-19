@@ -1,15 +1,39 @@
 """Scanner adapter contract (design §4.1).
 
-One adapter per scanner. An adapter knows three things and nothing else:
+One adapter per scanner. An adapter knows four things and nothing else:
 
 * how to invoke its scanner (``argv``),
-* what the scanner's exit status *means* (``interpret_exit``) — never a
-  boolean, see design decision 10,
+* whether the scanner has everything it needs to run at all (``preflight``),
+* what one finished run *means* (``interpret_outcome``) — never a boolean, and
+  never the exit code alone, see design decision 10,
 * how to turn its output into normalized findings (``parse``).
 
 Everything else — scheduling, single-flight, timeouts, process-group cleanup,
 event construction — lives in the runner, so adding a scanner is a small,
 pure-function module with pure-function tests.
+
+**Why ``interpret_outcome`` takes the output and not just the exit code.**
+``man rkhunter``: "rkhunter will return a non-zero exit code if any error or
+warning occurs." Measured on rkhunter 1.4.6: a check with real warnings exits
+1, and a check refused because of an invalid argument *also* exits 1. The exit
+code alone cannot tell a rootkit detection from a scanner that never ran, and
+reporting a refusal as a detection is the exact inverse of the bug decision 10
+exists to prevent. Only the output separates them, so every adapter is handed
+it — AIDE, whose bitmask is self-describing, simply ignores it.
+
+**The outcome principle for output-driven adapters** (rkhunter, YARA):
+
+===================  ===========  =========
+output has findings  exit code    outcome
+===================  ===========  =========
+yes                  anything     findings
+no                   0            clean
+no                   non-zero     failure
+===================  ===========  =========
+
+Parsed findings beat the exit code, so a partly-broken run never *hides* a
+detection; "nothing found and a non-zero code" is the refusal case and is
+always a failure, never a silent ``clean``.
 """
 
 from __future__ import annotations
@@ -78,8 +102,24 @@ class ScannerAdapter(Protocol):
         """Build the argv for one scan. Never a shell string."""
         ...
 
-    def interpret_exit(self, code: int) -> ScanOutcome:
-        """Map the scanner's exit status to an outcome. NEVER a ``code == 0`` boolean."""
+    def preflight(self, config: Mapping[str, Any]) -> str | None:
+        """``None`` when the scanner can run; otherwise a short skip *reason*.
+
+        The binary's presence is the runner's business (``shutil.which``); this
+        is for per-scanner prerequisites the runner cannot know about — YARA
+        with no rulesets shipped yet, for instance. Returning a reason makes
+        that an explicit ``scan_skipped`` event instead of an argv that fails in
+        a confusing way, and it is the same shape decision 14 already uses for a
+        missing binary. MUST NOT raise.
+        """
+        ...
+
+    def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome:
+        """Map one finished run to an outcome. NEVER a ``code == 0`` boolean.
+
+        Takes the output as well as the code because for some scanners the code
+        alone is ambiguous — see the module docstring. MUST NOT raise.
+        """
         ...
 
     def parse(self, stdout: str, stderr: str) -> list[Finding]:

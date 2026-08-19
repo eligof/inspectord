@@ -95,7 +95,7 @@ def test_argv_is_a_list_never_a_shell_string() -> None:
 
 
 # --------------------------------------------------------------------------
-# interpret_exit -- design decision 10
+# interpret_outcome -- design decision 10
 # --------------------------------------------------------------------------
 
 
@@ -116,21 +116,45 @@ def test_argv_is_a_list_never_a_shell_string() -> None:
         (17, ScanOutcome.failure),  # invalid config line
         (18, ScanOutcome.failure),  # IO error
         (19, ScanOutcome.failure),  # version mismatch
+        (20, ScanOutcome.failure),  # exec error
+        (21, ScanOutcome.failure),  # file lock error
+        (22, ScanOutcome.failure),  # memory allocation error
+        (23, ScanOutcome.failure),  # thread error
+        (24, ScanOutcome.failure),  # database error (documented by AIDE 0.19)
+        (25, ScanOutcome.failure),  # killed by SIGINT/SIGTERM/SIGHUP (AIDE 0.19)
         (8, ScanOutcome.failure),  # undocumented -> failure, never clean
         (13, ScanOutcome.failure),
-        (20, ScanOutcome.failure),
+        (26, ScanOutcome.failure),
         (255, ScanOutcome.failure),
         (-9, ScanOutcome.failure),  # killed by SIGKILL
     ],
 )
-def test_interpret_exit_table(code: int, expected: ScanOutcome) -> None:
-    assert AideAdapter().interpret_exit(code) is expected
+def test_interpret_outcome_table(code: int, expected: ScanOutcome) -> None:
+    assert AideAdapter().interpret_outcome(code, "", "") is expected
 
 
 def test_nonzero_exit_is_findings_not_failure() -> None:
     """The bug this test exists to prevent: a real detection reported as a broken scan."""
     for code in (1, 2, 3, 4, 5, 6, 7):
-        assert AideAdapter().interpret_exit(code) is ScanOutcome.findings, code
+        assert AideAdapter().interpret_outcome(code, "", "") is ScanOutcome.findings, code
+
+
+def test_interpret_outcome_ignores_the_output() -> None:
+    """AIDE's exit status is self-describing; unlike rkhunter it needs no output.
+
+    Pinned so nobody "helpfully" makes AIDE's verdict depend on a report body
+    that an attacker-controlled file path can appear in.
+    """
+    adapter = AideAdapter()
+    assert adapter.interpret_outcome(0, REPORT, "boom") is ScanOutcome.clean
+    assert adapter.interpret_outcome(4, "", "") is ScanOutcome.findings
+    assert adapter.interpret_outcome(18, REPORT, "") is ScanOutcome.failure
+
+
+def test_preflight_is_none_because_aide_needs_no_setup() -> None:
+    """AIDE's config path is a plain argv value; there is nothing to expand or count."""
+    assert AideAdapter().preflight({}) is None
+    assert AideAdapter().preflight({"config_path": "/nope/aide.conf"}) is None
 
 
 # --------------------------------------------------------------------------
