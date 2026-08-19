@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from inspectord.schemas.event import Event, EventKind, Severity
+from inspectord.schemas.event import Event, EventKind, Outcome, Severity
 from inspectord.state.projector import project
 from inspectord.storage.db import Database
 from inspectord.storage.migrations import run_migrations
@@ -761,4 +761,248 @@ def test_unknown_module_is_noop(tmp_path: Path) -> None:
         module="some_future_collector",
     )
     project(ev, db)  # must not raise
+    db.close()
+
+
+# -- scanner_runner -> scan_run (plan 2026-08-20-scanner-panel §3) --------------
+
+_SCAN_TS = datetime(2026, 8, 20, 2, 0, 0, tzinfo=UTC)
+
+
+def _scan_event(
+    action: str,
+    *,
+    event_id: str,
+    scanner: str = "aide",
+    ts: datetime = _SCAN_TS,
+    outcome: Outcome | None = None,
+    raw: dict[str, object] | None = None,
+) -> Event:
+    return Event(
+        ts=ts,
+        event_id=event_id,
+        kind=EventKind.event,
+        category=["process"],
+        type=["info"],
+        action=action,
+        outcome=outcome,
+        severity=Severity.info,
+        module="scanner_runner",
+        raw={"scanner": scanner, **(raw or {})},
+    )
+
+
+def _started(event_id: str, run_id: str, **kw: object) -> Event:
+    return _scan_event("scan_started", event_id=event_id, raw={"run_id": run_id}, **kw)  # type: ignore[arg-type]
+
+
+def _completed(
+    event_id: str,
+    run_id: str,
+    *,
+    scan_outcome: str = "clean",
+    finding_count: int = 0,
+    **extra: object,
+) -> Event:
+    failed = scan_outcome == "failure"
+    return _scan_event(
+        "scan_completed",
+        event_id=event_id,
+        ts=extra.pop("ts", _SCAN_TS + timedelta(seconds=30)),  # type: ignore[arg-type]
+        outcome=Outcome.failure if failed else Outcome.success,
+        raw={
+            "run_id": run_id,
+            "scan_outcome": scan_outcome,
+            "duration_s": 30.0,
+            "finding_count": finding_count,
+            "findings_dropped": 0,
+            "truncated": False,
+            "output_dropped_bytes": 0,
+            "output_truncated": False,
+            **extra,
+        },
+    )
+
+
+def _scan_row(db: Database, run_id: str) -> tuple:  # type: ignore[type-arg]
+    return db.query(
+        "SELECT scanner, status, reason, exit_code, duration_s, finding_count, "
+        "findings_dropped, truncated, output_truncated, output_excerpt, "
+        "started_at, completed_at, last_event_id FROM scan_run WHERE run_id = ?",
+        [run_id],
+    ).fetchall()[0]
+
+
+def test_scan_started_creates_a_running_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_started("e1", "run-1"), db)
+    row = _scan_row(db, "run-1")
+    assert row[0] == "aide"
+    assert row[1] == "running"
+    assert row[10] == _SCAN_TS.replace(tzinfo=None)
+    assert row[11] is None
+    assert row[12] == "e1"
+    db.close()
+
+
+def test_complete_run_projects_success(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_started("e1", "run-1"), db)
+    project(_completed("e2", "run-1", scan_outcome="findings", finding_count=3), db)
+    row = _scan_row(db, "run-1")
+    assert row[1] == "success"
+    assert row[4] == 30.0
+    assert row[5] == 3
+    # started_at is preserved from scan_started, not overwritten by the completion.
+    assert row[10] == _SCAN_TS.replace(tzinfo=None)
+    assert row[11] == (_SCAN_TS + timedelta(seconds=30)).replace(tzinfo=None)
+    assert row[12] == "e2"
+    # Exactly one row per run — the pair does not create two.
+    assert db.query("SELECT COUNT(*) FROM scan_run").fetchall()[0][0] == 1
+    db.close()
+
+
+def test_failed_run_projects_reason_and_output_excerpt(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_started("e1", "run-1"), db)
+    project(
+        _completed(
+            "e2",
+            "run-1",
+            scan_outcome="failure",
+            reason="timeout",
+            exit_code=None,
+            output_excerpt="aide: cannot open database",
+        ),
+        db,
+    )
+    row = _scan_row(db, "run-1")
+    assert row[1] == "failure"
+    assert row[2] == "timeout"
+    assert row[9] == "aide: cannot open database"
+    db.close()
+
+
+def test_truncated_run_records_both_truncation_flags(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_started("e1", "run-1"), db)
+    project(
+        _completed(
+            "e2",
+            "run-1",
+            scan_outcome="findings",
+            finding_count=500,
+            findings_dropped=12,
+            truncated=True,
+            output_truncated=True,
+        ),
+        db,
+    )
+    row = _scan_row(db, "run-1")
+    assert (row[6], row[7], row[8]) == (12, True, True)
+    db.close()
+
+
+def test_skipped_run_gets_its_own_row_keyed_on_event_id(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(
+        _scan_event(
+            "scan_skipped",
+            event_id="e1",
+            raw={"reason": "binary_not_found", "binary": "aide"},
+        ),
+        db,
+    )
+    rows = db.query(
+        "SELECT run_id, scanner, status, reason, started_at, completed_at FROM scan_run"
+    ).fetchall()
+    assert len(rows) == 1
+    run_id, scanner, status, reason, started_at, completed_at = rows[0]
+    # scan_skipped carries no run_id (nothing was spawned), so the key is synthesized
+    # from the event id — it can never collide with, or overwrite, a real run.
+    assert run_id == "skip:e1"
+    assert (scanner, status, reason) == ("aide", "skipped", "binary_not_found")
+    assert started_at == _SCAN_TS.replace(tzinfo=None)
+    assert completed_at == _SCAN_TS.replace(tzinfo=None)
+    db.close()
+
+
+def test_two_skips_do_not_overwrite_each_other(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_scan_event("scan_skipped", event_id="e1", raw={"reason": "binary_not_found"}), db)
+    project(_scan_event("scan_skipped", event_id="e2", raw={"reason": "config_missing"}), db)
+    assert db.query("SELECT COUNT(*) FROM scan_run").fetchall()[0][0] == 2
+    db.close()
+
+
+def test_run_that_never_completed_stays_running(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    # A daemon restart mid-scan: scan_started with no scan_completed, ever.
+    project(_started("e1", "run-1"), db)
+    row = _scan_row(db, "run-1")
+    assert row[1] == "running"
+    # It must never look like a finished run: no outcome, no duration, no count.
+    assert (row[2], row[4], row[5], row[11]) == (None, None, None, None)
+    db.close()
+
+
+def test_completed_without_started_backfills_the_row(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    # The scan_started event was lost (queue drop, restart between the two).
+    project(_completed("e2", "run-1", scan_outcome="clean"), db)
+    row = _scan_row(db, "run-1")
+    assert row[1] == "success"
+    # started_at is derived from the completion minus its duration, not left null.
+    assert row[10] == _SCAN_TS.replace(tzinfo=None)
+    db.close()
+
+
+def test_started_arriving_after_completed_cannot_resurrect_the_run(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_completed("e2", "run-1", scan_outcome="clean"), db)
+    project(_started("e1", "run-1"), db)
+    row = _scan_row(db, "run-1")
+    # Projection is order-independent: a late scan_started never reopens a
+    # finished run (it would otherwise read as "running forever").
+    assert row[1] == "success"
+    assert row[11] is not None
+    db.close()
+
+
+def test_scan_finding_is_not_projected(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_started("e1", "run-1"), db)
+    project(
+        _scan_event("scan_finding", event_id="e3", raw={"run_id": "run-1", "line": "x"}),
+        db,
+    )
+    # Findings stay events (scanner design decision 6); scan_completed's
+    # finding_count is the authoritative count.
+    assert db.query("SELECT COUNT(*) FROM scan_run").fetchall()[0][0] == 1
+    assert _scan_row(db, "run-1")[5] is None
+    db.close()
+
+
+def test_scan_event_without_scanner_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    ev = Event(
+        ts=_SCAN_TS,
+        event_id="e1",
+        kind=EventKind.event,
+        category=["process"],
+        type=["info"],
+        action="scan_started",
+        severity=Severity.info,
+        module="scanner_runner",
+        raw={"run_id": "run-1"},
+    )
+    project(ev, db)  # must not raise
+    assert db.query("SELECT COUNT(*) FROM scan_run").fetchall()[0][0] == 0
+    db.close()
+
+
+def test_scan_started_without_run_id_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(_scan_event("scan_started", event_id="e1"), db)
+    assert db.query("SELECT COUNT(*) FROM scan_run").fetchall()[0][0] == 0
     db.close()
