@@ -18,7 +18,13 @@ from collections.abc import Callable, Mapping, Sequence
 from io import BytesIO
 from typing import Any
 
-from inspectord.workers.scanner_runner.runner import ScannerRunnerWorker, _ActiveRun
+from inspectord.workers.scanner_runner.runner import (
+    MAX_FAILURE_OUTPUT_CHARS,
+    ScannerRunnerWorker,
+    ScanResult,
+    _ActiveRun,
+    _failure_excerpt,
+)
 from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome
 
 
@@ -620,6 +626,80 @@ def test_a_parser_that_raises_is_reported_as_a_failed_scan() -> None:
     completed = _completed(events)[0]
     assert completed["outcome"] == "failure"
     assert completed["raw"]["reason"] == "parse_error"
+
+
+# --------------------------------------------------------------------------
+# why a failed scan failed
+#
+# `reason="scanner_error", exit_code=1` says a scan broke, not what broke: one
+# uncompilable `.yar` file fails an entire yara run. Failed runs therefore
+# carry a bounded, sanitized excerpt of the scanner's own message.
+# --------------------------------------------------------------------------
+
+
+def test_a_failed_scan_reports_what_the_scanner_said() -> None:
+    adapter = FakeAdapter(
+        argv=["sh", "-c", "echo 'rules(3): error: syntax error' >&2; exit 2"],
+    )
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert completed["outcome"] == "failure"
+    assert completed["raw"]["reason"] == "scanner_error"
+    assert "rules(3): error: syntax error" in completed["raw"]["output_excerpt"]
+
+
+def test_a_successful_scan_carries_no_output_excerpt() -> None:
+    """A successful run's output IS the finding set -- already one event each."""
+    adapter = FakeAdapter(argv=["sh", "-c", "echo noise >&2; exit 0"])
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert completed["outcome"] == "success"
+    assert "output_excerpt" not in completed["raw"]
+
+
+def test_the_failure_excerpt_falls_back_to_stdout() -> None:
+    """rkhunter prints its refusal on stdout and only shell noise on stderr."""
+    adapter = FakeAdapter(
+        argv=["sh", "-c", "echo \"'all' cannot be used in the disabled test list.\"; exit 2"],
+    )
+    worker, buf = _make_worker([adapter], _base_config())
+    try:
+        events = _pump(worker, buf, until=_has("scan_completed"))
+    finally:
+        worker.teardown()
+
+    completed = _completed(events)[0]
+    assert "cannot be used in the disabled test list" in completed["raw"]["output_excerpt"]
+
+
+def test_the_failure_excerpt_is_bounded_and_marked_when_cut() -> None:
+    excerpt = _failure_excerpt(ScanResult(exit_code=1, stdout="", stderr="x" * 100_000))
+    assert excerpt is not None
+    assert excerpt.endswith("[truncated]")
+    assert len(excerpt) <= MAX_FAILURE_OUTPUT_CHARS + len(" [truncated]")
+
+
+def test_the_failure_excerpt_strips_control_characters() -> None:
+    """Same untrusted scanner output as the rkhunter parser sees, same rule."""
+    result = ScanResult(exit_code=1, stdout="", stderr="\x1b[31mboom\x00\r\nsecond line\n")
+    excerpt = _failure_excerpt(result)
+    assert excerpt is not None
+    assert "boom" in excerpt and "second line" in excerpt
+    assert not any(ch < " " or "\x7f" <= ch <= "\x9f" for ch in excerpt), repr(excerpt)
+
+
+def test_no_output_at_all_means_no_excerpt_key() -> None:
+    assert _failure_excerpt(ScanResult(exit_code=1, stdout="", stderr="   \n\n")) is None
 
 
 def test_a_finding_that_fails_to_emit_still_yields_scan_completed() -> None:
