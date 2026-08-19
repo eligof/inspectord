@@ -209,8 +209,9 @@ def test_restarts_are_exhausted_and_the_worker_is_left_dead(
         restarts_at_exhaustion = len(collector.actions("worker_restarted"))
         assert restarts_at_exhaustion == 3
         # Give the monitor plenty of ticks to (wrongly) restart it again.
-        time.sleep(0.5)
-        assert len(collector.actions("worker_restarted")) == 3
+        assert not _wait_for(lambda: len(collector.actions("worker_restarted")) > 3, timeout=0.5), (
+            "the exhausted worker was restarted again"
+        )
         assert len(collector.actions("worker_restart_exhausted")) == 1
         assert sup._procs[0].exhausted is True
         assert sup._procs[0].proc.poll() is not None
