@@ -10,7 +10,6 @@ optional_when:
   profiles: [minimal, standard]
 distro_packages:
   arch: [rkhunter]
-  cachyos: [rkhunter]
 service: null
 # §30.6 wants a drop-in at /etc/rkhunter.conf.d/inspectord.conf. Its contents are
 # the scanner adapter's call, so this stays null until that slice lands.

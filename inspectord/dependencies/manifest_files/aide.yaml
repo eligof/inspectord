@@ -9,7 +9,6 @@ optional_when:
 # under this same name, so `pacman -Qi aide` keeps working once the user has it.
 distro_packages:
   arch: [aide]
-  cachyos: [aide]
 manual_install:
   reason: >-
     AIDE is not in the Arch/CachyOS official repositories — it is packaged only in

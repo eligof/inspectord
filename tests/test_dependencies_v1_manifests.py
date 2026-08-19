@@ -45,7 +45,6 @@ def test_aide_keeps_package_name_for_detection() -> None:
     """An AUR install still registers in the pacman DB, so keep the name."""
     m = load_packaged_manifests()["aide"]
     assert m.distro_packages.get("arch", []) == ["aide"]
-    assert m.distro_packages.get("cachyos", []) == ["aide"]
 
 
 def test_yara_stays_auto_installable() -> None:
@@ -71,7 +70,6 @@ def test_rkhunter_is_auto_installable_from_the_official_repos() -> None:
     m = load_packaged_manifests()["rkhunter"]
     assert m.manual_install is None
     assert m.distro_packages.get("arch", []) == ["rkhunter"]
-    assert m.distro_packages.get("cachyos", []) == ["rkhunter"]
 
 
 def test_rkhunter_probe_does_not_execute_the_binary() -> None:
@@ -87,3 +85,15 @@ def test_rkhunter_declares_no_post_install_hooks() -> None:
     m = load_packaged_manifests()["rkhunter"]
     assert m.post_install_hooks == []
     assert m.config is None
+
+
+def test_no_manifest_declares_a_cachyos_key() -> None:
+    """`Distro` has no `cachyos` member — CachyOS is mapped onto `arch` at
+    detection — so a `cachyos:` key can never be looked up. Keeping one would be
+    a second, unreadable copy of the arch package list, free to rot out of sync
+    with the one that is actually used.
+    """
+    for name, m in load_packaged_manifests().items():
+        assert "cachyos" not in m.distro_packages, (
+            f"{name}.yaml declares a cachyos package list that nothing can ever read"
+        )

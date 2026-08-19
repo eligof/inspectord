@@ -7,7 +7,6 @@ optional_when:
   profiles: []
 distro_packages:
   arch: [audit]
-  cachyos: [audit]
 minimum_version: "3.0.0"
 service:
   systemd_unit: auditd.service
