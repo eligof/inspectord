@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from importlib.resources import files
 from queue import Empty as QueueEmpty
@@ -57,6 +58,45 @@ RESTART_HEALTHY_AFTER_S = 60.0
 # Consecutive restarts that never reached RESTART_HEALTHY_AFTER_S before the
 # supervisor gives up and leaves the worker dead.
 RESTART_MAX_ATTEMPTS = 8
+
+# --- persistence resilience -------------------------------------------------
+# Persistence health is judged over a rolling window of the last N outcomes
+# rather than a consecutive streak. A streak counter that a single success
+# resets never fires on a *partial* outage -- a systematic 9-fail/1-success
+# pattern, or any sustained ~50% loss, silently drops most of the telemetry
+# while the user-facing alert path says nothing.
+PERSIST_FAILURE_WINDOW = 20
+# Failures within that window before the supervisor stops treating them as bad
+# luck (a duplicate event_id, a transient DuckDB conflict) and tells the user
+# that persistence is failing. A one-off failure never gets near it.
+PERSIST_FAILURE_ALERT_THRESHOLD = 10
+# Minimum seconds between two persistence_failing events.
+PERSIST_ALERT_COOLDOWN_S = 300.0
+
+
+class PersistFailed(Exception):
+    """A _persist failure, tagged with the stage that broke.
+
+    _persist appends to the journal first and independently of the database, so
+    a DuckDB failure (disk full, PRIMARY KEY conflict) still leaves the event in
+    the journal while a journal failure loses it outright. The stage is what
+    lets the outage report say which of the two is actually down instead of
+    asserting both are.
+    """
+
+    def __init__(self, stage: str, cause: BaseException) -> None:
+        super().__init__(f"{stage}: {cause!r}")
+        self.stage = stage
+        self.cause = cause
+
+
+def _persistence_outage_detail(stage: str | None) -> str:
+    """What is actually lost, given which stage of _persist failed."""
+    if stage == "journal":
+        return "neither the journal nor the database is recording events"
+    if stage == "database":
+        return "the database is not recording events (the journal still has them)"
+    return "events are not being recorded"
 
 
 def backoff_delay(
@@ -270,29 +310,112 @@ class Supervisor:
         threading.Thread(target=self._drain, args=(store_sub,), daemon=True).start()
 
     def _drain(self, sub) -> None:  # type: ignore[no-untyped-def]
+        """Persist every routed event; the ONLY thread that writes storage.
+
+        _persist raises for ordinary reasons -- events_enriched.event_id is a
+        PRIMARY KEY so a duplicate id conflicts, journal I/O fails, the disk
+        fills, DuckDB hits a transaction conflict. Letting any of those escape
+        would kill this thread, and with it every subsequent write to the
+        database and the journal, silently: the daemon keeps running, workers
+        keep emitting, and nothing is ever stored again.
+
+        Health is tracked over the last PERSIST_FAILURE_WINDOW outcomes, not as
+        a consecutive streak, so a sustained *partial* outage -- half the events
+        failing, or nine in every ten -- is reported instead of being reset to
+        zero by the occasional success.
+        """
+        # True == that event failed to persist. maxlen makes this the last N.
+        outcomes: deque[bool] = deque(maxlen=PERSIST_FAILURE_WINDOW)
+        last_alert_at: float | None = None
         while not self._stop.is_set():
             try:
                 ev = sub.get_nowait()
             except QueueEmpty:
                 time.sleep(0.01)
                 continue
-            self._persist(ev)
+            try:
+                self._persist(ev)
+            except Exception as exc:
+                outcomes.append(True)
+                failures = sum(outcomes)
+                log.error(
+                    "failed to persist %s event %s from %s (%d of the last %d failed): %r",
+                    ev.action,
+                    ev.event_id,
+                    ev.module,
+                    failures,
+                    len(outcomes),
+                    exc,
+                )
+                now = time.monotonic()
+                cooled = last_alert_at is None or now - last_alert_at >= PERSIST_ALERT_COOLDOWN_S
+                if failures >= PERSIST_FAILURE_ALERT_THRESHOLD and cooled:
+                    window = len(outcomes)
+                    # Both guards matter. The report is itself an event: it goes
+                    # back through the router into this loop and fails to persist
+                    # like everything else. Clearing the window means the next
+                    # report needs a fresh THRESHOLD failures -- of which the
+                    # report's own is at most one -- so it cannot sustain itself,
+                    # and the cooldown bounds how often a busy event stream can
+                    # re-trigger it while the outage continues.
+                    outcomes.clear()
+                    last_alert_at = now
+                    self._report_persistence_down(failures, window, exc)
+            else:
+                outcomes.append(False)
             for fn in list(self._listeners):
                 try:
                     fn(ev)
                 except Exception as exc:
                     log.warning("listener raised: %r", exc)
 
+    def _report_persistence_down(self, failures: int, window: int, exc: BaseException) -> None:
+        """Surface a persistence outage as an event instead of a log line nobody reads.
+
+        The event cannot be stored either -- persistence is what is broken --
+        but it still reaches the alert path and the live listeners (IPC, tray),
+        which is the whole point: a monitor that has silently stopped recording
+        is exactly the blind spot the user needs told about.
+        """
+        stage = exc.stage if isinstance(exc, PersistFailed) else None
+        self._emit_supervisor_event(
+            action="persistence_failing",
+            severity="high",
+            type_=["error"],
+            message=(
+                f"failed to persist {failures} of the last {window} events; "
+                f"{_persistence_outage_detail(stage)}"
+            ),
+            raw={"failures": failures, "window": window, "stage": stage, "error": repr(exc)},
+        )
+
     def _persist(self, ev: Event) -> None:
         payload = ev.model_dump_json()
-        self._journal.append(json.loads(payload))
-        self._db.execute(
-            "INSERT INTO events_enriched "
-            "(event_id, ts, kind, module, action, severity, payload_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [ev.event_id, ev.ts, ev.kind.value, ev.module, ev.action, ev.severity.value, payload],
-        )
-        project(ev, self._db, boot_id=self._boot_id)
+        record = json.loads(payload)
+        try:
+            self._journal.append(record)
+        except Exception as exc:
+            raise PersistFailed("journal", exc) from exc
+        # The journal already holds the event from here on: a failure below
+        # costs the database row and the projection, not the record itself.
+        try:
+            self._db.execute(
+                "INSERT INTO events_enriched "
+                "(event_id, ts, kind, module, action, severity, payload_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ev.event_id,
+                    ev.ts,
+                    ev.kind.value,
+                    ev.module,
+                    ev.action,
+                    ev.severity.value,
+                    payload,
+                ],
+            )
+            project(ev, self._db, boot_id=self._boot_id)
+        except Exception as exc:
+            raise PersistFailed("database", exc) from exc
 
     def _spawn_worker(self, spec: WorkerSpec) -> None:
         with self._procs_lock:

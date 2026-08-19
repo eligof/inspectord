@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import socket
 import sys
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -130,6 +132,25 @@ class UdevMonitorWorker:
         return event.model_dump(mode="json", exclude_none=True)
 
 
+def _install_stop_handlers(stop: threading.Event) -> None:
+    """Make SIGTERM/SIGINT set *stop* instead of killing the process outright.
+
+    The supervisor stops a worker with SIGTERM, and Python's default
+    disposition for it terminates the interpreter immediately -- ``finally``
+    blocks never run.  For this worker that leaks: ``main`` never reaches
+    ``worker.stop()``, so the long-lived ``udevadm monitor`` grandchild is
+    never terminated and survives forever, reparented to init.  (Workers built
+    on ``workers.contract.Worker`` already do this; this one has its own loop.)
+
+    Signals can only be installed from the main thread; elsewhere this is a
+    no-op and the ``KeyboardInterrupt`` path in ``main`` still applies.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
+
+
 def _open_sink(arg: str) -> IO[bytes]:
     if arg == "-":
         return sys.stdout.buffer
@@ -162,9 +183,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sink = _open_sink(args.sink_path)
     worker = UdevMonitorWorker(sink=sink)
+    # Installed before start(): a SIGTERM arriving while the child is being
+    # spawned must still reach the teardown below, not kill us mid-spawn.
+    stop = threading.Event()
+    _install_stop_handlers(stop)
     worker.start()
     try:
-        while True:
+        while not stop.is_set():
             worker.step(poll_timeout_ms=args.poll_timeout_ms)
     except KeyboardInterrupt:
         pass
