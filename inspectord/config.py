@@ -176,6 +176,24 @@ def dev_config(*, base: Path) -> DaemonConfig:
                                 "interval_s": 86400.0,
                                 "timeout_s": 3600.0,
                             },
+                            "rkhunter": {
+                                "enabled": False,
+                                "interval_s": 86400.0,
+                                "timeout_s": 1800.0,
+                            },
+                            "yara": {
+                                "enabled": False,
+                                "interval_s": 86400.0,
+                                "timeout_s": 1800.0,
+                                # We ship the rulesets (§30.6). With none
+                                # installed the scanner skips with a reason
+                                # instead of failing.
+                                "rules_dir": "/var/lib/inspectord/yara",
+                                # ONE path: yara takes exactly one target, so
+                                # point this at a common ancestor rather than
+                                # expecting a list.
+                                "target": "/home",
+                            },
                         },
                     },
                 },

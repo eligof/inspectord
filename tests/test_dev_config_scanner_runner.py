@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from inspectord.config import dev_config
+from inspectord.workers.scanner_runner.scanners import default_adapters
 
 
 def test_dev_config_contains_scanner_runner(tmp_path: Path) -> None:
@@ -47,3 +48,25 @@ def test_dev_config_scanner_runner_bounds_captured_output(tmp_path: Path) -> Non
 
     ceiling = worker.config["max_output_bytes"]
     assert 0 < ceiling <= 32 * 1024 * 1024, ceiling
+
+
+def test_dev_config_declares_every_known_scanner(tmp_path: Path) -> None:
+    """A scanner the build knows about but the config never mentions is invisible.
+
+    It would sit at the adapter defaults (daily, one-hour timeout) with nobody
+    able to see that from the shipped config, so the two lists are kept equal.
+    """
+    worker = next(w for w in dev_config(base=tmp_path).workers if w.name == "scanner_runner")
+    assert set(worker.config["scanners"]) == {a.name for a in default_adapters()}
+
+
+def test_dev_config_yara_says_where_its_rules_and_target_are(tmp_path: Path) -> None:
+    """YARA is the one scanner whose config is not just a schedule: without a
+    rules directory it can only skip, so the shipped config documents both."""
+    worker = next(w for w in dev_config(base=tmp_path).workers if w.name == "scanner_runner")
+    yara = worker.config["scanners"]["yara"]
+    assert yara["rules_dir"] == "/var/lib/inspectord/yara"
+    assert yara["target"] == "/home"
+    # §4.4 says `targets` (a list); yara takes exactly one target, so the
+    # adapter takes `target`. Pinned so the plural never sneaks back in.
+    assert "targets" not in yara
