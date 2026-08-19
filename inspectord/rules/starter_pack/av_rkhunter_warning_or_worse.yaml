@@ -1,0 +1,33 @@
+version: 1.0.0
+id: av.rkhunter_warning_or_worse
+name: "rkhunter reported a warning"
+severity: medium
+category: malware
+why: |
+  rkhunter — the rootkit hunter — reported something during a scheduled scan.
+  "or worse" in this rule's id is aspirational: rkhunter has exactly one grade,
+  `Warning:`, so the scanner adapter records no severity of its own and this
+  rule fires on every rkhunter finding.
+
+  The rule matches only on structure — the emitting module, the action, and
+  which adapter ran (`threat.indicator.source`, set by the worker from its own
+  state). It never matches on report wording, because a filename inside a
+  monitored tree can inject one extra attacker-worded warning block into
+  rkhunter's stdout. *That rkhunter warned* is trustworthy; the wording shown
+  below is scanner text and is not.
+
+  Severity is `medium` rather than `high` on purpose: measured on this host
+  (rkhunter 1.4.6, Arch), a healthy machine produces five warnings per scan —
+  see the false positives. Read the warning, then decide.
+false_positives:
+  - "Arch ships /usr/bin/egrep and /usr/bin/fgrep as POSIX-shell wrappers (from `grep`) and /usr/bin/ldd as a bash script (from `glibc`). rkhunter warns that each `has been replaced by a script` — three warnings, every scan, on a perfectly healthy system. Measured here 2026-08-19."
+  - "`Checking for prerequisites [ Warning ]` — `The file of stored file properties (rkhunter.dat) does not exist`. The file-properties baseline has never been initialized. inspectord will never initialize it for you: `rkhunter --propupd` rewrites a system baseline file and is forbidden by the scanner design (decision 8), so this warns on every scan until you run it yourself, on a machine you believe is clean."
+  - "The standing `--propupd` responsibility notice rkhunter prints alongside that one is itself a `Warning:` block, so it arrives as its own separate finding."
+  - "rkhunter's mirror database is never updated — inspectord performs no network egress of any kind (design decision 8) — so warnings that trace back to stale bundled data are expected, and are not evidence about this machine."
+  - "A file or directory name inside a scanned tree can carry a line break, which splits one rkhunter warning into two and lets the tail read as a second warning with attacker-chosen text. It can add a fabricated warning beside a genuine one; it cannot suppress the genuine one. Cross-check the named path directly before acting on the wording."
+detect:
+  any_of:
+    - event.module == "scanner_runner" AND event.action == "scan_finding" AND threat.indicator.source == "rkhunter"
+short: "rkhunter warning: {threat.indicator.value}"
+detail: "rkhunter reported a warning during a scheduled scan. Warning text (scanner-supplied, untrusted): {event.message} Reported path: {file.path}"
+labels: [scanner, rkhunter, rootkit]
