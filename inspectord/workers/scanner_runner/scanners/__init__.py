@@ -9,6 +9,7 @@ from inspectord.workers.scanner_runner.scanners.base import (
     ScanOutcome,
 )
 from inspectord.workers.scanner_runner.scanners.rkhunter import RkhunterAdapter
+from inspectord.workers.scanner_runner.scanners.yara import YaraAdapter
 
 __all__ = [
     "AideAdapter",
@@ -16,6 +17,7 @@ __all__ = [
     "RkhunterAdapter",
     "ScanOutcome",
     "ScannerAdapter",
+    "YaraAdapter",
     "default_adapters",
 ]
 
@@ -26,4 +28,4 @@ def default_adapters() -> list[ScannerAdapter]:
     Being known is not being run: each one stays inert until its config block
     sets ``enabled``, which no shipped config does.
     """
-    return [AideAdapter(), RkhunterAdapter()]
+    return [AideAdapter(), RkhunterAdapter(), YaraAdapter()]
