@@ -173,9 +173,38 @@ class Supervisor:
         """Enrich, run rules, fan out alerts, publish — the one path every event takes.
 
         Runs on whichever thread produced the event: the worker reader threads
-        (alert fan-out MUST stay on them) and the worker monitor thread.
+        (alert fan-out MUST stay on them) and the worker monitor thread. Never
+        raises: both callers are loops that must survive one bad event.
+
+        Publishing is deliberately *not* guarded by the alert path. The rule
+        engine can fail on a live system (e.g. two workers racing on the same
+        dedup_key), and losing the event itself — unstored, unprojected,
+        invisible — is far worse than losing the alert it would have raised.
         """
-        ev = enrich(ev)
+        try:
+            ev = enrich(ev)
+            self._run_alert_path(ev)
+        except Exception as exc:
+            log.error(
+                "alert path failed for %s event from %s (publishing anyway): %r",
+                ev.action,
+                ev.module,
+                exc,
+            )
+        try:
+            self._router.publish(ev)
+        except RouterFull as exc:
+            log.error("router full, dropping %s event from %s: %r", ev.action, ev.module, exc)
+        except Exception as exc:
+            log.error("failed to publish %s event from %s: %r", ev.action, ev.module, exc)
+
+    def _run_alert_path(self, ev: Event) -> None:
+        """Run the rules and fan the alerts out on the *calling* thread.
+
+        Staying on the caller's thread is load-bearing: the evidence collector
+        captures under the worker fan-out thread and MUST run before the
+        notifier listeners see the alert.
+        """
         for alert in self._rule_engine.process(ev):
             if self._evidence_collector is not None:
                 # MUST precede the notifier listeners (evidence first, notify second).
@@ -185,10 +214,6 @@ class Supervisor:
                     fn(alert)
                 except Exception as exc:
                     log.warning("alert listener raised: %r", exc)
-        try:
-            self._router.publish(ev)
-        except RouterFull as exc:
-            log.error("router full, dropping %s event from %s: %r", ev.action, ev.module, exc)
 
     def stop(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
@@ -433,19 +458,11 @@ class Supervisor:
             try:
                 payload = json.loads(stripped.decode("utf-8"))
                 ev = Event.model_validate(payload)
-                ev = enrich(ev)
-                for alert in self._rule_engine.process(ev):
-                    if self._evidence_collector is not None:
-                        # MUST precede the notifier listeners (evidence first, notify second).
-                        self._evidence_collector.capture(alert, ev)
-                    for fn in list(self._alert_listeners):
-                        try:
-                            fn(alert)
-                        except Exception as exc:
-                            log.warning("alert listener raised: %r", exc)
-                self._router.publish(ev)
             except Exception as exc:
                 log.error("worker %s emitted invalid event: %r", wp.spec.name, exc)
+                continue
+            # Same path the monitor's own events take, on this reader thread.
+            self._dispatch(ev)
 
     def _read_stderr(self, wp: _WorkerProc) -> None:
         assert wp.proc.stderr is not None

