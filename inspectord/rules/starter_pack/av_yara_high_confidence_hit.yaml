@@ -11,14 +11,20 @@ why: |
   "high confidence" means here.
 
   READ THIS FIRST: **a YARA rule that declares no `severity` meta produces no
-  alert at all.** The hit is still recorded as a `scan_finding` event and is
-  visible in the events view — only the alert is withheld, because "high
-  confidence" cannot be asserted about a rule that asserts nothing. If you
-  import a ruleset and never see alerts from it, check whether its rules carry
-  a `severity` meta; if they do not, either add one or write a rule of your own
-  that keys on the rule names you care about. A numeric convention
-  (`severity = 3`, which yara prints as `severity =3`) is likewise not
-  recognized.
+  alert from THIS rule.** The hit is still recorded as a `scan_finding` event,
+  and `av.yara_match` — the `low`-severity catch-all — still fires on it; only
+  the high-severity alert is withheld, because "high confidence" cannot be
+  asserted about a rule that asserts nothing. If you import a ruleset and never
+  see *high* alerts from it, check whether its rules carry a `severity` meta; if
+  they do not, either add one or write a rule of your own that keys on the rule
+  names you care about. A numeric convention (`severity = 3`, which yara prints
+  as `severity =3`) is likewise not recognized.
+
+  **A high or critical hit deliberately fires TWO rules**: this one at `high`
+  and `av.yara_match` at `low`. That is not a bug and not double-reporting by
+  accident — the pair is a floor plus a ceiling. `av.yara_match` guarantees
+  every hit surfaces even from a ruleset that grades nothing, and this rule
+  raises the ones whose author called them severe.
 
   Unlike the other `av.*` rules, this one must read scanner-supplied text: the
   rule name and the meta block arrive on the same untrusted stdout line as the

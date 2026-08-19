@@ -1,11 +1,15 @@
-"""Tests for the two YAML `av.*` scanner rules.
+"""Tests for the three YAML `av.*` scanner rules.
 
-Both key on **structural** fields — `event.module`, `event.action` and
+All three key on **structural** fields — `event.module`, `event.action` and
 `threat.indicator.source`, all of which the runner sets from its own state and
-no scanner parser can influence. The YARA rule additionally reads
-`threat.indicator.severity`, which *is* scanner-supplied; that is the one place
-these rules trust parser output, and it is documented in the rule file rather
-than hidden here.
+no scanner parser can influence. `av.yara_high_confidence_hit` additionally
+reads `threat.indicator.severity`, which *is* scanner-supplied; that is the one
+place these rules trust parser output, and it is documented in the rule file
+rather than hidden here.
+
+The two YARA rules overlap on purpose — a `high`/`critical` hit fires both, the
+`low` catch-all and the `high` one — and a test pins that so the pair is never
+"fixed" into a single rule.
 
 `_finding_event` mirrors `ScannerRunnerWorker._emit_finding` exactly, so a
 change to the emitted shape breaks these tests instead of silently
@@ -40,6 +44,10 @@ def _rkhunter_rule() -> YamlRule:
 
 def _yara_rule() -> YamlRule:
     return _rule("av_yara_high_confidence_hit.yaml")
+
+
+def _yara_match_rule() -> YamlRule:
+    return _rule("av_yara_match.yaml")
 
 
 def _finding_event(
@@ -222,3 +230,73 @@ def test_yara_rule_does_not_fire_on_another_module() -> None:
 @pytest.mark.parametrize("action", ["scan_started", "scan_completed", "scan_skipped"])
 def test_yara_rule_does_not_fire_on_a_lifecycle_action(action: str) -> None:
     assert not _fires(_yara_rule(), _yara_event(scanner_severity="high", action=action))
+
+
+# --------------------------------------------------------------------------
+# av.yara_match — the low-severity catch-all
+# --------------------------------------------------------------------------
+
+
+def test_yara_match_rule_fires_when_the_rule_declares_no_severity_meta() -> None:
+    """The whole point of this rule: a ruleset that grades nothing still alerts.
+
+    `av.yara_high_confidence_hit` stays silent here (pinned above), so without
+    this rule a public ruleset with no `severity` meta would produce a scanner
+    that matches files nightly and never raises anything.
+    """
+    event = _yara_event(scanner_severity=None)
+    assert "severity" not in (event.threat or {})["indicator"]
+
+    matches = evaluate_yaml_rule(_yara_match_rule(), EvalContext(event=event, history=[]))
+    assert matches
+    assert matches[0].rule_id == "av.yara_match"
+    assert matches[0].severity == "low"
+    assert matches[0].false_positives
+
+
+@pytest.mark.parametrize("declared", ["low", "medium", "informational", "3"])
+def test_yara_match_rule_fires_for_a_low_confidence_hit(declared: str) -> None:
+    assert _fires(_yara_match_rule(), _yara_event(scanner_severity=declared))
+
+
+@pytest.mark.parametrize("declared", ["high", "critical", "Critical"])
+def test_yara_match_rule_also_fires_for_a_high_confidence_hit(declared: str) -> None:
+    """Both YARA rules fire on a severe hit, deliberately — a floor and a ceiling.
+
+    One `low` record for every match, one `high` alert for the ones the rule
+    author graded severe. Both rule files say so in their `why`, so nobody reads
+    the pair as double-reporting by accident.
+    """
+    event = _yara_event(scanner_severity=declared)
+    assert _fires(_yara_match_rule(), event)
+    assert _fires(_yara_rule(), event)
+
+
+def test_yara_match_rule_does_not_fire_on_an_rkhunter_finding() -> None:
+    # Source is set by the runner from which adapter ran; it is the structural
+    # discriminator and no scanner output can forge it.
+    assert not _fires(_yara_match_rule(), _rkhunter_event())
+
+
+def test_yara_match_rule_does_not_fire_on_an_aide_finding() -> None:
+    assert not _fires(_yara_match_rule(), _aide_event())
+
+
+def test_yara_match_rule_does_not_fire_on_another_module() -> None:
+    assert not _fires(_yara_match_rule(), _yara_event(module="fim_watcher"))
+
+
+@pytest.mark.parametrize("action", ["scan_started", "scan_completed", "scan_skipped"])
+def test_yara_match_rule_does_not_fire_on_a_lifecycle_action(action: str) -> None:
+    assert not _fires(_yara_match_rule(), _yara_event(action=action))
+
+
+def test_yara_match_rule_keys_on_structure_only() -> None:
+    """No clause reads the rule name or the declared severity.
+
+    Both are scanner-supplied text a forged match line controls, so keying on
+    either would let an attacker choose whether this alert fires.
+    """
+    expr = " ".join(_yara_match_rule().detect_any_of)
+    assert "threat.indicator.value" not in expr
+    assert "threat.indicator.severity" not in expr
