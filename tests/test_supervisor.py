@@ -17,7 +17,11 @@ from inspectord.config import dev_config
 from inspectord.parsers.base import build_event
 from inspectord.schemas.event import Event, EventKind, Severity
 from inspectord.storage.db import Database
-from inspectord.supervisor import PERSIST_FAILURE_STREAK_ALERT, Supervisor
+from inspectord.supervisor import (
+    PERSIST_FAILURE_ALERT_THRESHOLD,
+    PERSIST_FAILURE_WINDOW,
+    Supervisor,
+)
 
 
 def test_supervisor_starts_and_routes_events(tmp_path: Path) -> None:
@@ -428,7 +432,7 @@ def test_drain_reports_a_persistent_persistence_outage(
         seen: list[Event] = []
         sup.attach_listener(seen.append)
 
-        for i in range(PERSIST_FAILURE_STREAK_ALERT):
+        for i in range(PERSIST_FAILURE_ALERT_THRESHOLD):
             sup._inject_for_test(_state_event(f"poison-{i}", 5600 + i))
 
         deadline = time.monotonic() + 5.0
@@ -439,6 +443,130 @@ def test_drain_reports_a_persistent_persistence_outage(
         outage = [e for e in seen if e.action == "persistence_failing"]
         assert outage, "a dead persistence layer was never reported to the user"
         assert outage[0].severity is Severity.high
-        assert outage[0].raw["consecutive_failures"] == PERSIST_FAILURE_STREAK_ALERT
+        assert outage[0].raw["failures"] == PERSIST_FAILURE_ALERT_THRESHOLD
+        assert outage[0].raw["window"] >= outage[0].raw["failures"]
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def _wait_for_action(seen: list[Event], action: str, *, count: int, timeout: float) -> int:
+    """Block until ``seen`` holds ``count`` events with ``action``; return how many."""
+    deadline = time.monotonic() + timeout
+    while True:
+        got = sum(1 for e in list(seen) if e.action == action)
+        if got >= count or time.monotonic() >= deadline:
+            return got
+        time.sleep(0.02)
+
+
+def test_drain_does_not_alert_on_a_one_off_persist_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One duplicate event_id or transient DuckDB conflict stays a log line."""
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        real_persist = sup._persist  # type: ignore[attr-defined]
+
+        def flaky(ev: Event) -> None:
+            if ev.event_id == "poison-1":
+                raise RuntimeError("duplicate event_id")
+            real_persist(ev)
+
+        monkeypatch.setattr(sup, "_persist", flaky)
+        seen: list[Event] = []
+        sup.attach_listener(seen.append)
+
+        sup._inject_for_test(_state_event("poison-1", 5700))
+        good = 2 * PERSIST_FAILURE_WINDOW
+        for i in range(good):
+            sup._inject_for_test(_state_event(f"good-{i}", 5701 + i))
+
+        assert _wait_for_action(seen, "process_start", count=good + 1, timeout=10.0) == good + 1, (
+            "the drain never worked through the injected events"
+        )
+        assert not [e for e in seen if e.action == "persistence_failing"], (
+            "a single unlucky event must not be reported as a persistence outage"
+        )
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def test_drain_reports_a_sustained_partial_persistence_outage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Half the events failing forever never forms a streak -- and is still an outage.
+
+    A streak counter that one success resets can be held at zero forever by a
+    systematic 9-fail/1-success pattern while most of the security telemetry is
+    dropped. That silent partial loss is exactly what has to be surfaced.
+    """
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        real_persist = sup._persist  # type: ignore[attr-defined]
+
+        def flaky(ev: Event) -> None:
+            if ev.event_id.startswith("poison-"):
+                raise RuntimeError("disk full")
+            real_persist(ev)
+
+        monkeypatch.setattr(sup, "_persist", flaky)
+        seen: list[Event] = []
+        sup.attach_listener(seen.append)
+
+        # Strict alternation: the consecutive-failure count never exceeds one.
+        for i in range(PERSIST_FAILURE_ALERT_THRESHOLD + 2):
+            sup._inject_for_test(_state_event(f"poison-{i}", 5800 + i))
+            sup._inject_for_test(_state_event(f"good-{i}", 5900 + i))
+
+        assert _wait_for_action(seen, "persistence_failing", count=1, timeout=10.0) >= 1, (
+            "half of every event being dropped was never reported to the user"
+        )
+        outage = [e for e in seen if e.action == "persistence_failing"]
+        assert outage[0].severity is Severity.high
+        assert outage[0].raw["failures"] >= PERSIST_FAILURE_ALERT_THRESHOLD
+        assert outage[0].raw["window"] <= PERSIST_FAILURE_WINDOW
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def test_drain_reports_a_continuing_outage_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alert must not re-fire on every failure while persistence stays down.
+
+    persistence_failing is itself an event: it goes back through the router into
+    this same drain loop and fails to persist like everything else. A trigger
+    that can fire on each failure would therefore feed itself.
+    """
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+
+        def always_fails(_ev: Event) -> None:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(sup, "_persist", always_fails)
+        seen: list[Event] = []
+        sup.attach_listener(seen.append)
+
+        total = 5 * PERSIST_FAILURE_ALERT_THRESHOLD
+        for i in range(total):
+            sup._inject_for_test(_state_event(f"poison-{i}", 5600 + i))
+
+        assert _wait_for_action(seen, "process_start", count=total, timeout=10.0) == total, (
+            "the drain never worked through the injected events"
+        )
+        # Give any surplus alert time to come back around through the router.
+        _wait_for_action(seen, "persistence_failing", count=2, timeout=1.0)
+        outage = [e for e in seen if e.action == "persistence_failing"]
+        assert len(outage) == 1, f"{total} failures produced {len(outage)} alerts, expected 1"
     finally:
         sup.stop(timeout=5.0)

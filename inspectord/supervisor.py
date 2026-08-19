@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from importlib.resources import files
 from queue import Empty as QueueEmpty
@@ -59,11 +60,18 @@ RESTART_HEALTHY_AFTER_S = 60.0
 RESTART_MAX_ATTEMPTS = 8
 
 # --- persistence resilience -------------------------------------------------
-# Consecutive _persist failures before the supervisor stops treating them as
-# bad luck (a duplicate event_id, a transient DuckDB conflict) and tells the
-# user that persistence itself is down. Emitted once per failure streak: a
-# single success resets the counter, so a healthy daemon never sees it.
-PERSIST_FAILURE_STREAK_ALERT = 10
+# Persistence health is judged over a rolling window of the last N outcomes
+# rather than a consecutive streak. A streak counter that a single success
+# resets never fires on a *partial* outage -- a systematic 9-fail/1-success
+# pattern, or any sustained ~50% loss, silently drops most of the telemetry
+# while the user-facing alert path says nothing.
+PERSIST_FAILURE_WINDOW = 20
+# Failures within that window before the supervisor stops treating them as bad
+# luck (a duplicate event_id, a transient DuckDB conflict) and tells the user
+# that persistence is failing. A one-off failure never gets near it.
+PERSIST_FAILURE_ALERT_THRESHOLD = 10
+# Minimum seconds between two persistence_failing events.
+PERSIST_ALERT_COOLDOWN_S = 300.0
 
 
 def backoff_delay(
@@ -285,8 +293,15 @@ class Supervisor:
         would kill this thread, and with it every subsequent write to the
         database and the journal, silently: the daemon keeps running, workers
         keep emitting, and nothing is ever stored again.
+
+        Health is tracked over the last PERSIST_FAILURE_WINDOW outcomes, not as
+        a consecutive streak, so a sustained *partial* outage -- half the events
+        failing, or nine in every ten -- is reported instead of being reset to
+        zero by the occasional success.
         """
-        persist_failures = 0
+        # True == that event failed to persist. maxlen makes this the last N.
+        outcomes: deque[bool] = deque(maxlen=PERSIST_FAILURE_WINDOW)
+        last_alert_at: float | None = None
         while not self._stop.is_set():
             try:
                 ev = sub.get_nowait()
@@ -296,26 +311,40 @@ class Supervisor:
             try:
                 self._persist(ev)
             except Exception as exc:
-                persist_failures += 1
+                outcomes.append(True)
+                failures = sum(outcomes)
                 log.error(
-                    "failed to persist %s event %s from %s (%d in a row): %r",
+                    "failed to persist %s event %s from %s (%d of the last %d failed): %r",
                     ev.action,
                     ev.event_id,
                     ev.module,
-                    persist_failures,
+                    failures,
+                    len(outcomes),
                     exc,
                 )
-                if persist_failures == PERSIST_FAILURE_STREAK_ALERT:
-                    self._report_persistence_down(persist_failures, exc)
+                now = time.monotonic()
+                cooled = last_alert_at is None or now - last_alert_at >= PERSIST_ALERT_COOLDOWN_S
+                if failures >= PERSIST_FAILURE_ALERT_THRESHOLD and cooled:
+                    window = len(outcomes)
+                    # Both guards matter. The report is itself an event: it goes
+                    # back through the router into this loop and fails to persist
+                    # like everything else. Clearing the window means the next
+                    # report needs a fresh THRESHOLD failures -- of which the
+                    # report's own is at most one -- so it cannot sustain itself,
+                    # and the cooldown bounds how often a busy event stream can
+                    # re-trigger it while the outage continues.
+                    outcomes.clear()
+                    last_alert_at = now
+                    self._report_persistence_down(failures, window, exc)
             else:
-                persist_failures = 0
+                outcomes.append(False)
             for fn in list(self._listeners):
                 try:
                     fn(ev)
                 except Exception as exc:
                     log.warning("listener raised: %r", exc)
 
-    def _report_persistence_down(self, failures: int, exc: BaseException) -> None:
+    def _report_persistence_down(self, failures: int, window: int, exc: BaseException) -> None:
         """Surface a persistence outage as an event instead of a log line nobody reads.
 
         The event cannot be stored either -- persistence is what is broken --
@@ -328,10 +357,10 @@ class Supervisor:
             severity="high",
             type_=["error"],
             message=(
-                f"failed to persist {failures} consecutive events; "
-                "the database and journal are not being written"
+                f"failed to persist {failures} of the last {window} events; "
+                "events are not being recorded"
             ),
-            raw={"consecutive_failures": failures, "error": repr(exc)},
+            raw={"failures": failures, "window": window, "error": repr(exc)},
         )
 
     def _persist(self, ev: Event) -> None:
