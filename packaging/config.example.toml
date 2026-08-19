@@ -96,11 +96,15 @@ module = "inspectord.workers.persistence_snapshotter"
 # YARA skip daily and only rkhunter actually scans.
 #
 # What you still have to do by hand, once, per host:
-#   aide     Write /var/lib/inspectord/aide/aide.conf (database_in,
-#            database_out, report_url=stdout, plus the trees to watch), then
-#            `aide --config /var/lib/inspectord/aide/aide.conf --init` on a
-#            machine you believe is clean and move database_out into place.
-#            Until then: scan_skipped "config_missing" (or "database_missing").
+#   aide     We now ship the config: packaging/aide.conf.example, installed to
+#            /var/lib/inspectord/aide/aide.conf by packaging/scripts/setup.sh.
+#            It watches /usr/bin, /usr/sbin, /etc and /boot, keeps its database
+#            out of the distro's /var/lib/aide, and reports to stdout. You still
+#            build the baseline yourself, on a machine you believe is clean:
+#              sudo aide --config /var/lib/inspectord/aide/aide.conf --init
+#              sudo mv /var/lib/inspectord/aide/aide.db{.new,}
+#            Until the config is installed: scan_skipped "config_missing".
+#            Until the baseline exists:     scan_skipped "database_missing".
 #   yara     Put .yar/.yara rulesets in /var/lib/inspectord/yara.
 #            Until then: scan_skipped "rules_missing".
 #   rkhunter Install the drop-in we ship (see below), then `rkhunter --propupd`,

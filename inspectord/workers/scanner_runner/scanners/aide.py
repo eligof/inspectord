@@ -4,9 +4,12 @@ AIDE's database is ours and lives under ``/var/lib/inspectord/aide/`` (parent
 spec §30.6), so this scanner is fully deterministic and fully offline: nothing
 here ever updates a signature database (design decision 8).
 
-**But we do not create it.** Nothing in this repo ships an AIDE config yet and
-``aide --init`` is the user's decision, not the daemon's — so on a fresh host
-AIDE has neither a config nor a database. ``preflight`` reports those two states
+**But we do not create it.** The repo ships a config —
+``packaging/aide.conf.example``, installed to ``DEFAULT_CONFIG_PATH`` by
+``packaging/scripts/setup.sh`` — and stops there: ``aide --init`` writes a
+baseline of the machine exactly as it is right now, which is the user's decision
+and not the daemon's. So a host can be missing the config (setup not run), the
+database (baseline not built), or both. ``preflight`` reports those two states
 as ``config_missing`` / ``database_missing`` skips; without it the scanner would
 exit 18 and report a ``failure`` every night forever. See ``preflight`` below.
 
@@ -209,8 +212,10 @@ class AideAdapter:
 
         ``config_missing``
             The config named by ``config_path`` (default
-            ``/var/lib/inspectord/aide/aide.conf``) does not exist. Nothing in
-            this repo ships one yet, so this is the state of every host today.
+            ``/var/lib/inspectord/aide/aide.conf``) does not exist. The repo
+            ships one (``packaging/aide.conf.example``) but nothing installs it
+            automatically, so this is the state of a host where
+            ``packaging/scripts/setup.sh`` has not been run.
         ``database_missing``
             The config exists and names a local ``database_in`` file that does
             not. Run ``aide --config <ours> --init`` yourself, on a machine you

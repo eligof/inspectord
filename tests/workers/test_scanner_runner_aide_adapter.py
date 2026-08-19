@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from inspectord.workers.scanner_runner.scanners import aide as aide_module
 from inspectord.workers.scanner_runner.scanners.aide import AideAdapter
 from inspectord.workers.scanner_runner.scanners.base import ScanOutcome
 
@@ -164,13 +165,22 @@ def _conf(tmp_path: Path, body: str) -> str:
     return str(conf)
 
 
-def test_preflight_reports_config_missing_rather_than_a_nightly_failure() -> None:
-    """The state of every host today: nothing ships an AIDE config yet.
+def test_preflight_reports_config_missing_rather_than_a_nightly_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A host that has not installed the config yet.
 
     Measured against AIDE 0.19.3, `--config /nonexistent --check` exits 18,
     which `interpret_outcome` correctly calls a failure -- so without this the
     enabled-by-default scanner would report "exit 18" every night forever.
+
+    The no-config_path case is exercised against a REDIRECTED default rather
+    than the real `/var/lib/inspectord/aide/aide.conf`: the repo now ships
+    `packaging/aide.conf.example` and `setup.sh` installs it to exactly that
+    path, so asserting on the live filesystem would pass or fail depending on
+    whether the developer had run setup.
     """
+    monkeypatch.setattr(aide_module, "DEFAULT_CONFIG_PATH", str(tmp_path / "absent.conf"))
     assert AideAdapter().preflight({}) == "config_missing"
     assert AideAdapter().preflight({"config_path": "/nope/aide.conf"}) == "config_missing"
 

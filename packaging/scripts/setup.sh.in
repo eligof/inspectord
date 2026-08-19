@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # inspectord setup helper — run once after installation to enable group-based
 # IPC socket access for a non-root user.
-# Templated: @PYTHON@ and @CONFIG_EXAMPLE@ substituted at install time.
+# Templated: @PYTHON@, @CONFIG_EXAMPLE@ and @AIDE_CONFIG_EXAMPLE@ substituted at
+# install time.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -69,7 +70,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Final notice
+# 6. Generate the AIDE config if absent
+# ---------------------------------------------------------------------------
+# Parent spec §30.6: AIDE gets no system config drop-in because inspectord owns
+# its database, under /var/lib/inspectord/aide/ — deliberately NOT the distro's
+# /var/lib/aide, which the Arch `aide` package and its aidecheck.timer own.
+#
+# This copies a config into place and stops. It does NOT run `aide --init`:
+# that writes a baseline of the machine exactly as it is right now, and a setup
+# script that certifies the current disk on the user's behalf is worse than no
+# baseline at all. Until the user builds one, the scanner reports
+# `scan_skipped` with reason `database_missing` — visible, and never a failure.
+aide_config_path="${INSPECTORD_AIDE_CONFIG:-/var/lib/inspectord/aide/aide.conf}"
+if [[ -e "$aide_config_path" ]]; then
+    echo "info: AIDE config already exists at '$aide_config_path', skipping generation"
+else
+    echo "info: generating AIDE config at '$aide_config_path'"
+    mkdir -p -m 750 "$(dirname "$aide_config_path")"
+    cp "@AIDE_CONFIG_EXAMPLE@" "$aide_config_path"
+    chmod 640 "$aide_config_path"
+    echo "info: AIDE will not run until you build its baseline yourself:"
+    echo "        sudo aide --config $aide_config_path --init"
+    echo "        sudo mv $(dirname "$aide_config_path")/aide.db.new \\"
+    echo "                $(dirname "$aide_config_path")/aide.db"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Final notice
 # ---------------------------------------------------------------------------
 echo ""
 echo "Setup complete."
