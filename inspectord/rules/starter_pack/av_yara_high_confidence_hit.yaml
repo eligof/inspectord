@@ -1,0 +1,38 @@
+version: 1.0.0
+id: av.yara_high_confidence_hit
+name: "high-confidence YARA hit"
+severity: high
+category: malware
+why: |
+  A YARA rule matched a file during a scheduled scan, and the matching rule
+  declared itself severe: its `severity` meta reads `high` or `critical`
+  (compared case-insensitively — imported rulesets capitalize freely). That
+  meta value is the only confidence signal a YARA hit carries, so it is what
+  "high confidence" means here.
+
+  READ THIS FIRST: **a YARA rule that declares no `severity` meta produces no
+  alert at all.** The hit is still recorded as a `scan_finding` event and is
+  visible in the events view — only the alert is withheld, because "high
+  confidence" cannot be asserted about a rule that asserts nothing. If you
+  import a ruleset and never see alerts from it, check whether its rules carry
+  a `severity` meta; if they do not, either add one or write a rule of your own
+  that keys on the rule names you care about. A numeric convention
+  (`severity = 3`, which yara prints as `severity =3`) is likewise not
+  recognized.
+
+  Unlike the other `av.*` rules, this one must read scanner-supplied text: the
+  rule name and the meta block arrive on the same untrusted stdout line as the
+  matched path. See the false positives for exactly what that allows. The
+  structural half of the match — that the YARA adapter ran, and that this is a
+  finding — is set by the worker and cannot be forged from inside a scan.
+false_positives:
+  - "Malware research, reverse-engineering samples, a security-tool cache, an email archive or a downloads directory holding a genuine specimen you put there on purpose. YARA does not know why a file is on the disk."
+  - "A broad or badly written rule in an imported ruleset. Nothing ships in /var/lib/inspectord/yara by default, so every rule that can fire this alert was added by you: `severity = \"high\"` in it is that author's opinion, and this rule promotes it to an alert unexamined. Read the rule before trusting its self-assessment."
+  - "A fabricated hit. A directory name inside the scanned tree can carry a line break, which splits one yara match line into two so the tail reads as a second match with an attacker-chosen rule name, meta block (including `severity=\"critical\"`) and file path. It needs a genuine match to ride on — but a genuine match is cheap to self-plant by writing a file that trips one of your own rules. So an unprivileged local user who can create a directory under the scan target can manufacture this alert naming a file they never touched. Confirm the named path really matches before acting: `yara -r <your-rules> <path>`."
+  - "A truncated path. The same line break shortens the genuine finding's path at the break, so a real detection can name a prefix of the real path — which may itself be an innocent file that exists."
+detect:
+  any_of:
+    - event.module == "scanner_runner" AND event.action == "scan_finding" AND threat.indicator.source == "yara" AND threat.indicator.severity MATCHES "^(?i:high|critical)$"
+short: "high-confidence YARA hit: {threat.indicator.value}"
+detail: "YARA rule {threat.indicator.value} (declared severity {threat.indicator.severity}) matched {file.path} during a scheduled scan. Rule name, declared severity and path are all scanner-supplied text: confirm the match before acting on it."
+labels: [scanner, yara, malware]
