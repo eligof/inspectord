@@ -69,7 +69,7 @@ class ScannerAdapter(Protocol):
     name: str                       # "aide" | "rkhunter" | "yara"
     binary: str                     # probed with shutil.which before each run
     def argv(self, config: dict[str, Any]) -> list[str]: ...
-    def interpret_exit(self, code: int) -> ScanOutcome: ...   # decision 10
+    def interpret_outcome(self, code: int, stdout: str, stderr: str) -> ScanOutcome: ...  # decision 10
     def parse(self, stdout: str, stderr: str) -> list[Finding]: ...
 ```
 
@@ -225,7 +225,7 @@ Per repo `CLAUDE.md`, TDD throughout:
 - Adapter parsers are pure functions over captured scanner-output fixtures — no subprocess, no
   root. Every parser gets a malformed-input test asserting it returns the findings parsed so far
   rather than raising.
-- `interpret_exit` gets a table test per scanner, explicitly covering the case that matters
+- `interpret_outcome` gets a table test per scanner, explicitly covering the case that matters
   most: **a non-zero exit meaning "findings", not "failure"**.
 - The threaded runner is tested with a fake adapter whose "scan" is a controllable sleep,
   covering: a run completing, a run timing out and being killed, `teardown()` during a run,

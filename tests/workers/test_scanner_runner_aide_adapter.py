@@ -2,7 +2,7 @@
 
 Pure functions over fixture strings: no subprocess, no root, no installed AIDE.
 
-The `interpret_exit` table test is the centerpiece (design decision 10): AIDE's
+The `interpret_outcome` table test is the centerpiece (design decision 10): AIDE's
 exit status is a BITMASK whose low bits mean new/removed/changed entries --
 i.e. findings, a successful scan -- and only the high error codes mean failure.
 Treating any non-zero code as a failure would report every real detection as a

@@ -29,7 +29,7 @@ So a non-zero status in ``1..7`` means the scan **succeeded and found
 something** — reporting it as a failure would turn every real detection into a
 broken scan, which is the worst bug this worker could have.
 
-``interpret_exit`` is written as a range check with a ``failure`` default
+``interpret_outcome`` is written as a range check with a ``failure`` default
 rather than an enumeration of the error codes: a future AIDE that adds a new
 error code is then reported as a failure (safe) instead of being silently
 misread, while the low-bit range stays exact.
