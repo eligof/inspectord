@@ -209,6 +209,153 @@ def test_parse_legacy_inline_form() -> None:
 
 
 # --------------------------------------------------------------------------
+# a line break in a reported filename -- the forged report-line exposure
+#
+# `/` and NUL are the only bytes a Linux filename may not contain, and every
+# line of an `aide --check` report ends in a path AIDE is reporting on, so the
+# tail after a break is fully attacker-chosen. This parser is SECTION-DRIVEN,
+# so a forged line is not limited to inventing an entry: it can open a spurious
+# section, mislabel genuine entries, and -- uniquely among the three adapters --
+# SUPPRESS a genuine one by closing the section. Measured live against AIDE
+# 0.19.3 (see the adapter's module docstring and the live tests): it escapes
+# control characters 00-31 and 127 as octal, but passes U+0085, U+2028 and
+# U+2029 through raw, and `str.splitlines` breaks on all three. These tests PIN
+# what is closed and what remains.
+# --------------------------------------------------------------------------
+
+# One honest report of a planted tree, as the parser would see it from an AIDE
+# that printed a RAW newline in a path. AIDE 0.19.3 escapes newlines, so this
+# needs an older/other AIDE -- assumed reachable rather than argued away.
+FORGED_REPORT = (
+    "Added entries:\n"
+    "f++++++++++++++++: /data/a_genuine\n"
+    "d++++++++++++++++: /data/m1\nf++++++++++++++++: /etc/shadow\n"
+    "d++++++++++++++++: /data/m2\nRemoved entries:\n"
+    "d++++++++++++++++: /data/m3\nSome heading:\n"
+    "f++++++++++++++++: /data/zzz_genuine\n"
+)
+
+
+def test_a_newline_in_a_filename_forges_an_extra_entry() -> None:
+    """The split cannot be undone once AIDE has printed the name.
+
+    By the time `parse` runs the forged line is byte-for-byte a real entry
+    line, so it becomes a finding on an attacker-chosen `file.path`. Pinned,
+    not fixed: guessing which report lines look "unexpected" would risk
+    dropping real AIDE changes.
+    """
+    findings = AideAdapter().parse(FORGED_REPORT, "")
+    assert ("added", "/etc/shadow") in [(f.indicator_value, f.path) for f in findings]
+
+
+def test_a_forged_line_can_open_a_spurious_section() -> None:
+    """Wider than the rkhunter/YARA case: the forged tail can be a HEADER.
+
+    `Removed entries:` riding in a filename opens a `removed` section, so the
+    next genuine entry -- a real, newly added file -- is reported with the
+    attacker's change kind instead of its own.
+    """
+    findings = AideAdapter().parse(FORGED_REPORT, "")
+    assert ("removed", "/data/m3") in [(f.indicator_value, f.path) for f in findings]
+
+
+def test_a_forged_heading_suppresses_a_genuine_entry() -> None:
+    """The bound rkhunter and YARA do NOT share: an AIDE forgery can HIDE.
+
+    A forged bare heading matches `_HEADING_RE` and closes the open section, so
+    every genuine entry sorted after it -- AIDE sorts a section by path -- is
+    skipped. Here a genuinely new file vanishes from the findings entirely.
+    Pinned so nobody reads the section machinery and assumes only addition is
+    possible.
+    """
+    findings = AideAdapter().parse(FORGED_REPORT, "")
+    assert "/data/zzz_genuine" not in [f.path for f in findings]
+
+
+def test_a_forged_line_needs_no_open_section_at_all() -> None:
+    """The legacy inline form matches before the section check, so a forged
+    `changed: /path` works anywhere in the report -- including the trailing
+    "Detailed information" block, where no section is open."""
+    findings = AideAdapter().parse("Summary:\nFile: /data/m4\nchanged: /etc/passwd\n", "")
+    assert [(f.indicator_value, f.path) for f in findings] == [("changed", "/etc/passwd")]
+
+
+def test_the_genuine_entry_survives_the_forged_line() -> None:
+    """The bound that matters most: entries before the forgery are untouched.
+
+    The genuine `added` entry read before the injected line is already a
+    finding, with its own change kind and its whole path, when the forged line
+    is parsed.
+    """
+    findings = AideAdapter().parse(FORGED_REPORT, "")
+    assert findings[0].indicator_value == "added"
+    assert findings[0].path == "/data/a_genuine"
+    assert findings[0].category == "file"
+
+
+def test_a_forged_report_line_cannot_change_the_outcome() -> None:
+    """The bound AIDE holds more firmly than either sibling.
+
+    `interpret_outcome` reads the exit bitmask and nothing else, so no amount
+    of forged report text can move a `clean` or a `failure` to `findings`.
+    Sanitizing the text the PARSER reads must never leak into the verdict.
+    """
+    adapter = AideAdapter()
+    assert adapter.interpret_outcome(0, FORGED_REPORT, "") is ScanOutcome.clean
+    assert adapter.interpret_outcome(18, FORGED_REPORT, "") is ScanOutcome.failure
+    # The forged line rides inside a real report, which was already `findings`.
+    assert adapter.interpret_outcome(5, FORGED_REPORT, "") is ScanOutcome.findings
+
+
+@pytest.mark.parametrize(
+    "break_char", ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+def test_only_a_raw_newline_forges_a_report_line(break_char: str) -> None:
+    """`str.splitlines` breaks on eight characters beyond `\\n`, and a filename
+    may contain every one of them -- AIDE 0.19.3 was measured printing `\\x85`
+    and U+2028/9 raw, so those three forged real findings before the fix.
+    Splitting on `\\n` alone closes all eight and narrows the forgery to the one
+    character no line-based parser can defend against."""
+    text = f"Added entries:\nf++++++++++++++++: /data/x{break_char}f+++: /etc/shadow\n"
+    findings = AideAdapter().parse(text, "")
+    assert len(findings) == 1
+    assert findings[0].indicator_value == "added"
+    assert findings[0].path != "/etc/shadow"
+
+
+@pytest.mark.parametrize(
+    "break_char", ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+def test_only_a_raw_newline_forges_a_section_header(break_char: str) -> None:
+    """The section-driven half of the same surface: a forged tail that is a
+    HEADER would relabel every following entry, and a forged bare heading would
+    close the section and drop them. Neither reaches the parser any more."""
+    text = (
+        f"Added entries:\nf++++++++++++++++: /data/x{break_char}Removed entries:\n"
+        f"f++++++++++++++++: /data/y{break_char}Some heading:\n"
+        "f++++++++++++++++: /data/still_here\n"
+    )
+    findings = AideAdapter().parse(text, "")
+    assert [f.indicator_value for f in findings] == ["added", "added", "added"]
+    assert "/data/still_here" in [f.path for f in findings]
+
+
+def test_control_characters_never_reach_a_finding() -> None:
+    """Sanitized so nothing downstream -- a terminal, a log tailer -- can
+    re-interpret them. NUL and an ESC sequence are the ones actually measured."""
+    text = "Added entries:\nf++++++++++++++++: /data/\x1b[31ma\x00b\x07.txt\n"
+    findings = AideAdapter().parse(text, "")
+    assert len(findings) == 1
+    for field in (
+        findings[0].indicator_value,
+        findings[0].raw_line,
+        findings[0].message or "",
+        findings[0].path or "",
+    ):
+        assert not any(ch < " " or "\x7f" <= ch <= "\x9f" for ch in field), repr(field)
+
+
+# --------------------------------------------------------------------------
 # malformed input -- never raise, return the findings parsed so far
 # --------------------------------------------------------------------------
 

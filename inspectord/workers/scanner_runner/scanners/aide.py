@@ -44,6 +44,75 @@ exits 18 and an unknown flag exits 15.
 
 Unlike rkhunter, AIDE needs no output to be classified, so
 ``interpret_outcome`` ignores its ``stdout``/``stderr`` arguments deliberately.
+
+**A filename can forge a report line.** The only bytes a Linux filename may not
+contain are ``/`` and NUL, and every line of an ``aide --check`` report ends in
+a path AIDE is reporting on. A break character inside a reported name therefore
+splits one report line into two, and the tail — fully attacker-chosen, because
+the path is last on the line — is then read as a line of its own. The slashes
+of a fake path cost nothing: a *directory* named ``x<break>f+++…: `` with
+``etc/shadow`` nested under it makes AIDE print
+``f++++++++++++++++: <root>/x<break>f++++++++++++++++: /etc/shadow``.
+
+This parser is **section-driven**, which makes the surface wider than the
+rkhunter or YARA one — a forged line can be a section header, a bare heading or
+an entry, so it can *hide* a genuine change as well as invent one. Measured
+against the **installed AIDE 0.19.3** with a planted tree (four forged names and
+two ordinary new files), parsed by the pre-fix ``str.splitlines`` loop:
+
+* a forged ``f++++++++++++++++: /etc/shadow`` line **invented** an ``added``
+  finding on ``/etc/shadow`` — attacker-chosen ``file.path``;
+* a forged ``Removed entries:`` line **opened a spurious section**, so the next
+  genuine ``added`` entry was reported as ``removed`` — the wrong change kind on
+  a real path;
+* a forged ``added: /etc/passwd`` line forged a finding through the legacy
+  inline form, which needs **no open section at all** and so works anywhere in
+  the report, including the trailing "Detailed information" block;
+* a forged bare heading (``Some heading:``) matched ``_HEADING_RE`` and closed
+  the open section, and every genuine entry sorted after it — AIDE sorts a
+  section by path — was then **skipped**. One genuinely new file disappeared
+  from the findings entirely. That is real **suppression**: rkhunter and YARA
+  could only add a finding, never hide one.
+
+What AIDE 0.19.3 actually prints was measured, not assumed. ``man aide``
+("NOTES / Control characters") documents that control characters 00-31 and 127
+are always escaped in plain report output as a backslash and three octal
+digits, and the planted tree confirms it: ``\n``, ``\r``, ``\v``, ``\f`` and
+``\x1c``-``\x1e`` all came back as ``\012``, ``\015``, ``\013``, ``\014``,
+``\034``-``\036``. **U+0085, U+2028 and U+2029 came back raw** — they are
+multi-byte UTF-8, outside the byte range AIDE escapes — and ``str.splitlines``
+breaks on all three, so every forgery above was reachable through the real
+binary with no special privilege beyond creating a directory in the monitored
+tree.
+
+Splitting on ``\n`` alone closes all three (the same planted report now yields
+only genuine findings, correctly labelled, with the suppressed one back), and
+every line is stripped of control characters so an ESC or a NUL never reaches an
+event for a terminal or a log tailer to re-interpret. AIDE's own escaping of
+``\n`` is deliberately **not** relied on: the dependency manifest pins
+``minimum_version: "0.18"`` and only 0.19.3 was measured here. So an AIDE that
+prints a raw newline in a path is assumed reachable, and bounded instead:
+
+* it **cannot** change the outcome. ``interpret_outcome`` reads the exit bitmask
+  and nothing else, so no amount of forged report text can turn a ``failure`` or
+  a ``clean`` into ``findings`` — the one bound AIDE holds more firmly than
+  either sibling. A report body only exists at all when the run already found
+  differences;
+* it **can** invent a finding, on an attacker-chosen path and with an
+  attacker-chosen change kind;
+* it **can** mislabel genuine entries by opening a spurious section;
+* it **can** suppress genuine entries that follow it in the same section, by
+  forging a heading that closes the section;
+* it **truncates** the planted name's own entry at the break, so that one
+  genuine finding names a prefix of the real path.
+
+Guessing which report lines look "unexpected" was rejected deliberately, as it
+was for rkhunter and YARA: a parser that sometimes drops a real AIDE change
+would be far worse than one that sometimes shows an extra. The tests pin the
+exposure instead — unit tests over all nine break characters plus live ones
+that plant the tree against the real binary for each of the three it prints raw
+— so nobody later reads the section machinery and concludes a forged line is
+impossible.
 """
 
 from __future__ import annotations
@@ -52,7 +121,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome
+from inspectord.workers.scanner_runner.scanners.base import Finding, ScanOutcome, sanitize_text
 
 # Spec §30.6: the AIDE database and config are ours, under /var/lib/inspectord.
 DEFAULT_CONFIG_PATH = "/var/lib/inspectord/aide/aide.conf"
@@ -130,13 +199,21 @@ class AideAdapter:
 
         *stderr* is ignored for findings; AIDE writes only diagnostics there,
         and a real error is already visible in the exit status.
+
+        Lines are split on ``\\n`` **only** — not ``str.splitlines``, which also
+        breaks on ``\\r``, ``\\v``, ``\\f``, ``\\x1c``-``\\x1e``, ``\\x85`` and
+        U+2028/9, every one of them legal in a filename AIDE is about to print —
+        and each line is then stripped of control characters. That leaves a raw
+        newline in a reported filename as the one remaining way to forge a line;
+        see "A filename can forge a report line" in the module docstring for
+        what that can and cannot do.
         """
         del stderr
         findings: list[Finding] = []
         section: str | None = None
 
-        for line in stdout.splitlines():
-            stripped = line.strip()
+        for raw_line in stdout.split("\n"):
+            stripped = sanitize_text(raw_line).strip()
             if not stripped:
                 continue
 

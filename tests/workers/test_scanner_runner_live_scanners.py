@@ -1,8 +1,11 @@
 """Live scanner tests — the adapters against the real binaries.
 
-The YARA tests need no privileges and run in the ordinary gate whenever `yara`
-is installed; they drive the **whole worker**, so a real subprocess, the real
-argv, the real parse and the real events are all exercised.
+The YARA and AIDE tests need no privileges and run in the ordinary gate
+whenever the binary is installed; they drive the **whole worker**, so a real
+subprocess, the real argv, the real parse and the real events are all
+exercised. The AIDE ones build their **own** database and config under
+`tmp_path` -- `/var/lib/aide` and `/var/lib/inspectord` are never read, written
+or `--init`ed.
 
 The rkhunter tests are **root-only**: `/usr/bin/rkhunter` is `0700 root:root`.
 Run them with::
@@ -36,11 +39,13 @@ from typing import Any
 import pytest
 
 from inspectord.workers.scanner_runner.runner import ScannerRunnerWorker
+from inspectord.workers.scanner_runner.scanners.aide import AideAdapter
 from inspectord.workers.scanner_runner.scanners.base import ScanOutcome
 from inspectord.workers.scanner_runner.scanners.rkhunter import RkhunterAdapter
 from inspectord.workers.scanner_runner.scanners.yara import YaraAdapter
 
 requires_yara = pytest.mark.skipif(shutil.which("yara") is None, reason="needs the yara binary")
+requires_aide = pytest.mark.skipif(shutil.which("aide") is None, reason="needs the aide binary")
 requires_root_rkhunter = pytest.mark.skipif(
     os.geteuid() != 0 or shutil.which("rkhunter") is None,
     reason="needs root and rkhunter (/usr/bin/rkhunter is 0700 root:root)",
@@ -245,6 +250,136 @@ def test_live_yara_with_no_rules_skips_instead_of_failing(tmp_path: Path) -> Non
 
     assert [e["action"] for e in events] == ["scan_skipped"], events
     assert events[0]["raw"]["reason"] == "rules_empty", events[0]
+
+
+# --------------------------------------------------------------------------
+# AIDE -- no root required, own database under tmp_path
+# --------------------------------------------------------------------------
+
+#: The break characters AIDE 0.19.3 was measured printing RAW.
+#:
+#: `man aide` ("NOTES / Control characters") says control characters 00-31 and
+#: 127 are always escaped as a backslash plus three octal digits, and a planted
+#: tree confirms it: `\n`, `\r`, `\v`, `\f` and `\x1c`-`\x1e` came back as
+#: `\012`, `\015`, `\013`, `\014`, `\034`-`\036`. These three are multi-byte
+#: UTF-8, outside the byte range AIDE escapes, so they come back untouched --
+#: and `str.splitlines` breaks on every one of them.
+AIDE_RAW_BREAK_CHARS = ["\x85", "\u2028", "\u2029"]
+
+
+def _aide_lab(tmp_path: Path) -> Path:
+    """Build a throwaway AIDE config + database entirely under *tmp_path*.
+
+    Nothing here touches `/var/lib/aide`, `/var/lib/inspectord` or any system
+    config: `database_in`, `database_out` and the single monitored tree all
+    live under the pytest temp directory, and `--init` is run against THIS
+    config only.
+    """
+    lab = tmp_path / "aide"
+    data = lab / "data"
+    data.mkdir(parents=True)
+    conf = lab / "aide.conf"
+    conf.write_text(
+        f"database_in=file:{lab}/aide.db\n"
+        f"database_out=file:{lab}/aide.db.new\n"
+        "report_url=stdout\n"
+        "Lab = p+i+n+u+g+s+m+c+sha256\n"
+        f"{data} Lab\n"
+    )
+    (data / "baseline").write_text("baseline\n")
+
+    init = subprocess.run(
+        ["aide", "--config", str(conf), "--init"],
+        capture_output=True,
+        text=True,
+        timeout=120.0,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    assert init.returncode == 0, init.stdout + init.stderr
+    (lab / "aide.db.new").rename(lab / "aide.db")
+    return lab
+
+
+@requires_aide
+@pytest.mark.parametrize("break_char", AIDE_RAW_BREAK_CHARS)
+def test_live_aide_a_break_char_in_a_path_forges_nothing(tmp_path: Path, break_char: str) -> None:
+    """The section-driven forgery, planted for real against AIDE 0.19.3.
+
+    Every report line ends in a path, so the tail after a break is entirely
+    attacker-chosen; `/` costs nothing because a DIRECTORY name can carry the
+    break and the fake path is just directories nested under it. Under
+    `str.splitlines` this one honest report invented an `added /etc/shadow`,
+    relabelled a real new file `removed` via a forged `Removed entries:`, and
+    -- worst -- SUPPRESSED a genuinely new file, because a forged bare heading
+    closed the section and AIDE sorts a section by path.
+    """
+    lab = _aide_lab(tmp_path)
+    data = lab / "data"
+    (data / "a_genuine").write_text("new\n")
+    forged_entry = data / f"m1{break_char}f++++++++++++++++: " / "etc"
+    forged_entry.mkdir(parents=True)
+    (forged_entry / "shadow").write_text("planted\n")
+    (data / f"m2{break_char}Removed entries:").mkdir()
+    (data / f"m3{break_char}Some heading:").mkdir()
+    (data / "zzz_genuine").write_text("new\n")
+
+    events = _run_worker(
+        {
+            "interval_s": 0.01,
+            "startup_delay_s": 0.0,
+            "scanners": {
+                "aide": {
+                    "enabled": True,
+                    "interval_s": 1000.0,
+                    "timeout_s": 120.0,
+                    "config_path": str(lab / "aide.conf"),
+                }
+            },
+        },
+        [AideAdapter()],
+    )
+
+    completed = next(e for e in events if e["action"] == "scan_completed")
+    assert completed["raw"]["scan_outcome"] == "findings", completed
+    findings = [e for e in events if e["action"] == "scan_finding"]
+    paths = [e["file"]["path"] for e in findings]
+
+    # Nothing invented: the planted `/etc/shadow` line never became a finding.
+    assert "/etc/shadow" not in paths, findings
+    assert all(p.startswith(str(data)) for p in paths), findings
+    # Nothing suppressed: both genuinely new files are still reported, even
+    # though one of them sorts AFTER the forged heading.
+    assert str(data / "a_genuine") in paths, findings
+    assert str(data / "zzz_genuine") in paths, findings
+    # Nothing mislabelled: every new path is `added`, not the forged `removed`.
+    kinds = {e["threat"]["indicator"]["value"] for e in findings}
+    assert kinds <= {"added", "changed"}, findings
+    # And no control character survived into an event.
+    for path in paths:
+        assert not any(ch < " " or "\x7f" <= ch <= "\x9f" for ch in path), repr(path)
+
+
+@requires_aide
+def test_live_aide_verdict_does_not_depend_on_the_report(tmp_path: Path) -> None:
+    """Sanitizing the text the PARSER reads must not leak into the verdict.
+
+    AIDE classifies on the exit bitmask alone, so a real unchanged tree exits 0
+    and is `clean` however the report reads.
+    """
+    lab = _aide_lab(tmp_path)
+    proc = subprocess.run(
+        AideAdapter().argv({"config_path": str(lab / "aide.conf")}),
+        capture_output=True,
+        text=True,
+        timeout=120.0,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    adapter = AideAdapter()
+    assert adapter.interpret_outcome(proc.returncode, proc.stdout, proc.stderr) is ScanOutcome.clean
+    assert adapter.parse(proc.stdout, proc.stderr) == []
 
 
 # --------------------------------------------------------------------------
