@@ -7,12 +7,22 @@ that yields a fixed sequence of records without shelling out to udevadm.
 from __future__ import annotations
 
 import json
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from inspectord.workers.udev_monitor.__main__ import UdevMonitorWorker
+from inspectord.workers.udev_monitor.__main__ import (
+    UdevMonitorWorker,
+    _install_stop_handlers,
+)
 
 
 class FakeStream:
@@ -289,3 +299,73 @@ def test_worker_closes_stream_on_stop() -> None:
     worker.start()
     worker.stop()
     assert stream._closed is True
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM teardown: the supervisor stops workers with SIGTERM, and this worker
+# owns a long-lived ``udevadm monitor`` grandchild that must go with it.
+# ---------------------------------------------------------------------------
+
+
+def test_install_stop_handlers_sets_the_flag_on_sigterm_and_sigint() -> None:
+    """SIGTERM/SIGINT must set the stop flag rather than kill the interpreter.
+
+    Python's default SIGTERM disposition terminates the process outright, so
+    main()'s ``finally: worker.stop()`` never runs and the udevadm grandchild
+    is orphaned (reparented to init, alive forever).
+    """
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            stop = threading.Event()
+            _install_stop_handlers(stop)
+            assert not stop.is_set()
+            signal.raise_signal(sig)
+            assert stop.is_set(), f"{sig!r} did not request a graceful stop"
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+@pytest.mark.skipif(shutil.which("udevadm") is None, reason="needs udevadm")
+def test_sigterm_leaves_no_orphaned_udevadm() -> None:
+    """End to end: SIGTERM the worker exactly as the supervisor does; no leak.
+
+    ``udevadm monitor --udev`` is the unprivileged libudev broadcast socket, so
+    this needs no root.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "inspectord.workers.udev_monitor"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        # Wait for the grandchild to actually exist before signalling.
+        deadline = time.monotonic() + 15.0
+        children: list[str] = []
+        while time.monotonic() < deadline and not children:
+            children = subprocess.run(
+                ["pgrep", "-P", str(proc.pid)], capture_output=True, text=True, check=False
+            ).stdout.split()
+            if not children:
+                time.sleep(0.05)
+        assert children, "the worker never spawned its udevadm child"
+
+        proc.terminate()
+        assert proc.wait(timeout=15) == 0, "SIGTERM killed the worker before it could tear down"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=15)
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+    # The grandchildren must be gone -- not merely reparented away from us.
+    deadline = time.monotonic() + 5.0
+    alive = children
+    while time.monotonic() < deadline and alive:
+        alive = [pid for pid in children if Path(f"/proc/{pid}").exists()]
+        if alive:
+            time.sleep(0.05)
+    assert not alive, f"orphaned udevadm processes survived the worker: {alive}"
