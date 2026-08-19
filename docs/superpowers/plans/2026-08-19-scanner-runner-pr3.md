@@ -177,7 +177,7 @@ Nothing else changes: no registry, no `__init__`, no `pyproject.toml`, no config
 
 ### Task 1: the plan itself
 
-- [ ] Write this document and commit it before touching code.
+- [x] Write this document and commit it before touching code.
 
 ---
 
@@ -186,7 +186,7 @@ Nothing else changes: no registry, no `__init__`, no `pyproject.toml`, no config
 **Files:** `inspectord/rules/starter_pack/av_rkhunter_warning_or_worse.yaml` (new),
 `tests/rules/starter_pack/test_av_scanner_rules.py` (new)
 
-- [ ] **Step 1: write the failing tests** — a `_finding_event(...)` helper mirroring
+- [x] **Step 1: write the failing tests** — a `_finding_event(...)` helper mirroring
       `runner._emit_finding`'s exact output shape (module `scanner_runner`, action `scan_finding`,
       severity `low`, `threat={"indicator": {...}}`, `raw={"scanner":…, "run_id":…, "line":…}`):
   - fires on an rkhunter finding, `severity == "medium"`, `rule_id == "av.rkhunter_warning_or_worse"`;
@@ -195,15 +195,15 @@ Nothing else changes: no registry, no `__init__`, no `pyproject.toml`, no config
   - does **not** fire on `module == "fim_watcher"` (wrong module);
   - does **not** fire on `action == "scan_completed"` / `scan_skipped` (wrong action);
   - the rendered `short`/`detail` carry the check name and the message.
-- [ ] **Step 2: run; expect FAIL** (the rule file does not exist).
-- [ ] **Step 3: write the YAML**, with the five measured `false_positives` above.
-- [ ] **Step 4:** green; full unit gate; **commit** — `feat(rules): av.rkhunter_warning_or_worse`.
+- [x] **Step 2: run; expect FAIL** (the rule file does not exist).
+- [x] **Step 3: write the YAML**, with the five measured `false_positives` above.
+- [x] **Step 4:** green; full unit gate; **commit** — `feat(rules): av.rkhunter_warning_or_worse`.
 
 ### Task 3: `av.yara_high_confidence_hit`
 
 **Files:** `inspectord/rules/starter_pack/av_yara_high_confidence_hit.yaml` (new), same test file.
 
-- [ ] **Step 1: extend the tests** —
+- [x] **Step 1: extend the tests** —
   - fires for `threat.indicator.severity == "high"` and `"critical"`, `severity == "high"`;
   - fires for `"High"` / `"CRITICAL"` (the case-insensitivity decision, pinned);
   - does **not** fire for `"low"` / `"medium"` / `"informational"`;
@@ -212,7 +212,7 @@ Nothing else changes: no registry, no `__init__`, no `pyproject.toml`, no config
   - does **not** fire for `"3"` (numeric meta), with a comment naming it as documented, not a bug;
   - does **not** fire on an rkhunter or aide finding carrying `severity="high"` (wrong source);
   - does **not** fire on another module or another action.
-- [ ] **Step 2: FAIL. Step 3: write the YAML. Step 4:** green; gate; **commit** —
+- [x] **Step 2: FAIL. Step 3: write the YAML. Step 4:** green; gate; **commit** —
       `feat(rules): av.yara_high_confidence_hit`.
 
 ### Task 4: `av.aide_change_outside_pkgmgr`
@@ -220,7 +220,7 @@ Nothing else changes: no registry, no `__init__`, no `pyproject.toml`, no config
 **Files:** `inspectord/rules/starter_pack/av_aide_change_outside_pkgmgr.py` (new),
 `tests/rules/starter_pack/test_av_aide_change_outside_pkgmgr.py` (new)
 
-- [ ] **Step 1: write the failing tests** —
+- [x] **Step 1: write the failing tests** —
   - fires with an **empty** history;
   - fires when the nearest package event is **outside** the window;
   - does **not** fire when a package event sits **inside** the window;
@@ -230,12 +230,12 @@ Nothing else changes: no registry, no `__init__`, no `pyproject.toml`, no config
   - a non-package event inside the window (e.g. `ssh_login_failed`) does not suppress;
   - `_PKGMGR_WINDOW_S <= rule_engine._HISTORY_WINDOW.total_seconds()` — the coupling guard;
   - the `Match` carries `primary_entity_kind == "file"` and the reported path.
-- [ ] **Step 2: FAIL. Step 3: write the module. Step 4:** green; gate; **commit** —
+- [x] **Step 2: FAIL. Step 3: write the module. Step 4:** green; gate; **commit** —
       `feat(rules): av.aide_change_outside_pkgmgr`.
 
 ### Task 5: full gates
 
-- [ ] `.venv/bin/python -m pytest -m "not integration and not ebpf_load" -q` (exit 0) ·
+- [x] `.venv/bin/python -m pytest -m "not integration and not ebpf_load" -q` (exit 0) ·
       `.venv/bin/ruff check inspectord tests` · `.venv/bin/ruff format --check inspectord tests` ·
       `.venv/bin/mypy inspectord`. Then report. **Do not push, do not open a PR, do not merge.**
 
@@ -255,3 +255,33 @@ Nothing else changes: no registry, no `__init__`, no `pyproject.toml`, no config
   live scanner behaviour they encode is already pinned by
   `tests/workers/test_scanner_runner_live_scanners.py`. The root run above was verification, not a
   new test.
+
+---
+
+## Execution notes (what actually changed vs. the plan)
+
+Executed 2026-08-19 on branch `scanner-runner-pr3`. All five tasks done; four commits (plan, then
+one per rule). Final gate: **1163 passed / 11 skipped / 8 deselected**, ruff check + format clean,
+mypy clean over 138 source files. Registry discovery verified end-to-end: the starter pack now
+loads 16 rules with unique ids, including all three `av.*` ones.
+
+Deltas worth a reviewer's eye:
+
+1. **The forward edge of rule 3's window was left unbounded, and a test now says so.** The plan
+   described the window as "backwards only", assuming `recent_events` would exclude a package event
+   timestamped *after* the finding. It does not — `EvalContext.recent_events` sets a lower bound
+   only. Rather than adding an upper bound, the behaviour was kept and justified: a finding's `ts`
+   is stamped when the runner emits it, at the **end** of a scan that took minutes, so a pacman
+   line timestamped a few seconds later is still concurrent with that scan and explains the change
+   just as well. `test_a_transaction_timestamped_just_after_the_finding_also_suppresses` pins it.
+2. **`false_positives` on the Python rule is a module-level tuple**, not a class attribute list —
+   ruff's `RUF012` rejects a mutable class-attribute default, and `ClassVar` would have been the
+   only alternative. `Match` still receives a `list`.
+3. **The rkhunter measurement found a fifth warning** the brief did not mention: rkhunter's standing
+   `--propupd` responsibility notice is itself a `Warning:` block and therefore its own finding. It
+   is in `false_positives` as its own entry.
+4. **Not done, deliberately:** `av.clamav_signature_hit` (no adapter, ClamAV out of scope); any
+   staleness rule (§4.3 has no producer); any live/root test — these rules are pure functions over
+   `Event` objects, and the scanner behaviour they encode is already pinned by
+   `tests/workers/test_scanner_runner_live_scanners.py`. The root rkhunter run performed here was
+   verification of the false-positive text, not a new committed test.
