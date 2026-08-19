@@ -74,6 +74,31 @@ PERSIST_FAILURE_ALERT_THRESHOLD = 10
 PERSIST_ALERT_COOLDOWN_S = 300.0
 
 
+class PersistFailed(Exception):
+    """A _persist failure, tagged with the stage that broke.
+
+    _persist appends to the journal first and independently of the database, so
+    a DuckDB failure (disk full, PRIMARY KEY conflict) still leaves the event in
+    the journal while a journal failure loses it outright. The stage is what
+    lets the outage report say which of the two is actually down instead of
+    asserting both are.
+    """
+
+    def __init__(self, stage: str, cause: BaseException) -> None:
+        super().__init__(f"{stage}: {cause!r}")
+        self.stage = stage
+        self.cause = cause
+
+
+def _persistence_outage_detail(stage: str | None) -> str:
+    """What is actually lost, given which stage of _persist failed."""
+    if stage == "journal":
+        return "neither the journal nor the database is recording events"
+    if stage == "database":
+        return "the database is not recording events (the journal still has them)"
+    return "events are not being recorded"
+
+
 def backoff_delay(
     attempt: int,
     *,
@@ -352,27 +377,45 @@ class Supervisor:
         which is the whole point: a monitor that has silently stopped recording
         is exactly the blind spot the user needs told about.
         """
+        stage = exc.stage if isinstance(exc, PersistFailed) else None
         self._emit_supervisor_event(
             action="persistence_failing",
             severity="high",
             type_=["error"],
             message=(
                 f"failed to persist {failures} of the last {window} events; "
-                "events are not being recorded"
+                f"{_persistence_outage_detail(stage)}"
             ),
-            raw={"failures": failures, "window": window, "error": repr(exc)},
+            raw={"failures": failures, "window": window, "stage": stage, "error": repr(exc)},
         )
 
     def _persist(self, ev: Event) -> None:
         payload = ev.model_dump_json()
-        self._journal.append(json.loads(payload))
-        self._db.execute(
-            "INSERT INTO events_enriched "
-            "(event_id, ts, kind, module, action, severity, payload_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [ev.event_id, ev.ts, ev.kind.value, ev.module, ev.action, ev.severity.value, payload],
-        )
-        project(ev, self._db, boot_id=self._boot_id)
+        record = json.loads(payload)
+        try:
+            self._journal.append(record)
+        except Exception as exc:
+            raise PersistFailed("journal", exc) from exc
+        # The journal already holds the event from here on: a failure below
+        # costs the database row and the projection, not the record itself.
+        try:
+            self._db.execute(
+                "INSERT INTO events_enriched "
+                "(event_id, ts, kind, module, action, severity, payload_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ev.event_id,
+                    ev.ts,
+                    ev.kind.value,
+                    ev.module,
+                    ev.action,
+                    ev.severity.value,
+                    payload,
+                ],
+            )
+            project(ev, self._db, boot_id=self._boot_id)
+        except Exception as exc:
+            raise PersistFailed("database", exc) from exc
 
     def _spawn_worker(self, spec: WorkerSpec) -> None:
         with self._procs_lock:

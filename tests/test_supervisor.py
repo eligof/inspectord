@@ -20,6 +20,7 @@ from inspectord.storage.db import Database
 from inspectord.supervisor import (
     PERSIST_FAILURE_ALERT_THRESHOLD,
     PERSIST_FAILURE_WINDOW,
+    PersistFailed,
     Supervisor,
 )
 
@@ -568,5 +569,66 @@ def test_drain_reports_a_continuing_outage_only_once(
         _wait_for_action(seen, "persistence_failing", count=2, timeout=1.0)
         outage = [e for e in seen if e.action == "persistence_failing"]
         assert len(outage) == 1, f"{total} failures produced {len(outage)} alerts, expected 1"
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def test_persist_tags_which_stage_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_persist journals first and independently, so the two stages differ.
+
+    A DuckDB failure (disk full, PK conflict) still leaves the event in the
+    journal; only a journal failure loses it outright.
+    """
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        journalled: list[dict[str, Any]] = []
+        monkeypatch.setattr(sup._journal, "append", journalled.append)
+
+        def boom(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(sup._db, "execute", boom)
+        with pytest.raises(PersistFailed) as db_failure:
+            sup._persist(_state_event("db-fail-1", 5990))
+        assert db_failure.value.stage == "database"
+        assert [r["event_id"] for r in journalled] == ["db-fail-1"], (
+            "the journal write happens first and must not be skipped by a DB failure"
+        )
+
+        monkeypatch.setattr(sup._journal, "append", boom)
+        with pytest.raises(PersistFailed) as journal_failure:
+            sup._persist(_state_event("journal-fail-1", 5991))
+        assert journal_failure.value.stage == "journal"
+    finally:
+        sup.stop(timeout=5.0)
+
+
+def test_persistence_outage_message_does_not_overstate_the_failure(tmp_path: Path) -> None:
+    """A DuckDB-only outage must not be reported as the journal being down too."""
+    cfg = dev_config(base=tmp_path)
+    cfg.workers = []
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        seen: list[Event] = []
+        sup.attach_listener(seen.append)
+
+        sup._report_persistence_down(10, 20, PersistFailed("database", RuntimeError("disk full")))
+        sup._report_persistence_down(10, 20, PersistFailed("journal", OSError("read-only fs")))
+        assert _wait_for_action(seen, "persistence_failing", count=2, timeout=10.0) == 2
+
+        outage = [e for e in seen if e.action == "persistence_failing"]
+        by_stage = {e.raw["stage"]: e for e in outage}
+        assert set(by_stage) == {"database", "journal"}
+
+        db_msg = by_stage["database"].message or ""
+        assert "the journal still has them" in db_msg, (
+            f"a database-only failure claimed the journal was down too: {db_msg!r}"
+        )
+        journal_msg = by_stage["journal"].message or ""
+        assert "neither the journal nor the database" in journal_msg
     finally:
         sup.stop(timeout=5.0)
