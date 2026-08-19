@@ -14,7 +14,6 @@ why: |
   benign crash and a silenced collector look identical from here.
 false_positives:
   - "A worker whose dependency was uninstalled or upgraded out from under it (a missing eBPF-capable kernel feature, a removed binary such as aide or systemctl) will crash-loop and exhaust — a real outage of that collector, but a configuration problem rather than an attack."
-  - "A machine suspended or hibernated across the restart window: the backoff timers are monotonic, so a long suspend can burn several attempts in quick succession after resume without a genuine fault."
   - "A deliberate local change — editing a worker's code or config on a running daemon, or removing its Python module — will exhaust that worker without any adversary involved."
 detect:
   any_of:
