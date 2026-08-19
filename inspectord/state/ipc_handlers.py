@@ -291,3 +291,139 @@ def handle_capture_baseline(*, params: dict[str, Any], db_path: Path) -> dict[st
     with Database(db_path) as db:
         count = capture_baseline(kind, db)
     return {"schema_version": "1.0.0", "captured": count}
+
+
+#: A run still marked `running` this long after it started can only mean the
+#: daemon died mid-scan: a live worker always emits `scan_completed`, even on
+#: timeout (`reason="timeout"`). Twice the longest default per-scan timeout
+#: (aide, 3600 s) so a genuinely long scan is never mislabelled.
+INCOMPLETE_AFTER_S = 7200
+
+#: Rows of `scan_finding` events read before filtering. The runner caps findings
+#: at 500 per run, so this comfortably covers the newest runs' finding sets.
+_FINDINGS_SCAN_LIMIT = 1000
+
+
+def handle_list_scan_runs(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    """The latest `scan_run` row per scanner (plan 2026-08-20-scanner-panel §4).
+
+    `state` is the display state and is NOT the stored `status`: a row still
+    `running` past `incomplete_after_s` is reported as `interrupted`. So a run
+    whose `scan_completed` never arrived can never read as `success` (only a
+    real completion writes that) and never as running-forever.
+
+    A scanner with no row at all has never run — which a `skipped` row, carrying
+    the runner's reason, stays distinct from.
+    """
+    limit = int(params.get("limit", 50))
+    # Clamped: a zero or negative bound would report every in-flight scan as
+    # interrupted, which is the one thing this state exists to avoid saying wrongly.
+    incomplete_after_s = max(0.0, float(params.get("incomplete_after_s", INCOMPLETE_AFTER_S)))
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT run_id, scanner, status, reason, exit_code, duration_s, finding_count, "
+            "findings_dropped, truncated, output_truncated, output_excerpt, "
+            "started_at, completed_at FROM scan_run "
+            "QUALIFY ROW_NUMBER() OVER "
+            "  (PARTITION BY scanner ORDER BY started_at DESC, run_id DESC) = 1 "
+            "ORDER BY scanner LIMIT ?",
+            [limit],
+        ).fetchall()
+
+    # DuckDB returns naive datetimes; compare against a naive UTC "now" so we
+    # never subtract an aware datetime from a naive one (which raises).
+    now = datetime.now(tz=UTC).replace(tzinfo=None)
+    scanners: list[dict[str, Any]] = []
+    for (
+        run_id,
+        scanner,
+        status,
+        reason,
+        exit_code,
+        duration_s,
+        finding_count,
+        findings_dropped,
+        truncated,
+        output_truncated,
+        output_excerpt,
+        started_at,
+        completed_at,
+    ) in rows:
+        state = status
+        if status == "running":
+            age_s = (now - started_at).total_seconds() if started_at is not None else 0.0
+            if age_s > incomplete_after_s:
+                state = "interrupted"
+        scanners.append(
+            {
+                "run_id": run_id,
+                "scanner": scanner,
+                "state": state,
+                "reason": reason,
+                "exit_code": exit_code,
+                "duration_s": duration_s,
+                "finding_count": finding_count,
+                "findings_dropped": findings_dropped,
+                "truncated": bool(truncated),
+                "output_truncated": bool(output_truncated),
+                "output_excerpt": output_excerpt,
+                "started_at": _iso(started_at),
+                "completed_at": _iso(completed_at),
+            }
+        )
+    return {"schema_version": "1.0.0", "scanners": scanners}
+
+
+def handle_list_scan_findings(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    """Recent `scan_finding` events, optionally restricted to given run ids.
+
+    Findings stay events (scanner design decision 6), so this reads
+    `events_enriched` rather than a findings table. Every string it returns is
+    scanner output and therefore untrusted: a filename can forge a report line,
+    so the path, indicator value and message may be attacker-chosen. They are
+    passed through verbatim and must only ever be rendered as escaped text.
+    """
+    limit = int(params.get("limit", 50))
+    scan_limit = int(params.get("scan_limit", _FINDINGS_SCAN_LIMIT))
+    raw_run_ids = params.get("run_ids")
+    run_ids = {str(r) for r in raw_run_ids} if raw_run_ids is not None else None
+
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT event_id, ts, payload_json FROM events_enriched "
+            "WHERE module = 'scanner_runner' AND action = 'scan_finding' "
+            "ORDER BY ts DESC, event_id DESC LIMIT ?",
+            [scan_limit],
+        ).fetchall()
+
+    findings: list[dict[str, Any]] = []
+    for event_id, ts, payload_json in rows:
+        if len(findings) >= limit:
+            break
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, ValueError):
+            # A row the panel cannot decode is skipped, never fatal — the same
+            # rule the scanner parsers follow (inspectord/parsers/base.py).
+            continue
+        if not isinstance(payload, dict):
+            continue
+        raw = payload.get("raw") or {}
+        run_id = raw.get("run_id")
+        if run_ids is not None and run_id not in run_ids:
+            continue
+        indicator = (payload.get("threat") or {}).get("indicator") or {}
+        findings.append(
+            {
+                "event_id": event_id,
+                "ts": _iso(ts),
+                "scanner": raw.get("scanner"),
+                "run_id": run_id,
+                "path": (payload.get("file") or {}).get("path"),
+                "indicator_type": indicator.get("type"),
+                "indicator_value": indicator.get("value"),
+                "scanner_severity": indicator.get("severity"),
+                "message": payload.get("message"),
+            }
+        )
+    return {"schema_version": "1.0.0", "findings": findings}

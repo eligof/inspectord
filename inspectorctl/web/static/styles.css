@@ -58,6 +58,16 @@ td.mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
 .status-removed { background: rgba(255,107,107,0.15); color: var(--critical); }
 .status-re-enabled { background: rgba(255,166,87,0.15); color: var(--high); }
 .status-unchanged { background: rgba(139,148,158,0.15); color: var(--muted); }
+/* scan_run display states (/scanners) */
+.status-success { background: rgba(46,160,67,0.15); color: var(--ok); }
+.status-failure { background: rgba(255,107,107,0.15); color: var(--critical); }
+.status-skipped { background: rgba(255,166,87,0.15); color: var(--high); }
+.status-running { background: rgba(121,192,255,0.15); color: var(--medium); }
+.status-interrupted { background: rgba(255,166,87,0.15); color: var(--high); }
+/* A failed scan's output excerpt is untrusted text of attacker-chosen length,
+   so it wraps and breaks anywhere rather than stretching the table. */
+td pre { margin: 4px 0 0; max-width: 60ch; white-space: pre-wrap; overflow-wrap: anywhere;
+         font-size: 12px; color: var(--muted); }
 .muted { color: var(--muted); }
 .bad { color: var(--bad); }
 .ok { color: var(--ok); }

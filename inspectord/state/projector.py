@@ -7,6 +7,9 @@ pairs are a no-op — adding collectors never breaks projection.
 
 from __future__ import annotations
 
+from datetime import timedelta
+from typing import Any
+
 from inspectord.schemas.event import Event
 from inspectord.storage.db import Database
 
@@ -29,6 +32,8 @@ def project(event: Event, db: Database, *, boot_id: str | None = None) -> None:
         _project_file(event, db)
     elif event.module == "persistence_snapshotter":
         _project_persistence(event, db)
+    elif event.module == "scanner_runner":
+        _project_scan_run(event, db)
 
 
 def _family(addr: str) -> str:
@@ -331,6 +336,125 @@ def _project_device(event: Event, db: Database) -> None:
             device.get("serial"),
             raw.get("SUBSYSTEM"),
             raw.get("DEVNAME"),
+            event.ts,
+            event.ts,
+            event.event_id,
+        ],
+    )
+
+
+def _project_scan_run(event: Event, db: Database) -> None:
+    """Materialize scanner_runner's lifecycle events into `scan_run`.
+
+    `scan_finding` is deliberately NOT projected: findings stay events (scanner
+    design decision 6) and `scan_completed.finding_count` is the authoritative
+    count, so counting finding events here would only risk double-counting.
+    """
+    raw = event.raw or {}
+    scanner = raw.get("scanner")
+    if not scanner:
+        return
+    if event.action == "scan_started":
+        _project_scan_started(event, db, raw, str(scanner))
+    elif event.action == "scan_completed":
+        _project_scan_completed(event, db, raw, str(scanner))
+    elif event.action == "scan_skipped":
+        _project_scan_skipped(event, db, raw, str(scanner))
+
+
+def _project_scan_started(event: Event, db: Database, raw: dict[str, Any], scanner: str) -> None:
+    run_id = raw.get("run_id")
+    if not run_id:
+        return
+    # ON CONFLICT deliberately leaves `status` and every completion column alone:
+    # a scan_started that lands after its own scan_completed (out-of-order
+    # replay) must not reopen a finished run as 'running' — that is exactly the
+    # "running forever" state the panel must never show.
+    db.execute(
+        """
+        INSERT INTO scan_run (run_id, scanner, status, started_at, last_event_id)
+        VALUES (?, ?, 'running', ?, ?)
+        ON CONFLICT (run_id) DO UPDATE SET
+            scanner       = excluded.scanner,
+            started_at    = excluded.started_at,
+            last_event_id = excluded.last_event_id
+        """,
+        [str(run_id), scanner, event.ts, event.event_id],
+    )
+
+
+def _project_scan_completed(event: Event, db: Database, raw: dict[str, Any], scanner: str) -> None:
+    run_id = raw.get("run_id")
+    if not run_id:
+        return
+    duration_s = raw.get("duration_s")
+    # `scan_outcome` is the runner's clean/findings/failure verdict; only
+    # 'failure' is a failed run. clean-vs-findings stays readable off
+    # finding_count, so the projected status needs no third value.
+    status = "failure" if raw.get("scan_outcome") == "failure" else "success"
+    # A completion whose scan_started was lost still needs a start time, so it is
+    # derived from the run's own duration rather than left NULL.
+    started_at = event.ts
+    if isinstance(duration_s, int | float):
+        started_at = event.ts - timedelta(seconds=float(duration_s))
+    # ON CONFLICT updates everything EXCEPT started_at, so the real start time
+    # recorded by scan_started survives.
+    db.execute(
+        """
+        INSERT INTO scan_run
+            (run_id, scanner, status, reason, exit_code, duration_s, finding_count,
+             findings_dropped, truncated, output_truncated, output_excerpt,
+             started_at, completed_at, last_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (run_id) DO UPDATE SET
+            scanner          = excluded.scanner,
+            status           = excluded.status,
+            reason           = excluded.reason,
+            exit_code        = excluded.exit_code,
+            duration_s       = excluded.duration_s,
+            finding_count    = excluded.finding_count,
+            findings_dropped = excluded.findings_dropped,
+            truncated        = excluded.truncated,
+            output_truncated = excluded.output_truncated,
+            output_excerpt   = excluded.output_excerpt,
+            completed_at     = excluded.completed_at,
+            last_event_id    = excluded.last_event_id
+        """,
+        [
+            str(run_id),
+            scanner,
+            status,
+            raw.get("reason"),
+            raw.get("exit_code"),
+            duration_s,
+            raw.get("finding_count"),
+            raw.get("findings_dropped"),
+            bool(raw.get("truncated")),
+            bool(raw.get("output_truncated")),
+            raw.get("output_excerpt"),
+            started_at,
+            event.ts,
+            event.event_id,
+        ],
+    )
+
+
+def _project_scan_skipped(event: Event, db: Database, raw: dict[str, Any], scanner: str) -> None:
+    # scan_skipped carries no run_id — nothing was spawned — so the key is
+    # synthesized from the (uuid7) event id. Skips therefore never collide with
+    # each other, and can never overwrite a real run. A skipped run has a row;
+    # a scanner that never ran has none, which is how the two stay distinct.
+    db.execute(
+        """
+        INSERT INTO scan_run
+            (run_id, scanner, status, reason, started_at, completed_at, last_event_id)
+        VALUES (?, ?, 'skipped', ?, ?, ?, ?)
+        ON CONFLICT (run_id) DO NOTHING
+        """,
+        [
+            f"skip:{event.event_id}",
+            scanner,
+            raw.get("reason"),
             event.ts,
             event.ts,
             event.event_id,

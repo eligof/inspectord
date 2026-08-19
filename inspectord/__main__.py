@@ -53,6 +53,8 @@ from inspectord.state.ipc_handlers import (
     handle_list_listeners,
     handle_list_persistence,
     handle_list_processes,
+    handle_list_scan_findings,
+    handle_list_scan_runs,
     handle_list_services,
 )
 from inspectord.storage.db import Database
@@ -223,6 +225,20 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
         Method(
             name="list_persistence",
             handler=lambda params: handle_list_persistence(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="list_scan_runs",
+            handler=lambda params: handle_list_scan_runs(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="list_scan_findings",
+            handler=lambda params: handle_list_scan_findings(
                 params=params, db_path=cfg.storage.db_path
             ),
             mutates=False,

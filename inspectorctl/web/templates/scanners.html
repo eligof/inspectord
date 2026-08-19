@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Scanners</h1>
+
+<p class="muted">
+  Last run, outcome and findings for each on-disk scanner. Schedules are not shown:
+  they live in the worker's own configuration, which the daemon cannot report over IPC.
+</p>
+
+<div id="scanners-feed"
+     hx-get="/scanners/feed"
+     hx-target="#scanners-feed"
+     hx-trigger="load, every 10s">
+  <div class="empty">Loading…</div>
+</div>
+{% endblock %}
