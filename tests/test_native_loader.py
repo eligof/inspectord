@@ -5,7 +5,9 @@ from __future__ import annotations
 import ctypes
 import os
 import socket
+import subprocess
 import time
+import uuid
 
 import pytest
 from inspectord._native import (
@@ -251,4 +253,54 @@ def test_raw_socket_stream_captures_af_packet_but_filters_the_rest() -> None:
         for sock in (tcp_sock, netlink_sock, packet_sock):
             if sock is not None:
                 sock.close()
+        stream.close()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs CAP_BPF (run as root)")
+def test_exec_stream_captures_full_argv_not_just_argv0() -> None:
+    """The exec program captures the whole argv range, not just argv[0].
+
+    process_exec copies `mm->arg_start .. mm->arg_end` with a runtime-computed
+    length via the raw `bpf_probe_read_user` helper, precisely because the safe
+    `bpf_probe_read_user_str_bytes` wrapper stops at the first NUL — which would
+    yield argv[0] alone. That is useless for LOLBin detection, where the
+    suspicious string lives in a later argument of an outer `sh -c '...'`.
+
+    This test pins that behaviour: it execs `sh -c 'echo <needle>'` and asserts
+    the captured cmdline contains the needle, which lives in argv[2]. If the
+    capture ever degrades to first-NUL semantics, only `/bin/sh` survives and
+    this fails.
+    """
+    needle = f"needle-in-argv-{uuid.uuid4().hex}"
+
+    stream = ProcessExecStream()
+    try:
+        time.sleep(0.2)
+        stream.poll(200)  # drain anything unrelated
+
+        subprocess.run(
+            ["/bin/sh", "-c", f"echo {needle}"],
+            check=True,
+            capture_output=True,
+        )
+
+        records: list[dict] = []
+        for _ in range(10):
+            records.extend(stream.poll(200))
+            if any(needle in r["cmdline"] for r in records):
+                break
+
+        matches = [r for r in records if needle in r["cmdline"]]
+        assert matches, (
+            f"no exec record carried {needle!r}; the argv capture is truncated to "
+            f"argv[0]. Records seen: {[r['cmdline'] for r in records]}"
+        )
+        cmdline = matches[0]["cmdline"]
+        # argv[0] is still first, so this is a superset of the old behaviour...
+        assert cmdline.split()[0] == "/bin/sh", f"unexpected argv[0] in {cmdline!r}"
+        # ...and argv[1] / argv[2] are present, i.e. we read past the first NUL.
+        assert cmdline.split()[1] == "-c", f"argv[1] missing from {cmdline!r}"
+        assert cmdline.endswith(needle), f"argv[2] truncated in {cmdline!r}"
+        assert matches[0]["ppid"] == os.getpid(), f"wrong ppid on {matches[0]}"
+    finally:
         stream.close()
