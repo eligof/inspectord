@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% from "_macros.html" import severity_badge %}
+{#
+  Everything on this page is attacker-influenceable. Event payloads carry
+  process names, file paths and scanner findings — and a filename can forge
+  report text (see the scanner adapters' docstrings) — so a row's module,
+  action, severity, kind, message and every payload value may be attacker-chosen
+  text. So may a saved query's name, expression and description, the expression
+  echoed back into the box, and the daemon's rejection message (it quotes the
+  user's own query back). This template relies on Jinja2 autoescaping and must
+  NEVER use |safe, Markup(), or render any of it as markup.
+#}
+
+{% macro ipc_failure(failure) -%}
+{%- if failure.kind == 'internal' %}
+<div class="error">
+  ⚠ the daemon failed to answer — this is <strong>not a problem with your query</strong>.
+  <div class="mono">{{ failure.message }}</div>
+  <div class="muted">The daemon log has the traceback for that error_ref.</div>
+</div>
+{%- else %}
+<div class="error">⚠ {{ failure.message }}</div>
+{%- endif %}
+{%- endmacro %}
+
+{% block content %}
+<div class="hunt">
+<h1>Hunt</h1>
+
+<p class="muted">
+  Ad-hoc and saved queries over stored event history. The grammar is the rule engine's, so a
+  query that finds something becomes a detection rule by copy-paste — for example
+  <code class="mono">process.name == "curl" AND event.severity != "info"</code>.
+</p>
+<p class="muted">
+  This panel is <strong>read-only</strong>. It runs queries; it never writes them. Saving and
+  deleting a query are <code class="mono">inspectorctl hunt save &lt;name&gt; "&lt;query&gt;"</code>
+  and <code class="mono">inspectorctl hunt delete &lt;name&gt;</code> — those are the two hunt
+  operations that write durable state, and the CLI is where an authorization prompt can be
+  answered.
+</p>
+
+<form class="filter-bar" method="get" action="/hunt"
+      hx-get="/hunt" hx-select="#hunt-results" hx-target="#hunt-results" hx-push-url="true">
+  <input type="text" name="q" value="{{ q }}" size="70" autofocus
+         placeholder='process.name == "curl"' aria-label="query">
+  <input type="text" name="since" value="{{ since }}" size="12"
+         placeholder="7d" aria-label="since">
+  <input type="text" name="limit" value="{{ limit }}" size="6"
+         placeholder="500" aria-label="limit">
+  <button type="submit">Run</button>
+</form>
+<p class="muted">
+  <span class="mono">since</span> takes <span class="mono">24h</span> / <span class="mono">7d</span>
+  or an ISO-8601 timestamp and defaults to the last 7 days;
+  <span class="mono">limit</span> defaults to 500 and is capped at 5000.
+</p>
+
+{# The results block is what htmx swaps, so a rejection has to live inside it. #}
+<div id="hunt-results">
+  {%- if run_error %}
+  {{ ipc_failure(run_error) }}
+  {%- elif query_error %}
+  <div class="error">
+    ⚠ query rejected ({{ query_error.kind }})
+    <div>{{ query_error.message }}</div>
+  </div>
+  {%- elif result %}
+  <p class="mono muted">
+    query {{ result.expression }}{% if result.name %} (saved as {{ result.name }}){% endif %}
+  </p>
+  {#
+    §7: a bound the user cannot see is itself a silent truncation, so the window
+    and the limit are printed on every run — and they are the daemon's own
+    resolved values, not what was asked for.
+  #}
+  <p class="mono">
+    window {{ result.since }} → {{ result.until or 'now' }} · limit {{ result.limit }}
+  </p>
+  {%- if rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Severity</th>
+        <th>Kind</th>
+        <th>Module</th>
+        <th>Action</th>
+        <th>Message</th>
+        <th>Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      {%- for row in rows %}
+      <tr>
+        <td class="mono muted">
+          {{ row.ts }}
+          <div class="muted">{{ row.event_id }}</div>
+        </td>
+        <td>{{ severity_badge(row.severity) }}</td>
+        <td class="mono muted">{{ row.kind }}</td>
+        <td class="mono">{{ row.module }}</td>
+        <td class="mono">{{ row.action }}</td>
+        <td>{{ row.message }}</td>
+        <td class="mono">
+          {%- for path, value in row.details %}
+          <div><span class="muted">{{ path }}</span> {{ value }}</div>
+          {%- endfor %}
+        </td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table>
+  {%- if result.truncated %}
+  <p class="bad">
+    TRUNCATED — showing {{ result.count }} of possibly more. These are the newest matches,
+    so older ones are missing.
+  </p>
+  <p class="muted">
+    Narrow the query, shorten the window, or raise the limit (currently {{ result.limit }},
+    max 5000).
+  </p>
+  {%- else %}
+  <p class="muted">
+    {{ result.count }} match{{ '' if result.count == 1 else 'es' }} — complete for this window.
+  </p>
+  {%- endif %}
+  {%- else %}
+  <div class="empty">
+    no matches — 0 events in this window.
+    <div class="muted">Widen it with a longer <span class="mono">since</span> (try 30d), or
+      check the query.</div>
+  </div>
+  {%- endif %}
+  {%- else %}
+  <div class="empty">
+    Nothing has been run yet — type a query above, or run a saved one.
+  </div>
+  {%- endif %}
+</div>
+
+<h2>Saved queries</h2>
+{%- if saved_error %}
+{{ ipc_failure(saved_error) }}
+{%- elif saved %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Expression</th>
+      <th>Description</th>
+      <th>Updated</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {%- for query in saved %}
+    <tr>
+      <td class="mono">{{ query.name }}</td>
+      <td class="mono">{{ query.expression }}</td>
+      <td>{{ query.description or '' }}</td>
+      <td class="mono muted">{{ query.updated_at or '' }}</td>
+      <td><a href="/hunt?name={{ query.name|urlencode }}">Run</a></td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- else %}
+<div class="empty">
+  no saved queries.
+  <div class="muted">Save one with
+    <span class="mono">inspectorctl hunt save &lt;name&gt; "&lt;query&gt;"</span>.</div>
+</div>
+{%- endif %}
+</div>
+{% endblock %}
