@@ -97,3 +97,11 @@ def test_non_signal_event_with_stamped_metric_kind_does_not_fire() -> None:
     ev.baseline = {"metric_kind": "sudo_per_min", "deviation": 99.0}
     for fname, *_ in CASES:
         assert not evaluate_yaml_rule(_rule(fname), EvalContext(event=ev)), fname
+
+
+def test_wrong_action_from_detector_module_does_not_fire() -> None:
+    # Pins the action clause: module and metric_kind alone must not match.
+    ev = _signal("sudo_per_min", user={"name": "eli"})
+    ev.action = "something_else"
+    for fname, *_ in CASES:
+        assert not evaluate_yaml_rule(_rule(fname), EvalContext(event=ev)), fname
