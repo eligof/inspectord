@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from inspectorctl.web.app import create_app
 from inspectord.ipc_server import Method
+from tests.web import web_client
 
 
 def _list_file_changes() -> Method:
@@ -58,7 +57,7 @@ def test_file_integrity_feed_empty_state(ipc_factory) -> None:
 def test_file_integrity_feed_daemon_unreachable(tmp_path: Path) -> None:
     # No server is listening on this socket, so the IPC call fails.
     app = create_app(socket_path=tmp_path / "no.sock")
-    client = TestClient(app)
+    client = web_client(app)
     response = client.get("/file-integrity/feed")
     assert response.status_code == 200
     assert "daemon unreachable" in response.text

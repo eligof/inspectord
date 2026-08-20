@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from inspectorctl.web.app import create_app
 from inspectord.ipc_server import Method
+from tests.web import SAME_ORIGIN, web_client
+
+# A browser posting from the dashboard always sends Origin; the same-origin guard
+# in inspectorctl.web.csrf rejects state-changing requests without it.
 
 
 def _list_persistence() -> Method:
@@ -99,7 +101,7 @@ def test_persistence_feed_empty_state(ipc_factory) -> None:
 def test_persistence_feed_daemon_unreachable(tmp_path: Path) -> None:
     # No server is listening on this socket, so the IPC call fails.
     app = create_app(socket_path=tmp_path / "no.sock")
-    client = TestClient(app)
+    client = web_client(app)
     response = client.get("/persistence/feed")
     assert response.status_code == 200
     assert "daemon unreachable" in response.text
@@ -108,6 +110,8 @@ def test_persistence_feed_daemon_unreachable(tmp_path: Path) -> None:
 def test_capture_baseline_button_posts(ipc_factory) -> None:
     calls: list[dict] = []
     client = ipc_factory([_list_persistence(), _capture_baseline(calls)])
-    response = client.post("/persistence/capture-baseline", follow_redirects=False)
+    response = client.post(
+        "/persistence/capture-baseline", headers=SAME_ORIGIN, follow_redirects=False
+    )
     assert response.status_code == 303
     assert any(c.get("kind") == "persistence" for c in calls)

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from inspectorctl.web.app import create_app
 from inspectord.ipc_server import IpcServer, Method
+from tests.web import SAME_ORIGIN, web_client
 
 
 def _alerts_listing() -> Method:
@@ -115,7 +114,7 @@ def test_alert_detail_404_when_missing(tmp_path: Path) -> None:
     )
     server.start()
     try:
-        client = TestClient(create_app(socket_path=sock))
+        client = web_client(create_app(socket_path=sock))
         response = client.get("/alerts/absent")
         assert response.status_code == 404
     finally:
@@ -133,6 +132,7 @@ def test_ack_alert_post_redirects_to_list(ipc_factory) -> None:  # type: ignore[
     client = ipc_factory([_get_alert(), ack_method])
     response = client.post(
         "/alerts/01900000-0000-7000-8000-000000000001/ack",
+        headers=SAME_ORIGIN,
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -144,6 +144,7 @@ def test_resolve_alert_post(ipc_factory) -> None:  # type: ignore[no-untyped-def
     client = ipc_factory([_get_alert(), _resolve_alert()])
     response = client.post(
         "/alerts/01900000-0000-7000-8000-000000000001/resolve",
+        headers=SAME_ORIGIN,
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -153,6 +154,7 @@ def test_suppress_alert_post(ipc_factory) -> None:  # type: ignore[no-untyped-de
     client = ipc_factory([_get_alert(), _suppress_alert()])
     response = client.post(
         "/alerts/01900000-0000-7000-8000-000000000001/suppress",
+        headers=SAME_ORIGIN,
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -204,7 +206,7 @@ def test_open_case_post_redirects_to_case(ipc_factory) -> None:  # type: ignore[
 
     open_method = Method(name="open_case", handler=open_handler, mutates=True)
     client = ipc_factory([_get_alert_a1(), open_method])
-    response = client.post("/alerts/a1/open-case", follow_redirects=False)
+    response = client.post("/alerts/a1/open-case", headers=SAME_ORIGIN, follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/cases/c9"
     assert any(c.get("alert_id") == "a1" for c in open_calls)
@@ -222,6 +224,7 @@ def test_attach_case_post_redirects_to_alert(ipc_factory) -> None:  # type: igno
     response = client.post(
         "/alerts/a1/attach-case",
         data={"case_id": "c1"},
+        headers=SAME_ORIGIN,
         follow_redirects=False,
     )
     assert response.status_code == 303

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from inspectorctl.web.app import create_app
 from inspectord.ipc_server import IpcServer, Method
+from tests.web import web_client
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def ipc_factory(tmp_path: Path) -> Iterator[Callable[[list[Method]], TestClient]
         server = IpcServer(socket_path=sock_path, methods=methods, allowed_uids=[])
         server.start()
         app = create_app(socket_path=sock_path)
-        return TestClient(app)
+        return web_client(app)
 
     yield make
 

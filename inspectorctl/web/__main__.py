@@ -3,6 +3,11 @@
 Usage:
   inspectorctl-web                          # dev: socket under ./var/
   inspectorctl-web --socket /run/inspectord/inspectord.sock --port 8765
+  inspectorctl-web --host 0.0.0.0 --allowed-host nuc.lan   # deliberate LAN use
+
+The app answers only to hosts it was told about: loopback always, plus the
+``--host`` bind address and every ``--allowed-host``. See
+:mod:`inspectorctl.web.csrf` for why (DNS rebinding).
 """
 
 from __future__ import annotations
@@ -29,9 +34,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Bind address; defaults to 127.0.0.1 (no external interface)",
     )
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help=(
+            "Extra Host header value to answer to; repeatable. Loopback and the "
+            "--host bind address are always accepted. A wildcard bind (0.0.0.0, "
+            "::) names no host a browser can be pointed at, so reaching the "
+            "dashboard by LAN address or name needs this flag."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    app = create_app(socket_path=args.socket)
+    app = create_app(socket_path=args.socket, allowed_hosts=[args.host, *args.allowed_host])
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
