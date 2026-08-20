@@ -18,6 +18,7 @@ _FIM_WRITE_ACTIONS = ("file_created", "file_modified", "file_attributes_changed"
 
 
 def extract_samples(ev: Event) -> list[MetricSample]:
+    """Map one enriched event to zero or more §4.1 metric samples."""
     if ev.module == "anomaly_detector":
         # Never feed our own signals back into the baselines.
         return []
@@ -73,6 +74,10 @@ def extract_samples(ev: Event) -> list[MetricSample]:
     path = (ev.file or {}).get("path")
     if ev.module == "fim_watcher" and ev.action in _FIM_WRITE_ACTIONS and path:
         parent = posixpath.dirname(str(path))
+        if not parent:
+            # fim's unknown-wd fallback path ("?") and bare relative names have
+            # no parent dir; a junk "" bucket is worse than no sample.
+            return out
         out.append(
             MetricSample(
                 metric_kind="file_writes_per_min",

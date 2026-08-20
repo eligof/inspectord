@@ -132,3 +132,17 @@ def test_anomaly_detector_events_are_never_sampled() -> None:
         process={"name": "curl"},
     )
     assert extract_samples(ev) == []
+
+
+def test_degenerate_fim_path_yields_no_write_sample() -> None:
+    # fim_watcher's unknown-wd fallback emits path "?" — dirname is "", which
+    # must not become a junk baseline bucket.
+    ev = build_event(
+        module="fim_watcher",
+        action="file_created",
+        category=["file"],
+        type_=["creation"],
+        severity="info",
+        file={"path": "?"},
+    )
+    assert [s for s in extract_samples(ev) if s.metric_kind == "file_writes_per_min"] == []
