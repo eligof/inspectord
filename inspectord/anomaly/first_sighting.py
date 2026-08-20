@@ -87,6 +87,13 @@ class FirstSightingTracker:
         self._pending: list[tuple[SightingKey, datetime, str]] = []
 
     def load(self, db: Database) -> int:
+        """Populate the seen-set from persisted rows.
+
+        Must run before any ``observe()`` traffic starts: it wholesale-replaces
+        the seen-set, so calling it after observations have already been
+        recorded would discard them and could re-flag previously-seen entities
+        as first sightings.
+        """
         rows = db.query("SELECT category, entity_kind, entity_key FROM first_seen").fetchall()
         with self._lock:
             self._seen = {SightingKey(str(c), str(k), str(key)) for c, k, key in rows}

@@ -6,7 +6,6 @@ queue each tick. PR2 adds the statistical aggregators to ``_tick``.
 
 from __future__ import annotations
 
-import contextlib
 import threading
 
 from inspectord.anomaly.first_sighting import FirstSightingTracker
@@ -51,5 +50,7 @@ class AnomalyDetector:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
         # Best-effort final flush so a clean shutdown loses nothing.
-        with contextlib.suppress(Exception):
+        try:
             self._tracker.flush(self._db)
+        except Exception as exc:
+            log.warning("final anomaly flush failed: %r", exc)
