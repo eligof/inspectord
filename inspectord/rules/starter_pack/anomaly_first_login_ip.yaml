@@ -1,0 +1,20 @@
+version: 1.0.0
+id: anomaly.first_login_ip
+name: "first SSH login from an IP"
+severity: low
+category: anomaly
+why: |
+  A successful SSH login arrived from a source IP that has never successfully
+  logged in before. On a personal machine the set of legitimate login sources
+  is small and stable, so a new one is worth a breadcrumb — but DHCP churn,
+  VPNs, and mobile networks all rotate addresses, so this stays `low` and
+  log-only rather than notifying.
+false_positives:
+  - "Your own address rotating: DHCP renewal, VPN exit change, logging in from a phone hotspot."
+  - "IPv6 privacy extensions rotate the source address by design."
+detect:
+  any_of:
+    - event.action == "ssh_login_succeeded" AND baseline.first_sighting == true
+short: "first login from {source.ip} ({user.name})"
+detail: "First successful SSH login from {source.ip} for user {user.name}."
+labels: [anomaly, first-sighting, authentication]

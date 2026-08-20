@@ -1,0 +1,22 @@
+version: 1.0.0
+id: anomaly.first_binary_execution
+name: "first execution of a binary"
+severity: low
+category: anomaly
+why: |
+  This binary (identified by SHA-256 when enrichment could hash it, otherwise
+  by executable path) has never been seen executing on this host before. On a
+  compromised machine, the attacker's tooling is by definition new here; on a
+  healthy machine, so is every freshly installed or updated program. That is
+  why this rule is `low`: it is a triage breadcrumb, recorded but never
+  notified (the notifier routes `low` to no sinks). A young install will
+  produce a stream of these while the first-seen table warms up.
+false_positives:
+  - "Every package install or upgrade produces new binaries (new hashes), each firing once."
+  - "Anything run for the first time since inspectord was installed — the table only knows what it has watched."
+detect:
+  any_of:
+    - event.action == "process_start" AND baseline.first_sighting == true
+short: "first execution: {process.name}"
+detail: "First observed execution of {process.executable} (sha256 {process.hash.sha256}). Command line: {process.command_line}"
+labels: [anomaly, first-sighting]
