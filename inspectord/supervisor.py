@@ -314,6 +314,8 @@ class Supervisor:
                 wp.proc.kill()
             for t in wp.threads:
                 t.join(timeout=remaining())
+        # After the workers (no more observe() traffic can queue sightings) and
+        # before _db.close(): stop() runs the final first-sighting flush.
         if self._anomaly_detector is not None:
             self._anomaly_detector.stop(timeout=remaining())
         self._journal.close()

@@ -87,7 +87,10 @@ def test_disabled_anomaly_never_stamps(tmp_path: Path) -> None:
     sup.attach_alert_listener(alerts.append)
     sup.start()
     try:
-        sup._inject_for_test(_kmod_event())
+        assert sup._first_sighting is None  # disabled: the stage is never built
+        ev = _kmod_event()
+        sup._inject_for_test(ev)
+        assert ev.baseline is None  # ...so nothing stamps
         assert not [a for a in alerts if a.rule.id == "anomaly.first_kmod_load"]
     finally:
         sup.stop(timeout=10.0)
