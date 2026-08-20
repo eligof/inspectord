@@ -76,11 +76,14 @@ except Exception:                     # everything else: sanitized
   path implicit. Marker inheritance is grep-able: `grep -rn ClientFacingError inspectord`
   enumerates every class allowed to speak to a client.
 
-**Correlation id.** `new_error_ref()` returns `uuid7().hex[:16]` — the project already uses
-uuid7 (`inspectord/ids.py`), so the id's leading hex is the millisecond timestamp and refs sort
-in log order. It appears in *both* the client message and the daemon log line that carries the
-full traceback (`log.exception` → `JsonFormatter` emits `exc_info`), so a user can paste the id
-and the operator finds the traceback. Nothing is lost for debugging.
+**Correlation id.** `new_error_ref()` returns `secrets.token_hex(8)` — 64 uniformly random
+bits. The first attempt was `uuid7().hex[:16]`, to match the project's usual id, and the
+uniqueness test rejected it: a uuid7 prefix is a millisecond timestamp with only 12 random bits
+behind it, so two failures in the same millisecond collide — exactly when correlation matters.
+The log record carries its own timestamp, so the ref does not need to, and a random ref also
+tells the client nothing. It appears in *both* the client message and the daemon log line
+that carries the full traceback (`log.exception` → `JsonFormatter` emits `exc_info`), so a user
+can paste the id and the operator finds the traceback. Nothing is lost for debugging.
 
 **Wire format is unchanged**: still `{"error": {"code": -32000, "message": …}}`. Only the
 message content changes. Both branches keep `-32000` deliberately — a distinct code would be a

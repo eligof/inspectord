@@ -12,6 +12,8 @@ must never quote generated SQL, schema internals or filesystem paths.
 
 from __future__ import annotations
 
+from inspectord.ipc_errors import ClientFacingError
+
 __all__ = [
     "HuntBoundsError",
     "HuntError",
@@ -26,8 +28,15 @@ __all__ = [
 ]
 
 
-class HuntError(ValueError):
-    """Base class for every hunt-query rejection."""
+class HuntError(ClientFacingError, ValueError):
+    """Base class for every hunt-query rejection.
+
+    `ClientFacingError` is what lets these messages survive `IpcServer._dispatch`
+    instead of being flattened into "internal error" — Hunt would be unusable if
+    a syntax error did not say what was wrong. `ValueError` is kept because that
+    is what these have always been: existing `except ValueError` call sites and
+    tests still hold.
+    """
 
 
 class HuntSyntaxError(HuntError):
