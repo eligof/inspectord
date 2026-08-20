@@ -39,6 +39,7 @@ from inspectord.schemas.event import Event
 from inspectord.state.projector import project
 from inspectord.state.reconcile import current_boot_id, reconcile_processes
 from inspectord.storage.db import Database
+from inspectord.storage.events import insert_event
 from inspectord.storage.migrations import run_migrations
 from inspectord.workers.notifier.__main__ import NotifierWorker
 
@@ -399,20 +400,7 @@ class Supervisor:
         # The journal already holds the event from here on: a failure below
         # costs the database row and the projection, not the record itself.
         try:
-            self._db.execute(
-                "INSERT INTO events_enriched "
-                "(event_id, ts, kind, module, action, severity, payload_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [
-                    ev.event_id,
-                    ev.ts,
-                    ev.kind.value,
-                    ev.module,
-                    ev.action,
-                    ev.severity.value,
-                    payload,
-                ],
-            )
+            insert_event(self._db, ev, payload)
             project(ev, self._db, boot_id=self._boot_id)
         except Exception as exc:
             raise PersistFailed("database", exc) from exc
