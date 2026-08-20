@@ -23,6 +23,15 @@ clause drops the row. Every leaf predicate is therefore wrapped in `IS TRUE` /
 evaluator does. (That is the general form of the `!=` → `IS DISTINCT FROM` rule
 in §5, and it fixes `NOT IN` at the same time.)
 
+*Integers compare exactly.* Python integers are arbitrary-precision and
+compare exactly; IEEE-754 doubles are only exact to 2**53, so a `DOUBLE`
+comparison fuses distinct integers — `9007199254740992` and
+`9007199254740993` are one value to a double. A pid, inode or nanosecond
+timestamp is easily that large, and the failure is silent: the hunt returns an
+event holding a *different* number than the one asked for. `_append_numeric`
+therefore never routes an integer through a double unless it is provably
+lossless; see its docstring.
+
 *Comparison is typed.* `json_extract_string` flattens the JSON number `42` and
 the JSON string `"42"` to the same `'42'`, while the evaluator says
 `42 == "42"` is false. So every equality is guarded by `json_type()`: a string
@@ -53,6 +62,7 @@ from inspectord.expr import (
     LEAF_OPS,
     InvalidLeaf,
     Leaf,
+    LiteralValue,
     Node,
     ParsedExpression,
     parse_expression,
@@ -89,6 +99,11 @@ MAX_LIMIT = 5000
 
 _SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _JSON_NUMBER_TYPES = "('BIGINT', 'UBIGINT', 'DOUBLE')"
+
+#: A JSON *integer* token, as `json_extract_string` hands it back: canonical
+#: decimal, optional minus, no point and no exponent. A token that does not
+#: match this is a float, and is compared as one.
+_JSON_INTEGER_TOKEN = "'^-?[0-9]+$'"
 
 _STRING_FUNCS = {
     "STARTSWITH": "starts_with",
@@ -340,7 +355,7 @@ def _disjoin(parts: list[str]) -> str:
 # --------------------------------------------------------------------------
 
 
-def _equals(operand: _Operand, literal: Any, binder: _Binder) -> str:
+def _equals(operand: _Operand, literal: LiteralValue, binder: _Binder) -> str:
     """Python `lhs == literal`, typed, as SQL.
 
     Returns a possibly-NULL predicate; the caller wraps it in `_truth`. Nothing
@@ -353,9 +368,9 @@ def _equals(operand: _Operand, literal: Any, binder: _Binder) -> str:
     parts: list[str] = []
     if isinstance(literal, bool):
         _append_typed(parts, _is_boolean(operand), operand, binder, "true" if literal else "false")
-        _append_numeric(parts, operand, binder, 1.0 if literal else 0.0)
+        _append_numeric(parts, operand, binder, 1 if literal else 0)
     elif isinstance(literal, int):
-        _append_numeric(parts, operand, binder, float(literal))
+        _append_numeric(parts, operand, binder, literal)
         if literal in (0, 1):
             # Python's `True == 1` / `False == 0`, mirrored.
             _append_typed(
@@ -367,20 +382,51 @@ def _equals(operand: _Operand, literal: Any, binder: _Binder) -> str:
 
 
 def _append_typed(
-    parts: list[str], guard: str, operand: _Operand, binder: _Binder, value: Any
+    parts: list[str], guard: str, operand: _Operand, binder: _Binder, value: str
 ) -> None:
     if guard == "FALSE":
         return
     parts.append(_guarded(guard, f"{operand.text} = {binder.bind(value)}"))
 
 
-def _append_numeric(parts: list[str], operand: _Operand, binder: _Binder, value: float) -> None:
+def _append_numeric(parts: list[str], operand: _Operand, binder: _Binder, value: int) -> None:
+    """Python `lhs == <integer literal>` against a JSON number, exactly.
+
+    Two disjoint cases, because `json_extract_string` returns the number's own
+    token text and that text says which one it is:
+
+    *An integer token* came from a Python `int`, and the evaluator compares it
+    to `value` as an exact integer. Its JSON form is canonical decimal, so
+    comparing the token text to `str(value)` **is** that exact comparison — at
+    any width, with no cast to round it off. Casting to `DOUBLE` here is what
+    made `pid == 9007199254740993` select the event whose pid is
+    `9007199254740992`.
+
+    *A float token* came from a Python `float`, and `float == int` in Python is
+    exact too: a double can only equal `value` when `value` survives the trip
+    through a double unchanged. So that branch is emitted only when it does,
+    and when it is emitted the double comparison is exact by construction.
+    """
     guard = _is_number(operand)
     if guard == "FALSE":
         return
-    # JSON numbers arrive as text; DOUBLE is the widest common comparison and
-    # matches Python's int/float equality for every value this schema carries.
-    parts.append(_guarded(guard, f"TRY_CAST({operand.text} AS DOUBLE) = {binder.bind(value)}"))
+    branches = [f"{operand.text} = {binder.bind(str(value))}"]
+    as_double = _lossless_double(value)
+    if as_double is not None:
+        branches.append(
+            f"(NOT regexp_matches({operand.text}, {_JSON_INTEGER_TOKEN}) "
+            f"AND TRY_CAST({operand.text} AS DOUBLE) = {binder.bind(as_double)})"
+        )
+    parts.append(_guarded(guard, _disjoin(branches)))
+
+
+def _lossless_double(value: int) -> float | None:
+    """`float(value)` when nothing is lost, else `None` (no double equals it)."""
+    try:
+        as_double = float(value)
+    except OverflowError:
+        return None
+    return as_double if int(as_double) == value else None
 
 
 def _in_list(operand: _Operand, rhs: str, binder: _Binder) -> str:

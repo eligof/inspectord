@@ -121,6 +121,22 @@ def _build_corpus() -> Corpus:
         # and RE2's `$` part ways — see test_known_regex_divergences).
         {"module": "negative", "process": {"pid": 16, "name": "neg", "exit_code": -1}},
         {"module": "trailing_newline", "process": {"pid": 14, "name": "hello\n"}},
+        # Integers past 2**53, where the doubles stop being able to tell
+        # consecutive integers apart: `int_2p53` and `int_2p53_plus_1` share a
+        # double, and `int_negative_big` is the same collision below zero.
+        {"module": "int_2p53", "process": {"pid": 9007199254740992, "name": "two53"}},
+        {"module": "int_2p53_plus_1", "process": {"pid": 9007199254740993, "name": "two53b"}},
+        {"module": "int_negative_big", "process": {"pid": -9007199254740993, "name": "negbig"}},
+        # An integer no double can hold, next to the float it would be confused
+        # with: `1e30` is 1000000000000000019884624838656, not 10**30.
+        {"module": "int_huge", "process": {"pid": 10**30, "name": "huge"}},
+        {"module": "float_huge", "process": {"pid": 20, "name": "fhuge", "ratio": 1e30}},
+        # A float that is exactly 2**53: `== 2**53` matches it, `== 2**53 + 1`
+        # must not, even though both integers round to this same double.
+        {
+            "module": "float_2p53",
+            "process": {"pid": 21, "name": "f53", "ratio": 9007199254740992.0},
+        },
         # Deliberately sparse: no process, no file, no threat, no message.
         {"module": "bare"},
     ]
@@ -267,6 +283,25 @@ _LEAVES = [
     'process.nul CONTAINS ""',
     "process.flag != true",
     "process.pid == 1",
+    # Integers wider than a double's 53-bit mantissa. Python compares them
+    # exactly, so the SQL must too: 9007199254740992 and 9007199254740993 are
+    # different events even though float() maps them onto the same double.
+    "process.pid == 9007199254740992",
+    "process.pid == 9007199254740993",
+    "process.pid != 9007199254740993",
+    "process.pid == -9007199254740993",
+    "process.pid == -9007199254740992",
+    "process.pid IN [9007199254740992, 7]",
+    "process.pid NOT IN [9007199254740993]",
+    # Beyond every double: only the integer stored as an integer may match.
+    "process.pid == 1000000000000000000000000000000",
+    "process.ratio == 1000000000000000000000000000000",
+    # ...and the exact integer value of 1e30, which the *float* does equal.
+    "process.ratio == 1000000000000000019884624838656",
+    # A float-valued field at the same boundary.
+    "process.ratio == 9007199254740992",
+    "process.ratio == 9007199254740993",
+    "process.pid == 9007199254740992.0",
 ]
 
 _COMBINATIONS = [

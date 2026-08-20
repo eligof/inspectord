@@ -158,19 +158,59 @@ def test_string_operators_are_guarded_on_string_typed_values() -> None:
 
 
 def test_equality_is_typed() -> None:
+    """`42` and `"42"` extract to the same text, so the type guard separates them."""
     string_side = compile_hunt_query('process.pid == "42"')
     number_side = compile_hunt_query("process.pid == 42")
     assert "= 'VARCHAR'" in string_side.sql
+    assert "IN ('BIGINT', 'UBIGINT', 'DOUBLE')" in number_side.sql
     assert string_side.params[0] == "42"
-    assert "TRY_CAST" in number_side.sql
-    assert number_side.params[0] == 42.0
+    assert number_side.params[0] == "42"
 
 
 def test_boolean_literal_also_accepts_one_and_zero() -> None:
     """Mirrors Python's `True == 1`, which the evaluator inherits."""
     compiled = compile_hunt_query("process.flag == true")
     assert "= 'BOOLEAN'" in compiled.sql
-    assert compiled.params[:2] == ("true", 1.0)
+    assert compiled.params[:2] == ("true", "1")
+
+
+# --------------------------------------------------------------------------
+# integers compare exactly, not through a double (§5)
+# --------------------------------------------------------------------------
+
+
+def test_an_integer_wider_than_a_double_never_reaches_a_double() -> None:
+    """2**53 + 1 has no double of its own — comparing as one would find 2**53."""
+    compiled = compile_hunt_query("process.pid == 9007199254740993")
+    assert compiled.params == ("9007199254740993", DEFAULT_LIMIT + 1)
+    assert "TRY_CAST" not in compiled.sql
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ["-9007199254740993", "1" + "0" * 30, "-" + "1" + "0" * 30],
+)
+def test_negative_and_oversized_integers_bind_their_own_decimal_text(literal: str) -> None:
+    compiled = compile_hunt_query(f"process.pid == {literal}")
+    assert compiled.params[0] == literal
+    assert "TRY_CAST" not in compiled.sql
+
+
+def test_an_integer_a_double_holds_exactly_still_matches_a_float_field() -> None:
+    """`ratio == 5` must keep matching a stored `5.0`, as Python's `5.0 == 5` does."""
+    compiled = compile_hunt_query("process.ratio == 5")
+    assert compiled.params[:2] == ("5", 5.0)
+    # ...but only for float-shaped tokens; an integer token is compared as text.
+    assert "regexp_matches" in compiled.sql
+
+
+def test_each_in_list_member_is_compared_exactly() -> None:
+    compiled = compile_hunt_query("process.pid IN [9007199254740992, 9007199254740993]")
+    assert compiled.params[:3] == (
+        "9007199254740992",
+        9007199254740992.0,  # 2**53 is exactly representable, so the float branch stays
+        "9007199254740993",
+    )
 
 
 @pytest.mark.parametrize("op", ["STARTSWITH", "ENDSWITH", "CONTAINS", "MATCHES"])
