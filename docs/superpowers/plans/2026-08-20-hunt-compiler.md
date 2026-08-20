@@ -112,6 +112,21 @@ Consequences that the implementation must encode:
 | `a..b`, `a.` | resolves to `None` | `HuntPathError` naming the segment | §6 — paths are interpolated |
 | `MATCHES` with a lookaround/backreference | Python `re` accepts | `HuntUnsupportedError` | DuckDB is RE2; rejecting beats disagreeing |
 
+### The residual divergence (measured, not theoretical)
+
+`MATCHES` is the one operator whose two implementations are different engines —
+Python `re` in memory, RE2 in DuckDB — and two of their differences are *silent*
+(both accept the pattern and disagree about the answer):
+
+| pattern | value | evaluator | SQL |
+| --- | --- | --- | --- |
+| `hello$` | `"hello\n"` | matches (`$` also matches before a trailing newline) | no match |
+| `^\w` | `"Ünïcödé-café"` | matches (`\w` is Unicode-aware) | no match (RE2 `\w` is ASCII) |
+
+Both are pinned by `test_known_regex_divergences` so they cannot drift unnoticed,
+and both are documented in `hunt/compiler.py`'s module docstring. Every other
+operator agrees exactly.
+
 ---
 
 ## Bounds (§7)
@@ -127,11 +142,11 @@ Consequences that the implementation must encode:
 
 ## Tasks
 
-- [ ] **Task 1 — extract the parser.** Create `inspectord/expr.py`; rewrite `yaml_loader` to use
+- [x] **Task 1 — extract the parser.** Create `inspectord/expr.py`; rewrite `yaml_loader` to use
       it; `tests/test_expr.py`. `tests/rules/` passes untouched.
-- [ ] **Task 2 — the compiler.** `inspectord/hunt/`; `insert_event` extraction;
+- [x] **Task 2 — the compiler.** `inspectord/hunt/`; `insert_event` extraction;
       `tests/hunt/test_compiler.py`, `tests/hunt/test_execute.py`.
-- [ ] **Task 3 — the differential test.** Corpus + expression matrix + useful failure output.
+- [x] **Task 3 — the differential test.** Corpus + expression matrix + useful failure output.
 
 ## Testing strategy
 
