@@ -114,14 +114,14 @@ assert on the command's own result, which is synchronous.
 
 ## Tasks
 
-- [ ] **Task 1 — migration.** `0009_hunt_query.sql` + `tests/test_hunt_query_migration.py`.
-- [ ] **Task 2 — the deferred PR1 items.** `HuntExecutionError` + the `duckdb.Error` wrap in
+- [x] **Task 1 — migration.** `0009_hunt_query.sql` + `tests/test_hunt_query_migration.py`.
+- [x] **Task 2 — the deferred PR1 items.** `HuntExecutionError` + the `duckdb.Error` wrap in
       `execute.py`, with a leak test that provokes a real DuckDB failure.
-- [ ] **Task 3 — the store.** `hunt/store.py`: name validation, compile-on-save, collision
+- [x] **Task 3 — the store.** `hunt/store.py`: name validation, compile-on-save, collision
       policy, CRUD. `tests/hunt/test_store.py`.
-- [ ] **Task 4 — IPC handlers.** `hunt/ipc_handlers.py` + registration in `__main__.py` +
+- [x] **Task 4 — IPC handlers.** `hunt/ipc_handlers.py` + registration in `__main__.py` +
       `tests/hunt/test_ipc_handlers.py`.
-- [ ] **Task 5 — CLI.** `inspectorctl/cli/hunt.py`, `events search`, wiring, and the CLI tests.
+- [x] **Task 5 — CLI.** `inspectorctl/cli/hunt.py`, `events search`, wiring, and the CLI tests.
 
 ## Verification
 

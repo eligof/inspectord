@@ -5,8 +5,10 @@ shared parser in `inspectord.expr`, so a hunt query and a detection rule are
 written identically and a query that finds something can become a rule by
 copy-paste.
 
-PR1 is the compiler and its differential test: no storage, no IPC, no CLI, no
-panel.
+PR1 was the compiler and its differential test. PR2 adds the saved-query store
+(`store`), the IPC handlers (`ipc_handlers`) and the `inspectorctl` verbs; both
+are imported by module rather than re-exported here, because a handler needs a
+`db_path` and belongs to the edge, not to the query language.
 """
 
 from __future__ import annotations

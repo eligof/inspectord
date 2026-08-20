@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 from rich import print as rprint
 
+from inspectorctl.cli.hunt import run_query
 from inspectorctl.ipc_client import IpcClient, IpcError
 
 app = typer.Typer(
@@ -36,11 +37,37 @@ def _render(ev: dict[str, object]) -> str:
 
 @app.command("search")
 def search_cmd(
+    query: Annotated[
+        str | None,
+        typer.Argument(help="hunt expression, e.g. 'process.name == \"curl\"'"),
+    ] = None,
     socket: Annotated[Path, typer.Option("--socket", "-s")] = _DEFAULT_SOCKET,
     module: Annotated[str | None, typer.Option("--module")] = None,
     limit: Annotated[int, typer.Option("--limit")] = 100,
+    since: Annotated[str | None, typer.Option("--since", help="ISO-8601 or 7d/24h/30m")] = None,
+    until: Annotated[str | None, typer.Option("--until", help="ISO-8601 or 7d/24h/30m")] = None,
 ) -> None:
-    """Print the most recent events (one-shot)."""
+    """Search stored events (spec §24), or list the most recent ones.
+
+    With a QUERY this is a hunt: the expression is the YAML-rule grammar,
+    compiled to SQL, bounded and newest-first. Without one it keeps the older
+    behaviour of printing the most recent events.
+    """
+    if query is None:
+        _recent(socket=socket, module=module, limit=limit)
+        return
+    if module is not None:
+        # Refused rather than ignored: a filter that silently does nothing is
+        # how a hunt comes back with the wrong answer and no error.
+        rprint(
+            "[red]ERROR[/red] --module does not apply to a query; write it in the "
+            "query instead, e.g. 'event.module == \"log_tailer\"'"
+        )
+        raise typer.Exit(code=2)
+    run_query(socket=socket, expression=query, limit=limit, since=since, until=until)
+
+
+def _recent(*, socket: Path, module: str | None, limit: int) -> None:
     params: dict[str, object] = {"limit": limit}
     if module:
         params["module"] = module
