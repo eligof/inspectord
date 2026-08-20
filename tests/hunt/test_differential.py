@@ -12,6 +12,12 @@ through the same `insert_event` the daemon uses, and every expression below is
 run through *both* backends with the selected `event_id` sets compared.
 
 Any operator added to the grammar later must be added to `EXPRESSIONS`.
+
+The corpus is only worth as much as its ability to *notice* a broken compiler,
+so that is itself a test: `test_a_broken_compiler_is_caught` deliberately
+mutates the compiler four ways and asserts each mutation makes cases here fail.
+Run it to measure how many — the mutations live in this file, so the number is
+reproducible instead of remembered.
 """
 
 from __future__ import annotations
@@ -23,13 +29,14 @@ from pathlib import Path
 
 import pytest
 
-from inspectord.expr import LEAF_OPS
+from inspectord.expr import LEAF_OPS, Leaf
 from inspectord.hunt import (
     MAX_LIMIT,
     HuntPathError,
     HuntSyntaxError,
     HuntUnsupportedError,
     compile_hunt_query,
+    compiler,
     run_hunt_query,
 )
 from inspectord.parsers.base import build_event
@@ -461,3 +468,84 @@ def test_the_corpus_is_actually_discriminating(db: Database, corpus: Corpus) -> 
     partial = [e for e, ids in selections.items() if 0 < len(ids) < len(corpus.events)]
     assert len(non_empty) > len(EXPRESSIONS) // 2
     assert len(partial) > len(EXPRESSIONS) // 2
+
+
+# --------------------------------------------------------------------------
+# the corpus has to bite
+# --------------------------------------------------------------------------
+
+
+def _three_valued_truth(predicate: str, *, positive: bool) -> str:
+    """Leaves SQL's NULL alone, so `!=` / `NOT IN` drop the field-less rows."""
+    return f"(({predicate}))" if positive else f"(NOT ({predicate}))"
+
+
+def _like_string_call(operand: compiler._Operand, leaf: Leaf, binder: compiler._Binder) -> str:
+    """String operators through LIKE, where a literal `%` becomes a wildcard."""
+    literal = compiler._string_literal(leaf)
+    guard = compiler._is_string(operand)
+    if guard == "FALSE":
+        return "FALSE"
+    pattern = {
+        "STARTSWITH": f"{literal}%",
+        "ENDSWITH": f"%{literal}",
+        "CONTAINS": f"%{literal}%",
+    }[leaf.op]
+    return compiler._guarded(guard, f"{operand.text} LIKE {binder.bind(pattern)}")
+
+
+def _untyped_guard(operand: compiler._Operand) -> str:
+    """Compare whatever text is in the JSON, ignoring its type."""
+    return "FALSE" if operand.kind is compiler._OperandKind.MISSING else "TRUE"
+
+
+def _double_only_numeric(
+    parts: list[str], operand: compiler._Operand, binder: compiler._Binder, value: int
+) -> None:
+    """Every integer through a DOUBLE, which fuses the ones wider than 2**53."""
+    guard = compiler._is_number(operand)
+    if guard == "FALSE":
+        return
+    parts.append(
+        compiler._guarded(
+            guard, f"TRY_CAST({operand.text} AS DOUBLE) = {binder.bind(float(value))}"
+        )
+    )
+
+
+#: Each entry is a plausible way to get the compiler wrong, as a patch over the
+#: real thing. They are the bugs §5 exists to prevent, one per failure mode.
+MUTATIONS: dict[str, dict[str, object]] = {
+    "!= keeps SQL's three-valued NULL": {"_truth": _three_valued_truth},
+    "string operators go through LIKE": {"_string_call": _like_string_call},
+    "equality ignores the JSON type": {
+        "_is_string": _untyped_guard,
+        "_is_number": _untyped_guard,
+    },
+    "integers compare as doubles": {"_append_numeric": _double_only_numeric},
+}
+
+
+@pytest.mark.parametrize("mutation", list(MUTATIONS), ids=list(MUTATIONS))
+def test_a_broken_compiler_is_caught(
+    db: Database, corpus: Corpus, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    """Two identical selections prove nothing if nothing could have differed.
+
+    So each mutation is applied to the live compiler and the whole expression
+    matrix re-run: the corpus must notice. The assertion is qualitative on
+    purpose — the exact count moves whenever `EXPRESSIONS` grows — but running
+    this test prints the caught expressions, so the count is always measurable
+    from the branch rather than quoted from memory.
+    """
+    for name, replacement in MUTATIONS[mutation].items():
+        monkeypatch.setattr(compiler, name, replacement)
+    caught = [
+        expression
+        for expression in EXPRESSIONS
+        if _evaluator_ids(corpus, expression) != _sql_ids(db, expression)
+    ]
+    print(f"\n{mutation}: {len(caught)} of {len(EXPRESSIONS)} expressions disagree")
+    for expression in caught:
+        print(f"  {expression}")
+    assert caught, f"the corpus cannot tell the difference: {mutation}"

@@ -91,8 +91,17 @@ Consequences that the implementation must encode:
    former and SQL `NULL` for the latter; both must read as "missing".
 3. **Comparison is typed.** `json_extract_string` flattens `42` and `"42"` to the same `'42'`, so
    every equality is guarded by `json_type()`: a string literal only matches `'VARCHAR'`, an int
-   literal only matches `'BIGINT' / 'UBIGINT' / 'DOUBLE'` (via `TRY_CAST(... AS DOUBLE)`), a bool
-   literal only matches `'BOOLEAN'`. Python's `True == 1` quirk is mirrored explicitly.
+   literal only matches `'BIGINT' / 'UBIGINT' / 'DOUBLE'`, a bool literal only matches
+   `'BOOLEAN'`. Python's `True == 1` quirk is mirrored explicitly.
+7. **Integers compare exactly, and a double cannot do that.** Python ints are
+   arbitrary-precision; IEEE-754 doubles are exact only to 2**53, so
+   `TRY_CAST(v AS DOUBLE) = 9007199254740993.0` also matches the row whose value is
+   `9007199254740992` — a hunt for one pid silently answering with another. `json_extract_string`
+   returns the number's own token text, so an *integer* token is compared as text against the
+   literal's canonical decimal form (exact at any width), and only a *float* token goes through
+   `DOUBLE` — and only when `float(literal)` is lossless, since otherwise no double can equal the
+   literal at all. Corrected after review; pinned by the 2**53 / 2**63 / 10**30 corpus events and
+   by the `integers compare as doubles` mutation.
 4. **String operators are not LIKE.** `starts_with` / `ends_with` / `contains` take plain strings,
    so `%` and `_` in a literal are literal. Tested with a literal containing both.
 5. **Real columns are never NULL and always strings.** `event.module|action|severity|kind` compile
@@ -129,6 +138,24 @@ operator agrees exactly.
 
 ---
 
+### What is reproducible from this branch
+
+Two figures were quoted about this work that cannot be re-measured from the commits. Correcting
+the record rather than leaving them standing:
+
+- Commit `df061b2` claims three compiler mutations fail **"14, 8 and 9"** differential cases.
+  The mutations were ad-hoc and never committed, so those counts are not reproducible; an
+  independent re-implementation of equivalent mutations measured different numbers. The
+  qualitative claim is the one that matters and it holds: the corpus notices every one of these
+  bug classes, never zero. The mutations now live in the branch — `MUTATIONS` in
+  `tests/hunt/test_differential.py`, applied by `test_a_broken_compiler_is_caught` — so the
+  counts are whatever `pytest tests/hunt/test_differential.py -k broken -s` prints today, on
+  today's expression matrix, for anyone who wants them.
+- An **"18,543 (expression, event) pairs"** figure was quoted for the evaluator-vs-SQL
+  differencing. No run of that size exists in the branch. What is committed is the matrix in
+  `EXPRESSIONS` against the corpus in `_build_corpus` — 126 expressions × 22 events at the time
+  of writing, and both are printed by the test rather than quoted from memory.
+
 ## Bounds (§7)
 
 - `LIMIT` defaults to `DEFAULT_LIMIT = 500`, capped at `MAX_LIMIT = 5000`; `limit <= 0` raises.
@@ -147,6 +174,19 @@ operator agrees exactly.
 - [x] **Task 2 — the compiler.** `inspectord/hunt/`; `insert_event` extraction;
       `tests/hunt/test_compiler.py`, `tests/hunt/test_execute.py`.
 - [x] **Task 3 — the differential test.** Corpus + expression matrix + useful failure output.
+
+## Left for PR2
+
+Both are real, and neither has a caller yet — `compile_hunt_query` / `run_hunt_query` are only
+reachable from tests until PR2 adds the IPC and CLI edges:
+
+- **`run_hunt_query` does not wrap DuckDB's exceptions.** A malformed regex that RE2 accepts at
+  compile time but rejects at run time, or a storage error, surfaces as a raw `duckdb.Error`.
+  The edge that catches `HuntError` and renders it should catch that too, so an investigation
+  query never shows a stack trace.
+- **Expression text is unbounded.** The compiler will happily turn a megabyte of `OR` into a
+  megabyte of SQL. PR2's IPC handler is where a length cap belongs, next to the other request
+  bounds.
 
 ## Testing strategy
 
