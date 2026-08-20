@@ -277,7 +277,15 @@ def test_every_mutating_route_rejects_cross_origin(
     bare_client: TestClient, bare_app: FastAPI
 ) -> None:
     routes = _mutating_routes(bare_app)
-    assert len(routes) >= KNOWN_MUTATING_ROUTE_COUNT, routes
+    # Dump what the router actually looks like when this fails: it failed on CI
+    # while passing locally, and "[]" alone says nothing about why.
+    shape = [
+        (type(r).__name__, getattr(r, "path", None), sorted(getattr(r, "methods", None) or []))
+        for r in bare_app.routes
+    ]
+    assert len(routes) >= KNOWN_MUTATING_ROUTE_COUNT, (
+        f"found {len(routes)} mutating routes; router shape = {shape}"
+    )
     for method, path in routes:
         response = bare_client.request(method, path, headers={"Origin": "https://evil.example"})
         assert response.status_code == 403, f"{method} {path} is not guarded"
