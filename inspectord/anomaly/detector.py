@@ -1,28 +1,87 @@
 """Anomaly detector thread (spec 2026-08-20-anomaly-detector-design.md §2).
 
-PR1 skeleton: owns the maintenance thread and flushes the first-sighting
-queue each tick. PR2 adds the statistical aggregators to ``_tick``.
+Owns the maintenance thread. Each tick: flush the first-sighting queue, drain
+the router subscription into the metric engine, close minute buckets, emit a
+``kind=signal`` event per threshold breach (re-injected into the supervisor's
+dispatch path, where starter-pack ``anomaly.*`` rules turn them into alerts),
+and checkpoint engine state to ``metric_baseline`` when due.
 """
 
 from __future__ import annotations
 
 import threading
+import time
+from collections.abc import Callable
+from datetime import UTC, datetime
+from queue import Empty as QueueEmpty
+from typing import TYPE_CHECKING
 
 from inspectord.anomaly.first_sighting import FirstSightingTracker
+from inspectord.anomaly.metrics import extract_samples
+from inspectord.anomaly.stats import MetricEngine, SignalData
 from inspectord.config import AnomalyConfig
 from inspectord.log import get
+from inspectord.parsers.base import build_event
+from inspectord.schemas.event import Event
 from inspectord.storage.db import Database
+
+if TYPE_CHECKING:
+    from inspectord.router import Subscription
 
 log = get(__name__)
 
 
+def _signal_event(data: SignalData, *, now: datetime) -> Event:
+    # data.entity carries exactly one of process= / user= / file=; build_event
+    # defaults the other two to None, matching **data.entity's old behavior
+    # while staying typed (a **dict unpack can't be checked against
+    # build_event's heterogeneous kwargs).
+    ev = build_event(
+        module="anomaly_detector",
+        action="metric_anomaly",
+        category=["anomaly"],
+        type_=["info"],
+        kind="signal",
+        severity="info",
+        ts=now,
+        message=(
+            f"{data.metric_kind} for {data.entity_key} deviates from baseline: "
+            f"observed {data.observed:g} vs mean {data.mean:g} "
+            f"(z={data.z:.1f}, {data.window} window)"
+        ),
+        process=data.entity.get("process"),
+        user=data.entity.get("user"),
+        file=data.entity.get("file"),
+    )
+    ev.baseline = {
+        "metric_kind": data.metric_kind,
+        "entity_key": data.entity_key,
+        "window": data.window,
+        "observed": data.observed,
+        "mean": data.mean,
+        "stddev": data.stddev,
+        "deviation": data.z,
+    }
+    return ev
+
+
 class AnomalyDetector:
     def __init__(
-        self, *, db: Database, tracker: FirstSightingTracker, config: AnomalyConfig
+        self,
+        *,
+        db: Database,
+        tracker: FirstSightingTracker,
+        config: AnomalyConfig,
+        subscription: Subscription | None = None,
+        emit: Callable[[Event], None] | None = None,
     ) -> None:
         self._db = db
         self._tracker = tracker
         self._cfg = config
+        self._sub = subscription
+        self._emit = emit
+        self._engine = MetricEngine(config)
+        self._last_checkpoint = time.monotonic()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -33,24 +92,97 @@ class AnomalyDetector:
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def load_checkpoints(self) -> int:
+        """Restore engine state from metric_baseline; delete rows that fail to
+        parse so a bad row cannot fail every startup forever. Never raises."""
+        loaded = 0
+        try:
+            rows = self._db.query(
+                "SELECT metric_kind, entity_key, window_name, state_json FROM metric_baseline"
+            ).fetchall()
+        except Exception as exc:
+            log.warning("could not read metric_baseline checkpoints: %r", exc)
+            return 0
+        for metric_kind, entity_key, window_name, blob in rows:
+            if self._engine.load_row(str(metric_kind), str(entity_key), str(window_name), blob):
+                loaded += 1
+                continue
+            log.warning(
+                "discarding corrupt metric_baseline row (%s, %s, %s)",
+                metric_kind,
+                entity_key,
+                window_name,
+            )
+            try:
+                self._db.execute(
+                    "DELETE FROM metric_baseline "
+                    "WHERE metric_kind = ? AND entity_key = ? AND window_name = ?",
+                    [metric_kind, entity_key, window_name],
+                )
+            except Exception as exc:
+                log.warning("could not delete corrupt checkpoint row: %r", exc)
+        return loaded
+
+    def checkpoint(self) -> None:
+        """Upsert current engine state; drop rows for evicted entities."""
+        for metric_kind, entity_key in self._engine.drain_evicted():
+            self._db.execute(
+                "DELETE FROM metric_baseline WHERE metric_kind = ? AND entity_key = ?",
+                [metric_kind, entity_key],
+            )
+        for metric_kind, entity_key, window_name, blob in self._engine.checkpoint_rows():
+            self._db.execute(
+                "INSERT OR REPLACE INTO metric_baseline "
+                "(metric_kind, entity_key, window_name, state_json, updated_at) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                [metric_kind, entity_key, window_name, blob],
+            )
+        self._last_checkpoint = time.monotonic()
+
     def _run(self) -> None:
         while not self._stop.wait(self._cfg.tick_s):
-            self._tick()
+            self._tick(now=datetime.now(UTC))
 
-    def _tick(self) -> None:
+    def _drain(self) -> None:
+        if self._sub is None:
+            return
+        while True:
+            try:
+                ev = self._sub.get_nowait()
+            except QueueEmpty:
+                return
+            for sample in extract_samples(ev):
+                self._engine.ingest(sample, ts=ev.ts)
+
+    def _tick(self, *, now: datetime | None = None) -> None:
+        if now is None:
+            now = datetime.now(UTC)
         try:
             self._tracker.flush(self._db)
         except Exception as exc:
-            # One bad tick must never kill the thread; pending rows are gone,
+            # One bad flush must never kill the thread; pending rows are gone,
             # and a re-sighting after restart is absorbed by dedup.
+            log.error("first-sighting flush failed: %r", exc)
+        try:
+            self._drain()
+            for data in self._engine.tick(now=now):
+                if self._emit is not None:
+                    self._emit(_signal_event(data, now=now))
+            if time.monotonic() - self._last_checkpoint >= self._cfg.checkpoint_interval_s:
+                self.checkpoint()
+        except Exception as exc:
             log.error("anomaly tick failed: %r", exc)
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
-        # Best-effort final flush so a clean shutdown loses nothing.
+        # Best-effort final flush + checkpoint so a clean shutdown loses nothing.
         try:
             self._tracker.flush(self._db)
         except Exception as exc:
             log.warning("final anomaly flush failed: %r", exc)
+        try:
+            self.checkpoint()
+        except Exception as exc:
+            log.warning("final anomaly checkpoint failed: %r", exc)
