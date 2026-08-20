@@ -31,12 +31,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
 
 __all__ = [
     "LEAF_OPS",
     "InvalidLeaf",
     "Leaf",
+    "LiteralValue",
     "Node",
     "ParsedExpression",
     "parse_expression",
@@ -44,6 +44,13 @@ __all__ = [
     "parse_literal",
     "path_segments",
 ]
+
+#: Everything a right-hand side can parse to. The grammar has no float and no
+#: null literal, so this union is closed: `5.5` is the *string* "5.5", and
+#: nothing on the right-hand side can ever equal a missing field. Both backends
+#: branch on exactly these three types, so widening it is a deliberate act that
+#: the type checker will make them account for.
+LiteralValue = str | int | bool
 
 #: Every leaf operator the grammar knows, in one place.
 LEAF_OPS: tuple[str, ...] = (
@@ -173,7 +180,7 @@ def parse_expression(expr: str) -> ParsedExpression:
     return ParsedExpression(groups=tuple(tuple(g) for g in groups))
 
 
-def parse_literal(raw: str) -> Any:
+def parse_literal(raw: str) -> LiteralValue:
     """Parse one RHS literal: quoted string, `true`/`false`, int, or bare word.
 
     Note there is no float and no null literal: `5.5` is the *string* "5.5",
@@ -194,7 +201,7 @@ def parse_literal(raw: str) -> Any:
         return raw
 
 
-def parse_list(raw: str) -> list[Any]:
+def parse_list(raw: str) -> list[LiteralValue]:
     """Parse a `[a, b]` RHS list. Anything else is an empty list."""
     raw = raw.strip()
     if not (raw.startswith("[") and raw.endswith("]")):
