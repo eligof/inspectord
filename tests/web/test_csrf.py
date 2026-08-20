@@ -259,29 +259,23 @@ def test_static_assets_are_untouched(bare_client: TestClient) -> None:
 # --- coverage of every mutating route, enumerated from the router ------------
 
 
-def _mutating_routes(app) -> list[tuple[str, str]]:  # type: ignore[no-untyped-def]
-    """Every (method, concrete path) in the live router that is not a safe method."""
+def _mutating_routes(app: FastAPI) -> list[tuple[str, str]]:
+    """Every (method, concrete path) the app exposes that is not a safe method.
+
+    Read from ``app.openapi()`` rather than by walking ``app.routes``. How
+    ``include_router`` stores its routes is a FastAPI internal that differs by
+    version — flattened into ``app.routes`` on the local toolchain, hidden
+    behind opaque ``_IncludedRouter`` objects on CI, where two attempts to walk
+    it found nothing and the test asserted against an empty list. The OpenAPI
+    schema is public API and lists exactly the paths and methods the app serves.
+    """
 
     found: list[tuple[str, str]] = []
-
-    def walk(routes: object) -> None:
-        for route in routes:  # type: ignore[attr-defined]
-            # Recurse first: whether `include_router` flattens its routes into
-            # `app.routes` or keeps them nested behind a router object is a
-            # FastAPI version detail. It flattens locally and nests on CI, where
-            # this walk consequently saw only the root route and enumerated
-            # nothing — so walk both shapes rather than depending on either.
-            nested = getattr(route, "routes", None)
-            if nested:
-                walk(nested)
-            methods = getattr(route, "methods", None)
-            path = getattr(route, "path", None)
-            if not methods or path is None:
-                continue  # Mounts (e.g. /static) carry no methods.
-            for method in sorted(set(methods) - SAFE_METHODS):
-                found.append((method, re.sub(r"\{[^}]+\}", "x", path)))
-
-    walk(app.routes)
+    for path, operations in app.openapi().get("paths", {}).items():
+        for method in operations:
+            if method.upper() in SAFE_METHODS:
+                continue
+            found.append((method.upper(), re.sub(r"\{[^}]+\}", "x", path)))
     return found
 
 
