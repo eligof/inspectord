@@ -31,11 +31,13 @@ if TYPE_CHECKING:
 log = get(__name__)
 
 
+_BUCKET_LABEL = {"1h": "per minute", "24h": "per 5 min", "7d": "per 15 min"}
+
+
 def _signal_event(data: SignalData, *, now: datetime) -> Event:
-    # data.entity carries exactly one of process= / user= / file=; build_event
-    # defaults the other two to None, matching **data.entity's old behavior
-    # while staying typed (a **dict unpack can't be checked against
-    # build_event's heterogeneous kwargs).
+    # data.entity carries exactly one of process= / user= / file=; pass each
+    # explicitly (rather than **data.entity) so it's checked against
+    # build_event's heterogeneous kwargs.
     ev = build_event(
         module="anomaly_detector",
         action="metric_anomaly",
@@ -47,7 +49,8 @@ def _signal_event(data: SignalData, *, now: datetime) -> Event:
         message=(
             f"{data.metric_kind} for {data.entity_key} deviates from baseline: "
             f"observed {data.observed:g} vs mean {data.mean:g} "
-            f"(z={data.z:.1f}, {data.window} window)"
+            f"({_BUCKET_LABEL.get(data.window, data.window)}, "
+            f"z={data.z:.1f}, {data.window} window)"
         ),
         process=data.entity.get("process"),
         user=data.entity.get("user"),
@@ -124,19 +127,34 @@ class AnomalyDetector:
         return loaded
 
     def checkpoint(self) -> None:
-        """Upsert current engine state; drop rows for evicted entities."""
-        for metric_kind, entity_key in self._engine.drain_evicted():
+        """Atomically rewrite metric_baseline from current engine state.
+
+        A full-table rewrite (DELETE + one bulk INSERT) instead of per-row
+        upserts: at the full 9,216-row cap, per-row INSERT OR REPLACE was
+        benchmarked at ~43s (would stall the tick thread and overflow the
+        router subscription), while a single bulk unnest-over-list-params
+        insert runs in ~2s. The rewrite also makes evicted entities'
+        rows disappear for free, so there is no separate per-evicted-key
+        DELETE pass to run.
+        """
+        rows = self._engine.checkpoint_rows()
+        # Nothing left to track for these keys once the table is rewritten
+        # from scratch below; drain anyway so the engine's internal evicted
+        # list doesn't grow unbounded between checkpoints.
+        self._engine.drain_evicted()
+        metric_kinds, entity_keys, window_names, blobs = ([r[i] for r in rows] for i in range(4))
+        try:
+            self._db.execute("BEGIN")
+            self._db.execute("DELETE FROM metric_baseline")
             self._db.execute(
-                "DELETE FROM metric_baseline WHERE metric_kind = ? AND entity_key = ?",
-                [metric_kind, entity_key],
+                "INSERT INTO metric_baseline "
+                "SELECT unnest(?), unnest(?), unnest(?), unnest(?), CURRENT_TIMESTAMP",
+                [metric_kinds, entity_keys, window_names, blobs],
             )
-        for metric_kind, entity_key, window_name, blob in self._engine.checkpoint_rows():
-            self._db.execute(
-                "INSERT OR REPLACE INTO metric_baseline "
-                "(metric_kind, entity_key, window_name, state_json, updated_at) "
-                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-                [metric_kind, entity_key, window_name, blob],
-            )
+            self._db.execute("COMMIT")
+        except Exception:
+            self._db.execute("ROLLBACK")
+            raise
         self._last_checkpoint = time.monotonic()
 
     def _run(self) -> None:
@@ -177,6 +195,12 @@ class AnomalyDetector:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+            if self._thread.is_alive():
+                # The tick thread is still mid-write; a final flush/checkpoint
+                # here would race it on separate cursors over the same rows.
+                # Skip and let the wedged thread's own writes stand.
+                log.warning("anomaly detector thread did not stop in time; skipping final flush")
+                return
         # Best-effort final flush + checkpoint so a clean shutdown loses nothing.
         try:
             self._tracker.flush(self._db)

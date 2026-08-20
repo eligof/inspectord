@@ -262,3 +262,26 @@ def test_evicted_entities_lose_their_checkpoint_rows(tmp_path: Path) -> None:
     ).fetchall()
     assert rows == [("wget",)]
     db.close()
+
+
+def test_stop_skips_final_writes_when_thread_hung(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, router, _ = _stat_detector(db)
+    router.publish(_conn_event(T0))
+    det._tick(now=T0 + timedelta(minutes=1))
+
+    # Simulate a wedged thread: alive dummy that ignores the join.
+    class _Wedged:
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return True
+
+    det._thread = _Wedged()  # type: ignore[assignment]
+    det.stop(timeout=0.01)
+    # No checkpoint rows were written by stop().
+    assert db.query("SELECT count(*) FROM metric_baseline").fetchall()[0][0] == 0
+    db.close()
