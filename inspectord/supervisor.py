@@ -22,6 +22,8 @@ from typing import Any
 import yaml as _yaml
 
 from inspectord.allowlist.file_loader import load_allowlist_file
+from inspectord.anomaly.detector import AnomalyDetector
+from inspectord.anomaly.first_sighting import FirstSightingTracker
 from inspectord.config import DaemonConfig, WorkerSpec
 from inspectord.enrichment import enrich
 from inspectord.evidence.collector import EvidenceCollector
@@ -173,6 +175,13 @@ class Supervisor:
             db_path=config.storage.db_path,
             allowlist_entries=load_allowlist_file(),
         )
+        self._first_sighting: FirstSightingTracker | None = None
+        self._anomaly_detector: AnomalyDetector | None = None
+        if config.anomaly.enabled:
+            self._first_sighting = FirstSightingTracker()
+            self._anomaly_detector = AnomalyDetector(
+                db=self._db, tracker=self._first_sighting, config=config.anomaly
+            )
         self._alert_listeners: list[Callable[[Alert], None]] = []
         self._evidence_collector: EvidenceCollector | None = None
 
@@ -188,6 +197,10 @@ class Supervisor:
         with contextlib.suppress(OSError):
             self._boot_id = current_boot_id()
             reconcile_processes(self._db, self._boot_id)
+        if self._first_sighting is not None:
+            self._first_sighting.load(self._db)
+        if self._anomaly_detector is not None:
+            self._anomaly_detector.start()
         self._subscribe_storage()
         for spec in self._cfg.workers:
             self._spawn_worker(spec)
@@ -224,6 +237,8 @@ class Supervisor:
         """
         try:
             ev = enrich(ev)
+            if self._first_sighting is not None:
+                self._first_sighting.observe(ev)
             self._run_alert_path(ev)
         except Exception as exc:
             log.error(
@@ -299,6 +314,8 @@ class Supervisor:
                 wp.proc.kill()
             for t in wp.threads:
                 t.join(timeout=remaining())
+        if self._anomaly_detector is not None:
+            self._anomaly_detector.stop(timeout=remaining())
         self._journal.close()
         self._db.close()
 
