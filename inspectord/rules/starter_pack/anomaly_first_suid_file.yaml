@@ -10,6 +10,10 @@ why: |
   This complements persistence.new_suid_file (severity high, fires on the
   create/chmod event itself): this rule is the *first-seen* angle, keyed on
   the path's history rather than the single change event.
+  Cost: every firing coincides with persistence.new_suid_file firing `high` on
+  the very same event, and both severities reach the desktop — a genuinely new
+  SUID file produces two notifications. Deliberate: one is the change, one is
+  the history; allowlist this rule if the pair annoys you.
 false_positives:
   - "Package installs and updates legitimately add SUID binaries (verify with pacman -Qo <path>)."
 detect:

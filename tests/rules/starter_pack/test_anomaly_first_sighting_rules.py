@@ -32,6 +32,54 @@ def _proc_start():
     )
 
 
+def _outbound():
+    return build_event(
+        module="outbound_connection_tracker",
+        action="outbound_connection",
+        category=["network"],
+        type_=["connection", "start"],
+        severity="info",
+        process={"pid": 2, "name": "curl"},
+        destination={"ip": "203.0.113.9", "port": 443},
+    )
+
+
+def _login():
+    return build_event(
+        module="log_tailer",
+        action="ssh_login_succeeded",
+        category=["authentication"],
+        type_=["start"],
+        severity="info",
+        outcome="success",
+        user={"name": "eli"},
+        source={"ip": "198.51.100.7"},
+        process={"name": "sshd", "pid": 4242},
+    )
+
+
+def _kmod():
+    return build_event(
+        module="kmod_watcher",
+        action="kmod_loaded",
+        category=["driver"],
+        type_=["installation"],
+        severity="info",
+        raw={"module_name": "nft_ct"},
+    )
+
+
+def _suid_file():
+    return build_event(
+        module="fim_watcher",
+        action="file_created",
+        category=["file"],
+        type_=["creation"],
+        severity="info",
+        file={"path": "/usr/local/bin/backdoor", "setuid": True},
+    )
+
+
 def test_first_binary_execution_fires_only_when_stamped() -> None:
     rule = _rule("anomaly_first_binary_execution.yaml")
     assert rule.severity == "low"
@@ -45,67 +93,28 @@ def test_first_binary_execution_fires_only_when_stamped() -> None:
 def test_first_outbound_dest_fires() -> None:
     rule = _rule("anomaly_first_outbound_dest.yaml")
     assert rule.severity == "low"
-    ev = _stamped(
-        build_event(
-            module="outbound_connection_tracker",
-            action="outbound_connection",
-            category=["network"],
-            type_=["connection", "start"],
-            severity="info",
-            process={"pid": 2, "name": "curl"},
-            destination={"ip": "203.0.113.9", "port": 443},
-        )
-    )
+    ev = _stamped(_outbound())
     assert evaluate_yaml_rule(rule, EvalContext(event=ev))
 
 
 def test_first_login_ip_fires() -> None:
     rule = _rule("anomaly_first_login_ip.yaml")
     assert rule.severity == "low"
-    ev = _stamped(
-        build_event(
-            module="log_tailer",
-            action="ssh_login_succeeded",
-            category=["authentication"],
-            type_=["start"],
-            severity="info",
-            outcome="success",
-            user={"name": "eli"},
-            source={"ip": "198.51.100.7"},
-        )
-    )
+    ev = _stamped(_login())
     assert evaluate_yaml_rule(rule, EvalContext(event=ev))
 
 
 def test_first_kmod_load_fires_at_medium() -> None:
     rule = _rule("anomaly_first_kmod_load.yaml")
     assert rule.severity == "medium"
-    ev = _stamped(
-        build_event(
-            module="kmod_watcher",
-            action="kmod_loaded",
-            category=["driver"],
-            type_=["installation"],
-            severity="info",
-            raw={"module_name": "nft_ct"},
-        )
-    )
+    ev = _stamped(_kmod())
     assert evaluate_yaml_rule(rule, EvalContext(event=ev))
 
 
 def test_first_suid_file_fires_at_medium() -> None:
     rule = _rule("anomaly_first_suid_file.yaml")
     assert rule.severity == "medium"
-    ev = _stamped(
-        build_event(
-            module="fim_watcher",
-            action="file_created",
-            category=["file"],
-            type_=["creation"],
-            severity="info",
-            file={"path": "/usr/local/bin/backdoor", "setuid": True},
-        )
-    )
+    ev = _stamped(_suid_file())
     assert evaluate_yaml_rule(rule, EvalContext(event=ev))
     # setuid gate: a stamped fim event without the bit must not fire.
     plain = _stamped(
@@ -122,13 +131,13 @@ def test_first_suid_file_fires_at_medium() -> None:
 
 
 def test_unstamped_events_never_fire_any_rule() -> None:
-    names = [
-        "anomaly_first_binary_execution.yaml",
-        "anomaly_first_outbound_dest.yaml",
-        "anomaly_first_login_ip.yaml",
-        "anomaly_first_kmod_load.yaml",
-        "anomaly_first_suid_file.yaml",
+    cases = [
+        ("anomaly_first_binary_execution.yaml", _proc_start()),
+        ("anomaly_first_outbound_dest.yaml", _outbound()),
+        ("anomaly_first_login_ip.yaml", _login()),
+        ("anomaly_first_kmod_load.yaml", _kmod()),
+        ("anomaly_first_suid_file.yaml", _suid_file()),
     ]
-    ev = _proc_start()
-    for name in names:
+    for name, ev in cases:
+        assert ev.baseline is None
         assert not evaluate_yaml_rule(_rule(name), EvalContext(event=ev)), name
