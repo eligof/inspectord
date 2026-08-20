@@ -342,7 +342,10 @@ class Supervisor:
         threading.Thread(target=self._drain, args=(store_sub,), daemon=True).start()
 
     def _drain(self, sub) -> None:  # type: ignore[no-untyped-def]
-        """Persist every routed event; the ONLY thread that writes storage.
+        """Persist every routed event; the only thread that writes the event store.
+
+        (The anomaly detector thread writes its own disjoint tables --
+        first_seen and metric_baseline -- on its own per-thread cursor.)
 
         _persist raises for ordinary reasons -- events_enriched.event_id is a
         PRIMARY KEY so a duplicate id conflicts, journal I/O fails, the disk

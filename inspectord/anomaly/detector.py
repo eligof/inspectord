@@ -60,7 +60,7 @@ def _signal_event(data: SignalData, *, now: datetime) -> Event:
         "metric_kind": data.metric_kind,
         "entity_key": data.entity_key,
         "window": data.window,
-        "bucket_label": _BUCKET_LABEL[data.window],
+        "bucket_label": _BUCKET_LABEL.get(data.window, data.window),
         "observed": data.observed,
         "mean": data.mean,
         "stddev": data.stddev,
