@@ -34,6 +34,27 @@ class IpcConfig(BaseModel):
     socket_group: str | None = None
 
 
+class AnomalyConfig(BaseModel):
+    """Anomaly detector settings (spec 2026-08-20-anomaly-detector-design.md §8)."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    tick_s: float = 60.0
+    z_threshold: float = 3.0
+    min_samples: int = 50
+    checkpoint_interval_s: float = 300.0
+    max_entities_per_metric: int = 512
+    # beaconing (PR3)
+    beacon_min_events: int = 12
+    beacon_min_interval_s: float = 5.0
+    beacon_max_interval_s: float = 3600.0
+    beacon_max_cv: float = 0.1
+    # entity/resource baselines (PR4)
+    resource_tick_s: float = 30.0
+    sustained_factor: float = 5.0
+    sustained_ticks: int = 6
+
+
 class DaemonConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: str
@@ -41,6 +62,7 @@ class DaemonConfig(BaseModel):
     ipc: IpcConfig
     workers: list[WorkerSpec] = Field(default_factory=list)
     notifier_desktop_enabled: bool = False
+    anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
 
 
 def load(path: Path) -> DaemonConfig:
