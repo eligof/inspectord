@@ -107,3 +107,9 @@ def test_load_window_rejects_garbage() -> None:
     assert ws.load_window("nope", "{}") is False
     # A failed load leaves the instance usable.
     assert ws.push_minute(1.0, min_samples=50, z_threshold=3.0) == []
+
+
+def test_load_window_rejects_malformed_accum() -> None:
+    ws = WindowedStats()
+    assert ws.load_window("24h", '{"ring": [], "accum": []}') is False
+    assert ws.load_window("24h", '{"ring": [1.0], "accum": [1.0]}') is False

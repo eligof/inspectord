@@ -74,11 +74,17 @@ def test_giant_gap_skips_instead_of_zero_flooding() -> None:
     eng = MetricEngine(_cfg())
     eng.ingest(_sample(1.0), ts=_min(0))
     eng.tick(now=_min(1))
-    # Two-day suspend: do not push 2880 zeros; skip the span.
+    # Two-day suspend: the span is skipped outright — no zero replay, the
+    # pre-gap baseline survives untouched.
     eng.tick(now=_min(1) + timedelta(days=2))
     ws = eng.stats_for("new_conn_per_min", "curl")
     assert ws is not None
-    assert len(ws.ring("1h")) < 100
+    assert list(ws.ring("1h")) == [1.0]
+    # The engine resumes cleanly: the next minute closes normally.
+    resume = _min(1) + timedelta(days=2)
+    eng.ingest(_sample(3.0), ts=resume)
+    eng.tick(now=resume + timedelta(minutes=1))
+    assert list(ws.ring("1h")) == [1.0, 3.0]
 
 
 def test_late_event_within_open_minute_still_counts() -> None:
@@ -102,6 +108,25 @@ def test_lru_eviction_at_entity_cap() -> None:
     assert eng.stats_for("new_conn_per_min", "c") is not None
     assert ("new_conn_per_min", "a") in eng.drain_evicted()
     assert eng.drain_evicted() == []  # drained once
+
+
+def test_evicted_entity_buckets_are_purged() -> None:
+    eng = MetricEngine(_cfg(max_entities_per_metric=1))
+    eng.ingest(_sample(1.0, key="a"), ts=_min(0))
+    eng.ingest(_sample(1.0, key="b"), ts=_min(0))  # evicts "a"
+    assert all(ek != "a" for _, _, ek in eng._buckets)
+
+
+def test_late_event_clamps_to_open_minute() -> None:
+    eng = MetricEngine(_cfg())
+    eng.ingest(_sample(1.0), ts=_min(5))
+    eng.tick(now=_min(6))  # minutes ..5 closed
+    eng.ingest(_sample(7.0), ts=_min(3))  # late: clamped, not stranded
+    eng.tick(now=_min(7))
+    ws = eng.stats_for("new_conn_per_min", "curl")
+    assert ws is not None
+    assert ws.ring("1h")[-1] == 7.0  # the late value was counted
+    assert eng._buckets == {}  # nothing stranded
 
 
 def test_checkpoint_rows_round_trip() -> None:

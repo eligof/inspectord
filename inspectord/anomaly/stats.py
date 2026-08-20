@@ -119,7 +119,7 @@ class WindowedStats:
             if name in self._accum:
                 raw = state.get("accum", [0.0, 0])
                 accum = (float(raw[0]), int(raw[1]))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, IndexError):
             return False
         capacity, _ = _WINDOW_BY_NAME[name]
         self._rings[name] = deque(ring[-capacity:], maxlen=capacity)
@@ -152,9 +152,11 @@ class SignalData:
     z: float
 
 
-# After a gap longer than this (daemon suspend/stopped), skip the span rather
-# than pushing a day of zeros per entity: preserves baselines, slight mean bias.
-_MAX_CATCHUP_MINUTES = 1440
+# After a gap longer than this (daemon suspend/stopped), skip the whole span
+# rather than zero-filling it: zero-filling would wipe the 1h/24h baselines
+# and stall the tick thread. 180 (3h) bounds the normal catch-up work to a
+# few seconds worst-case at full entity cap; rings resume where they left off.
+_MAX_CATCHUP_MINUTES = 180
 
 
 def _minute_of(ts: datetime) -> int:
@@ -187,6 +189,10 @@ class MetricEngine:
             # Heal an entity restored from checkpoint (loaded with no dict).
             self._entities[key] = sample.entity
         minute = _minute_of(ts)
+        if self._last_closed_minute is not None and minute <= self._last_closed_minute:
+            # A late event lands in the oldest still-open minute rather than a
+            # closed one no tick will ever visit: counted, slightly time-shifted.
+            minute = self._last_closed_minute + 1
         self._last_active[key] = minute
         bucket = (minute, sample.metric_kind, sample.entity_key)
         self._buckets[bucket] = self._buckets.get(bucket, 0.0) + sample.value
@@ -202,13 +208,15 @@ class MetricEngine:
             self._last_closed_minute = min(open_minutes, default=current) - 1
         start = self._last_closed_minute + 1
         if current - start > _MAX_CATCHUP_MINUTES:
-            skipped_to = current - _MAX_CATCHUP_MINUTES
-            log.warning("anomaly engine skipping %d minutes of downtime", skipped_to - start)
-            # Drop any buckets stranded in the skipped span.
+            # Daemon slept (suspend, downtime). Do not replay the span as
+            # zeros — that wipes the 1h/24h baselines and stalls the tick
+            # thread. Skip it entirely; rings resume where they left off.
+            log.warning("anomaly engine skipping %d minutes of downtime", current - start)
             self._buckets = {
-                (m, mk, ek): v for (m, mk, ek), v in self._buckets.items() if m >= skipped_to
+                (m, mk, ek): v for (m, mk, ek), v in self._buckets.items() if m >= current
             }
-            start = skipped_to
+            start = current
+            self._last_closed_minute = current - 1
         out: list[SignalData] = []
         for minute in range(start, current):
             for (metric_kind, entity_key), ws in self._stats.items():
@@ -272,6 +280,9 @@ class MetricEngine:
             self._entities.pop(victim, None)
             self._last_active.pop(victim, None)
             self._evicted.append(victim)
+            self._buckets = {
+                (m, mk, ek): v for (m, mk, ek), v in self._buckets.items() if (mk, ek) != victim
+            }
         self._stats[key] = WindowedStats()
         self._entities[key] = entity
         self._last_active.setdefault(key, -1)
