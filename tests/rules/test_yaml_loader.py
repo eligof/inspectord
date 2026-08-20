@@ -193,6 +193,33 @@ def test_not_in_leaf_operator(expr: str, comm: str, expected: bool) -> None:
     assert fired is expected, expr
 
 
+def test_pidless_process_event_gets_stable_name_dedup_key() -> None:
+    # Anomaly signals stamp process={"name": ...} with no pid; without a name
+    # fallback these fell through to the per-event key and never deduped.
+    rule = _rule_from_expr('event.action == "tick"')
+    ev1 = build_event(
+        module="anomaly_detector",
+        action="tick",
+        category=["anomaly"],
+        type_=["info"],
+        severity="info",
+        process={"name": "curl"},
+    )
+    ev2 = build_event(
+        module="anomaly_detector",
+        action="tick",
+        category=["anomaly"],
+        type_=["info"],
+        severity="info",
+        process={"name": "curl"},
+    )
+    m1 = evaluate_yaml_rule(rule, EvalContext(event=ev1, history=[]))
+    m2 = evaluate_yaml_rule(rule, EvalContext(event=ev2, history=[]))
+    assert m1[0].primary_entity_kind == "process"
+    assert m1[0].primary_entity_key == "name:curl"
+    assert m1[0].dedup_key == m2[0].dedup_key
+
+
 def _rule_from_expr(expr: str) -> YamlRule:
     return load_yaml_rule_from_dict(
         {

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
+from inspectord.anomaly.stats import MetricSample
 from inspectord.config import dev_config
 from inspectord.parsers.base import build_event
 from inspectord.storage.db import Database
@@ -94,3 +96,99 @@ def test_disabled_anomaly_never_stamps(tmp_path: Path) -> None:
         assert not [a for a in alerts if a.rule.id == "anomaly.first_kmod_load"]
     finally:
         sup.stop(timeout=10.0)
+
+
+# --- PR2: statistical signal path -------------------------------------------
+
+
+def _signal_event():
+    ev = build_event(
+        module="anomaly_detector",
+        action="metric_anomaly",
+        category=["anomaly"],
+        type_=["info"],
+        severity="info",
+        kind="signal",
+        user={"name": "eli"},
+    )
+    ev.baseline = {
+        "metric_kind": "sudo_per_min",
+        "entity_key": "eli",
+        "window": "1h",
+        "observed": 40.0,
+        "mean": 0.5,
+        "stddev": 0.7,
+        "deviation": 56.4,
+    }
+    return ev
+
+
+def test_signal_event_becomes_statistical_alert(tmp_path: Path) -> None:
+    cfg = _quiet_cfg(tmp_path)
+    sup = Supervisor(cfg)
+    alerts = []
+    sup.attach_alert_listener(alerts.append)
+    sup.start()
+    try:
+        sup._inject_for_test(_signal_event())
+        spikes = [a for a in alerts if a.rule.id == "anomaly.sudo_rate_spike"]
+        assert len(spikes) == 1
+        assert spikes[0].severity.value == "medium"
+    finally:
+        sup.stop(timeout=10.0)
+
+
+def test_detector_is_wired_to_router_and_dispatch(tmp_path: Path) -> None:
+    cfg = _quiet_cfg(tmp_path)
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        det = sup._anomaly_detector
+        assert det is not None
+        assert det._sub is not None
+        assert det._emit is not None
+        # The subscription filter drops the detector's own signals...
+        assert det._sub.filter_fn is not None
+        assert det._sub.filter_fn(_signal_event()) is False
+        # ...but passes ordinary worker events.
+        assert det._sub.filter_fn(_kmod_event()) is True
+        # Published events reach the detector's queue.
+        sup._inject_for_test(_kmod_event("snd_usb_audio"))
+        drained = []
+        while True:
+            try:
+                drained.append(det._sub.get_nowait())
+            except Exception:
+                break
+        assert any(e.action == "kmod_loaded" for e in drained)
+    finally:
+        sup.stop(timeout=10.0)
+
+
+def test_stop_checkpoints_engine_state(tmp_path: Path) -> None:
+    cfg = _quiet_cfg(tmp_path)
+    # Huge tick so the detector thread cannot race the direct engine poke.
+    cfg = cfg.model_copy(update={"anomaly": cfg.anomaly.model_copy(update={"tick_s": 3600.0})})
+    sup = Supervisor(cfg)
+    sup.start()
+    try:
+        det = sup._anomaly_detector
+        assert det is not None
+        det._engine.ingest(
+            MetricSample(
+                metric_kind="sudo_per_min",
+                entity_key="eli",
+                entity={"user": {"name": "eli"}},
+                value=1.0,
+            ),
+            ts=datetime.now(UTC),
+        )
+    finally:
+        sup.stop(timeout=10.0)
+    db = Database(cfg.storage.db_path)
+    db.connect()
+    rows = db.query(
+        "SELECT count(*) FROM metric_baseline WHERE metric_kind = 'sudo_per_min'"
+    ).fetchall()
+    assert rows[0][0] == 3  # one row per window
+    db.close()
