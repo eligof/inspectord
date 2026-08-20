@@ -10,10 +10,10 @@ edition = "2021"
 rust-version = "1.74"
 
 [workspace.dependencies]
-aya = "0.13"
-aya-ebpf = "0.1"
-aya-log-ebpf = "0.1"
-aya-build = "0.1"
+aya = "0.14"
+aya-ebpf = "0.2"
+aya-log-ebpf = "0.2"
+aya-build = "0.2"
 
 # BPF crate profiles — must live in the workspace root.
 # Per-package overrides keep these settings isolated to the BPF crate.

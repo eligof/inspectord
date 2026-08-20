@@ -7,10 +7,16 @@
 
 mod records;
 
+// `helpers::generated` is aya-ebpf's re-export of the raw kernel-helper
+// bindings (named `helpers::gen` before aya-ebpf 0.2, where `gen` became a
+// Rust 2024 keyword). The raw `bpf_probe_read_user` is used deliberately: it
+// is the only form that takes a runtime length, which `try_process_exec` needs
+// to copy the whole argv range. See the call site for why the safe,
+// first-NUL-terminated wrapper is not an option.
 use aya_ebpf::{
     helpers::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
-        bpf_probe_read_kernel_buf, gen::bpf_probe_read_user as raw_probe_read_user,
+        bpf_probe_read_kernel_buf, generated::bpf_probe_read_user as raw_probe_read_user,
     },
     macros::{btf_tracepoint, map, tracepoint},
     maps::{Array, RingBuf},
@@ -264,13 +270,13 @@ pub fn outbound_connection(ctx: BtfTracePointContext) -> i32 {
 
 fn try_outbound_connection(ctx: BtfTracePointContext) -> Result<(), i64> {
     // inet_sock_set_state(const struct sock *sk, int oldstate, int newstate)
-    let oldstate: i32 = unsafe { ctx.arg(1) };
-    let newstate: i32 = unsafe { ctx.arg(2) };
+    let oldstate: i32 = ctx.arg(1);
+    let newstate: i32 = ctx.arg(2);
     if oldstate != TCP_SYN_SENT || newstate != TCP_ESTABLISHED {
         return Err(0);
     }
 
-    let sk: *const u8 = unsafe { ctx.arg(0) };
+    let sk: *const u8 = ctx.arg(0);
     if sk.is_null() {
         return Err(-1);
     }
@@ -347,13 +353,13 @@ fn try_outbound_connection6(ctx: BtfTracePointContext) -> Result<(), i64> {
     // Same tracepoint as the IPv4 path. Both programs fire on every
     // inet_sock_set_state; each keeps only its own address family so the
     // verifier sees two simple programs instead of one branchy one.
-    let oldstate: i32 = unsafe { ctx.arg(1) };
-    let newstate: i32 = unsafe { ctx.arg(2) };
+    let oldstate: i32 = ctx.arg(1);
+    let newstate: i32 = ctx.arg(2);
     if oldstate != TCP_SYN_SENT || newstate != TCP_ESTABLISHED {
         return Err(0);
     }
 
-    let sk: *const u8 = unsafe { ctx.arg(0) };
+    let sk: *const u8 = ctx.arg(0);
     if sk.is_null() {
         return Err(-1);
     }
