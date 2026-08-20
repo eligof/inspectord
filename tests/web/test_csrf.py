@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from inspectorctl.web.app import create_app
@@ -44,6 +45,20 @@ def bare_client(tmp_path: Path) -> TestClient:
     """A client whose requests never need to reach a route (guard rejects first)."""
 
     return web_client(create_app(socket_path=tmp_path / "absent.sock"))
+
+
+@pytest.fixture
+def bare_app(tmp_path: Path) -> FastAPI:
+    """The app itself, for tests that need to enumerate its routes.
+
+    Deliberately not reached via ``TestClient.app``: that attribute is an
+    implementation detail of the test client and does not resolve to the
+    FastAPI instance across Starlette versions — it returned an object with no
+    routes on CI while working locally, so the route-coverage test silently
+    enumerated nothing and asserted against an empty list.
+    """
+
+    return create_app(socket_path=tmp_path / "absent.sock")
 
 
 @contextmanager
@@ -258,8 +273,10 @@ def _mutating_routes(app) -> list[tuple[str, str]]:  # type: ignore[no-untyped-d
     return found
 
 
-def test_every_mutating_route_rejects_cross_origin(bare_client: TestClient) -> None:
-    routes = _mutating_routes(bare_client.app)
+def test_every_mutating_route_rejects_cross_origin(
+    bare_client: TestClient, bare_app: FastAPI
+) -> None:
+    routes = _mutating_routes(bare_app)
     assert len(routes) >= KNOWN_MUTATING_ROUTE_COUNT, routes
     for method, path in routes:
         response = bare_client.request(method, path, headers={"Origin": "https://evil.example"})
