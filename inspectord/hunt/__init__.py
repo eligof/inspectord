@@ -25,6 +25,7 @@ from inspectord.hunt.errors import (
     HuntPathError,
     HuntQueryExists,
     HuntQueryNotFound,
+    HuntRequestError,
     HuntSyntaxError,
     HuntUnsupportedError,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "HuntPathError",
     "HuntQueryExists",
     "HuntQueryNotFound",
+    "HuntRequestError",
     "HuntResult",
     "HuntRow",
     "HuntSyntaxError",

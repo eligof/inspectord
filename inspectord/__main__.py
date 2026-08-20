@@ -42,6 +42,13 @@ from inspectord.dependencies.ipc_handlers import (
 )
 from inspectord.dependencies.manifest import load_packaged_manifests
 from inspectord.dependencies.pacman_backend import PacmanBackend
+from inspectord.hunt.ipc_handlers import (
+    handle_delete_hunt_query,
+    handle_get_hunt_query,
+    handle_list_hunt_queries,
+    handle_run_hunt_query,
+    handle_save_hunt_query,
+)
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.log import configure as configure_log
 from inspectord.log import get
@@ -300,6 +307,48 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
                 evidence_dir=cfg.storage.evidence_dir,
             ),
             mutates=False,
+        ),
+        # Hunt (hunt design §8). Running a query is `mutates=False` and must stay
+        # that way: Hunt is read-only by construction (§10) — the only statement
+        # run_hunt_query executes is the compiled SELECT — and a permission
+        # prompt on the most frequent action in an investigation would be both
+        # unauthorizable and intolerable. Saving and deleting are the opposite:
+        # they write durable, named state that another caller later runs, and a
+        # save with `replace` destroys the previous query.
+        Method(
+            name="run_hunt_query",
+            handler=lambda params: handle_run_hunt_query(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="list_hunt_queries",
+            handler=lambda params: handle_list_hunt_queries(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="get_hunt_query",
+            handler=lambda params: handle_get_hunt_query(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="save_hunt_query",
+            handler=lambda params: handle_save_hunt_query(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=True,
+        ),
+        Method(
+            name="delete_hunt_query",
+            handler=lambda params: handle_delete_hunt_query(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=True,
         ),
     ]
 

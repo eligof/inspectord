@@ -20,6 +20,7 @@ __all__ = [
     "HuntPathError",
     "HuntQueryExists",
     "HuntQueryNotFound",
+    "HuntRequestError",
     "HuntSyntaxError",
     "HuntUnsupportedError",
 ]
@@ -65,3 +66,7 @@ class HuntQueryExists(HuntError):
 
 class HuntQueryNotFound(HuntError):
     """No saved query with this name."""
+
+
+class HuntRequestError(HuntError):
+    """The request itself is malformed — a missing or contradictory parameter."""
