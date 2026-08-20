@@ -179,8 +179,19 @@ class Supervisor:
         self._anomaly_detector: AnomalyDetector | None = None
         if config.anomaly.enabled:
             self._first_sighting = FirstSightingTracker()
+            # The detector must never aggregate its own signals (spec §2.1).
+            anomaly_sub = self._router.subscribe(
+                name="anomaly",
+                queue_size=4096,
+                drop_policy=DropPolicy.drop_oldest_non_critical,
+                filter_fn=lambda ev: ev.module != "anomaly_detector",
+            )
             self._anomaly_detector = AnomalyDetector(
-                db=self._db, tracker=self._first_sighting, config=config.anomaly
+                db=self._db,
+                tracker=self._first_sighting,
+                config=config.anomaly,
+                subscription=anomaly_sub,
+                emit=self._dispatch,
             )
         self._alert_listeners: list[Callable[[Alert], None]] = []
         self._evidence_collector: EvidenceCollector | None = None
@@ -200,6 +211,7 @@ class Supervisor:
         if self._first_sighting is not None:
             self._first_sighting.load(self._db)
         if self._anomaly_detector is not None:
+            self._anomaly_detector.load_checkpoints()
             self._anomaly_detector.start()
         self._subscribe_storage()
         for spec in self._cfg.workers:
