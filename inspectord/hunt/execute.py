@@ -2,6 +2,13 @@
 
 Read-only by construction: the only statement this module runs is the SELECT
 the compiler produced.
+
+A query that compiles can still fail at run time — DuckDB's RE2 rejects
+repetitions Python's `re` accepts, and storage itself can fail. Those arrive as
+`duckdb.Error`, whose message can quote the failing SQL, and the IPC server
+sends `repr(exc)` straight to the client. So every DuckDB failure is converted
+into a `HuntExecutionError` that carries the *user's* expression and nothing
+else; the DuckDB detail goes to the daemon log.
 """
 
 from __future__ import annotations
@@ -9,8 +16,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+import duckdb
+
 from inspectord.hunt.compiler import CompiledQuery
+from inspectord.hunt.errors import HuntExecutionError
+from inspectord.log import get
 from inspectord.storage.db import Database
+
+log = get(__name__)
 
 __all__ = ["HuntResult", "HuntRow", "run_hunt_query"]
 
@@ -49,7 +62,17 @@ def run_hunt_query(db: Database, query: CompiledQuery) -> HuntResult:
     """Execute `query` and return at most `query.limit` rows, newest first."""
     # The compiled SQL asks for limit + 1 rows; the extra one only ever exists
     # to prove there was more, and is dropped here.
-    fetched = db.query(query.sql, list(query.params)).fetchall()
+    try:
+        fetched = db.query(query.sql, list(query.params)).fetchall()
+    except duckdb.Error as exc:
+        # Logged, not re-raised: `exc` can contain the generated SQL.
+        log.warning("hunt query failed in the database: %s", exc)
+        raise HuntExecutionError(
+            f"the database could not run this query: {query.expression}. "
+            "It compiled, so this is a limit of the query engine rather than a "
+            "syntax problem — check any regular expression in it. The daemon log "
+            "has the database's own message."
+        ) from exc
     rows = tuple(
         HuntRow(
             event_id=str(row[0]),

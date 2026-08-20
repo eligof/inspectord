@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from inspectord.hunt import compile_hunt_query, run_hunt_query
+from inspectord.hunt import (
+    HuntError,
+    HuntExecutionError,
+    compile_hunt_query,
+    run_hunt_query,
+)
 from inspectord.parsers.base import build_event
 from inspectord.storage.db import Database
 from inspectord.storage.events import insert_event
@@ -88,3 +94,75 @@ def test_no_matches_is_an_empty_untruncated_result(db: Database) -> None:
     result = run_hunt_query(db, compile_hunt_query('process.name == "nobody"'))
     assert result.rows == ()
     assert result.truncated is False
+
+
+# --------------------------------------------------------------------------
+# DuckDB errors never reach a client raw (PR1's deferred item; PR2 owns the
+# first external caller, so PR2 owns the wrap).
+# --------------------------------------------------------------------------
+
+#: Fragments of the compiled statement and of the daemon's internals. None of
+#: these may appear in the message an IPC client is handed.
+_INTERNALS = (
+    "SELECT",
+    "FROM events_enriched",
+    "events_enriched",
+    "payload_json",
+    "json_extract_string",
+    "regexp_matches",
+    "LINE ",
+    "ORDER BY",
+    "LIMIT",
+)
+
+
+def test_a_duckdb_runtime_error_becomes_a_hunt_error(db: Database) -> None:
+    """RE2 rejects a repetition Python's `re` accepts — a real runtime failure."""
+    compiled = compile_hunt_query('process.name MATCHES "a{1001}"')
+    with pytest.raises(HuntExecutionError) as caught:
+        run_hunt_query(db, compiled)
+    assert isinstance(caught.value, HuntError)
+
+
+def test_the_wrapped_message_shows_the_users_query_and_no_sql(db: Database) -> None:
+    compiled = compile_hunt_query('process.name MATCHES "a{1001}"')
+    with pytest.raises(HuntExecutionError) as caught:
+        run_hunt_query(db, compiled)
+    message = str(caught.value)
+    assert 'process.name MATCHES "a{1001}"' in message
+    for fragment in _INTERNALS:
+        assert fragment not in message
+
+
+def test_a_sql_quoting_duckdb_error_still_leaks_nothing(tmp_path: Path) -> None:
+    """DuckDB's catalog errors quote the statement itself; the wrap must not.
+
+    A database with no `events_enriched` produces a `Catalog Error` whose text
+    contains `LINE 2: FROM events_enriched` — i.e. the failing SQL fragment and
+    a caret. That is precisely what must not reach an IPC client.
+    """
+    db_path = tmp_path / "no-migrations-here.duckdb"
+    with Database(db_path) as handle:
+        compiled = compile_hunt_query('process.name == "curl"')
+        with pytest.raises(HuntExecutionError) as caught:
+            run_hunt_query(handle, compiled)
+    message = str(caught.value)
+    assert 'process.name == "curl"' in message
+    for fragment in _INTERNALS:
+        assert fragment not in message
+    # Nor a filesystem path.
+    assert str(db_path) not in message
+    assert "no-migrations-here" not in message
+
+
+def test_the_duckdb_detail_is_logged_daemon_side(
+    db: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Stripped from the client message, not from the daemon's own log."""
+    compiled = compile_hunt_query('process.name MATCHES "a{1001}"')
+    with (
+        caplog.at_level(logging.WARNING, logger="inspectord.hunt.execute"),
+        pytest.raises(HuntExecutionError),
+    ):
+        run_hunt_query(db, compiled)
+    assert "invalid repetition size" in caplog.text
