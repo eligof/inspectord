@@ -9,6 +9,16 @@ from typing import Any
 
 import yaml
 
+from inspectord.expr import (
+    InvalidLeaf,
+    Leaf,
+    Node,
+    ParsedExpression,
+    parse_expression,
+    parse_list,
+    parse_literal,
+    path_segments,
+)
 from inspectord.rules.base import EvalContext, Match
 from inspectord.schemas.event import Event
 
@@ -77,7 +87,7 @@ def load_yaml_rule_from_dict(data: dict[str, Any], *, source: str = "<inline>") 
 
 def evaluate_yaml_rule(rule: YamlRule, ctx: EvalContext) -> list[Match]:
     for expr in rule.detect_any_of:
-        if _eval_expr(expr, ctx.event):
+        if evaluate_expression(expr, ctx.event):
             short = _interpolate(rule.short_tpl, ctx.event)
             detail = _interpolate(rule.detail_tpl, ctx.event)
             primary_kind, primary_key = _primary_entity_for(ctx.event)
@@ -101,82 +111,6 @@ def evaluate_yaml_rule(rule: YamlRule, ctx: EvalContext) -> list[Match]:
     return []
 
 
-_LEAF_OP = re.compile(
-    r"""
-    ^\s*
-    (?P<path>[a-zA-Z_][a-zA-Z0-9_.]*)
-    \s+
-    (?P<op>==|!=|IN|NOT\s+IN|STARTSWITH|ENDSWITH|CONTAINS|MATCHES)
-    \s+
-    (?P<rhs>.+?)
-    \s*$
-    """,
-    re.VERBOSE,
-)
-# A NOT that opens a `path NOT IN [...]` leaf belongs to that leaf's operator,
-# not to the boolean grammar; splitting there would leave a bare `IN [...]`
-# fragment that _eval_leaf cannot parse.
-_BOOL_TOKEN_RE = re.compile(r"\bAND\b|\bOR\b|\bNOT\b(?!\s+IN\b)")
-
-
-def _eval_expr(expr: str, event: Event) -> bool:
-    return _eval_tokens(_tokenize(expr), event)
-
-
-def _tokenize(expr: str) -> list[str]:
-    parts: list[str] = []
-    last = 0
-    for m in _BOOL_TOKEN_RE.finditer(expr):
-        if m.start() > last:
-            parts.append(expr[last : m.start()].strip())
-        parts.append(m.group(0))
-        last = m.end()
-    if last < len(expr):
-        parts.append(expr[last:].strip())
-    return [p for p in parts if p]
-
-
-def _resolve_atoms(tokens: list[str], event: Event) -> list[bool | str]:
-    """First pass: resolve leaf predicates and NOT; keep AND/OR as strings."""
-    resolved: list[bool | str] = []
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok == "NOT":
-            nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
-            resolved.append(not _eval_leaf(nxt, event))
-            i += 2
-        elif tok in ("AND", "OR"):
-            resolved.append(tok)
-            i += 1
-        else:
-            resolved.append(_eval_leaf(tok, event))
-            i += 1
-    return resolved
-
-
-def _fold_and_or(resolved: list[bool | str]) -> bool:
-    """Second pass: fold AND then OR over the resolved list."""
-    out_or: list[bool] = []
-    cur_and: bool = True
-    has_first = False
-    for tok in resolved:
-        if isinstance(tok, bool):
-            cur_and = tok if not has_first else (cur_and and tok)
-            has_first = True
-        elif tok == "OR":
-            out_or.append(cur_and)
-            cur_and = True
-            has_first = False
-    if has_first:
-        out_or.append(cur_and)
-    return any(out_or)
-
-
-def _eval_tokens(tokens: list[str], event: Event) -> bool:
-    return _fold_and_or(_resolve_atoms(tokens, event))
-
-
 _STR_OPS: dict[str, Any] = {
     "STARTSWITH": lambda lhs, rhs: lhs.startswith(rhs),
     "ENDSWITH": lambda lhs, rhs: lhs.endswith(rhs),
@@ -185,23 +119,39 @@ _STR_OPS: dict[str, Any] = {
 }
 
 
-def _eval_leaf(leaf: str, event: Event) -> bool:
-    m = _LEAF_OP.match(leaf)
-    if m is None:
-        return False
-    path = m.group("path")
-    op = re.sub(r"\s+", " ", m.group("op"))
-    rhs_raw = m.group("rhs").strip()
-    lhs = _resolve_path(path, event)
-    if op == "==":
-        return bool(_coerce(lhs) == _parse_literal(rhs_raw))
-    if op == "!=":
-        return bool(_coerce(lhs) != _parse_literal(rhs_raw))
-    if op in ("IN", "NOT IN"):
-        result = lhs in _parse_list(rhs_raw)
-        return result if op == "IN" else not result
-    if op in _STR_OPS and isinstance(lhs, str):
-        return bool(_STR_OPS[op](lhs, _parse_literal(rhs_raw)))
+def evaluate_expression(expr: str, event: Event) -> bool:
+    """Evaluate one grammar expression against one in-memory event.
+
+    The parse comes from `inspectord.expr`, shared verbatim with the hunt
+    compiler; only the *evaluation* below is specific to this backend.
+    """
+    return evaluate_parsed(parse_expression(expr), event)
+
+
+def evaluate_parsed(parsed: ParsedExpression, event: Event) -> bool:
+    # An empty AND group is vacuously true and no groups at all is false; both
+    # fall out of `all`/`any` exactly as the previous hand-rolled fold did.
+    return any(all(_eval_node(node, event) for node in group) for group in parsed.groups)
+
+
+def _eval_node(node: Node, event: Event) -> bool:
+    # An unparseable leaf is false here — long-standing behavior, and the reason
+    # the shared parser carries it as a node instead of raising.
+    result = False if isinstance(node, InvalidLeaf) else _eval_leaf(node, event)
+    return not result if node.negated else result
+
+
+def _eval_leaf(leaf: Leaf, event: Event) -> bool:
+    lhs = _resolve_path(leaf.path, event)
+    if leaf.op == "==":
+        return bool(lhs == parse_literal(leaf.rhs))
+    if leaf.op == "!=":
+        return bool(lhs != parse_literal(leaf.rhs))
+    if leaf.op in ("IN", "NOT IN"):
+        result = lhs in parse_list(leaf.rhs)
+        return result if leaf.op == "IN" else not result
+    if leaf.op in _STR_OPS and isinstance(lhs, str):
+        return bool(_STR_OPS[leaf.op](lhs, parse_literal(leaf.rhs)))
     return False
 
 
@@ -215,7 +165,7 @@ def _walk_dict(val: Any, segs: list[str]) -> Any:
 
 
 def _resolve_path(path: str, event: Event) -> Any:
-    parts = path.split(".")
+    parts = path_segments(path)
     head, *rest = parts
     if head == "event":
         if not rest:
@@ -235,36 +185,6 @@ def _enum_value(val: Any) -> Any:
         except Exception:  # pragma: no cover
             return val
     return val
-
-
-def _coerce(val: Any) -> Any:
-    return _enum_value(val)
-
-
-def _parse_literal(raw: str) -> Any:
-    raw = raw.strip()
-    if raw.startswith('"') and raw.endswith('"'):
-        return raw[1:-1]
-    if raw.startswith("'") and raw.endswith("'"):
-        return raw[1:-1]
-    if raw == "true":
-        return True
-    if raw == "false":
-        return False
-    try:
-        return int(raw)
-    except ValueError:
-        return raw
-
-
-def _parse_list(raw: str) -> list[Any]:
-    raw = raw.strip()
-    if not (raw.startswith("[") and raw.endswith("]")):
-        return []
-    inner = raw[1:-1].strip()
-    if not inner:
-        return []
-    return [_parse_literal(p.strip()) for p in inner.split(",")]
 
 
 def _interpolate(tpl: str, event: Event) -> str:
