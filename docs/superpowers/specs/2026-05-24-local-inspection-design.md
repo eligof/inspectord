@@ -773,6 +773,7 @@ This is what makes the product more than "rules + state diffs."
 * Maintains `first_seen` table.
 * On any enriched event, looks up `(category, entity_kind, entity_key)`; if missing, marks `event.first_seen=true` and inserts row.
 * Specific first-sighting rules in the starter pack: first-execution of binary, first outbound dest for a process, first login from IP, first kmod load, first SUID file.
+* *Amended 2026-08-20:* the first-sighting marker is `baseline.first_sighting`, **not** `event.first_seen` — that flag means snapshot catch-up re-emission in the implementation. See `2026-08-20-anomaly-detector-design.md` §3.
 
 ### 12.3 Temporal pattern (beaconing)
 

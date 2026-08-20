@@ -1,0 +1,21 @@
+version: 1.0.0
+id: anomaly.first_kmod_load
+name: "first load of a kernel module"
+severity: medium
+category: anomaly
+why: |
+  A kernel module was loaded that has never been loaded on this host before.
+  Kernel modules run with full kernel privilege and are the classic rootkit
+  vehicle; on a stable machine the set of modules in use settles quickly, so
+  a first-timer is rare and worth a desktop notification — hence `medium`
+  rather than the log-only `low` used by chattier first sightings. Correlate
+  with proc.kernel_module_loaded_unknown, which fires on the *loader*.
+false_positives:
+  - "New hardware or first use of a feature: a USB peripheral, a filesystem type first mounted, a netfilter match first referenced."
+  - "The first days after install, while the module set is still being learned."
+detect:
+  any_of:
+    - event.action == "kmod_loaded" AND baseline.first_sighting == true
+short: "first load of kernel module {raw.module_name}"
+detail: "Kernel module {raw.module_name} was loaded for the first time on this host."
+labels: [anomaly, first-sighting, kmod]

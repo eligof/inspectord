@@ -1,0 +1,21 @@
+version: 1.0.0
+id: anomaly.first_outbound_dest
+name: "first outbound destination for a process"
+severity: low
+category: anomaly
+why: |
+  This process name has never been observed connecting to this destination
+  ip:port before. Malware that phones home shows up as a process talking to
+  somewhere it never talked to before — but so does a browser opening any new
+  site, which is why this is `low` and log-only. Its value is in triage: when
+  some other alert implicates a process, its first-contact history is already
+  recorded here.
+false_positives:
+  - "Any program whose destinations naturally vary — browsers, package mirrors chosen round-robin, CDN-backed updaters — fires constantly."
+  - "The key is per process *name*, so two different binaries sharing a name share a history."
+detect:
+  any_of:
+    - event.action == "outbound_connection" AND baseline.first_sighting == true
+short: "first outbound: {process.name} -> {destination.ip}:{destination.port}"
+detail: "First observed connection from {process.name} to {destination.ip}:{destination.port} (transport {network.transport})."
+labels: [anomaly, first-sighting, network]
