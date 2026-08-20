@@ -9,6 +9,10 @@ from fastapi.testclient import TestClient
 from inspectorctl.web.app import create_app
 from inspectord.ipc_server import Method
 
+# A browser posting from the dashboard always sends Origin; the same-origin guard
+# in inspectorctl.web.csrf rejects state-changing requests without it.
+SAME_ORIGIN = {"Origin": "http://testserver"}
+
 
 def _list_services() -> Method:
     def handler(params: dict[str, object]) -> dict[str, object]:
@@ -78,6 +82,8 @@ def test_services_feed_daemon_unreachable(tmp_path: Path) -> None:
 def test_capture_baseline_button_posts(ipc_factory) -> None:
     calls: list[dict] = []
     client = ipc_factory([_list_services(), _capture_baseline(calls)])
-    response = client.post("/services/capture-baseline", follow_redirects=False)
+    response = client.post(
+        "/services/capture-baseline", headers=SAME_ORIGIN, follow_redirects=False
+    )
     assert response.status_code == 303
     assert any(c.get("kind") == "service" for c in calls)

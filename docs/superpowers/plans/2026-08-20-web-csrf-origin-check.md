@@ -135,11 +135,12 @@ enumeration found at least the 11 known mutating routes, so it cannot pass vacuo
 | GET/HEAD/OPTIONS with hostile `Origin` | untouched (200/redirect, never 403) |
 | every mutating route enumerated from `app.routes` | 403 on cross-origin POST; count ≥ 11 |
 | a route added at runtime | covered without touching the middleware |
-| log line emitted | `caplog` sees one WARNING naming method and path |
+| log line emitted | `caplog` sees one WARNING naming method, path and the rejected origin |
+| log values sanitised | control characters folded, value truncated at 200 chars |
 
 ## 4. Existing tests
 
-13 existing `client.post(...)` call sites in `tests/web/{test_alerts,test_cases,test_services,
+14 existing `client.post(...)` call sites in `tests/web/{test_alerts,test_cases,test_services,
 test_persistence}.py` now need `headers={"Origin": "http://testserver"}`. Adding the header at
 each call site (rather than defaulting it on the `ipc_factory` fixture) keeps the fixture
 honest — a bare `TestClient` stays a non-browser client — and makes each existing test state

@@ -12,6 +12,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from inspectorctl.web.csrf import SameOriginMiddleware
 from inspectorctl.web.routes import (
     alerts,
     cases,
@@ -49,6 +50,12 @@ def create_app(*, socket_path: Path) -> FastAPI:
 
     app = FastAPI(title="inspectord", lifespan=lifespan)
     app.state.socket_path = Path(socket_path)
+
+    # CSRF: loopback binding does not stop a cross-site form POST, so every
+    # state-changing request must come from the dashboard's own origin. This is
+    # middleware rather than a per-route dependency so routes added later are
+    # guarded by default. See inspectorctl/web/csrf.py.
+    app.add_middleware(SameOriginMiddleware)
 
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     templates = Jinja2Templates(directory=str(tmpl_dir))

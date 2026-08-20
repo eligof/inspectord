@@ -13,6 +13,11 @@ from fastapi.testclient import TestClient
 from inspectorctl.web.app import create_app
 from inspectord.ipc_server import Method
 
+# A browser posting from the dashboard always sends Origin; the same-origin guard
+# in inspectorctl.web.csrf rejects state-changing requests without it.
+SAME_ORIGIN = {"Origin": "http://testserver"}
+
+
 CASE = {
     "case_id": "c1",
     "title": "sshd brute force",
@@ -185,7 +190,9 @@ def test_case_detail_escapes_note_text(ipc_factory) -> None:
 def test_case_add_note_post(ipc_factory) -> None:
     calls: list[dict] = []
     client = ipc_factory([_get_case(CASE), _add_note(calls)])
-    response = client.post("/cases/c1/notes", data={"text": "hi"}, follow_redirects=False)
+    response = client.post(
+        "/cases/c1/notes", data={"text": "hi"}, headers=SAME_ORIGIN, follow_redirects=False
+    )
     assert response.status_code == 303
     assert response.headers["location"] == "/cases/c1"
     assert len(calls) == 1
@@ -196,7 +203,7 @@ def test_case_add_note_post(ipc_factory) -> None:
 def test_case_close_post(ipc_factory) -> None:
     calls: list[dict] = []
     client = ipc_factory([_get_case(CASE), _close_case(calls)])
-    response = client.post("/cases/c1/close", follow_redirects=False)
+    response = client.post("/cases/c1/close", headers=SAME_ORIGIN, follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/cases/c1"
     assert len(calls) == 1
@@ -230,7 +237,7 @@ def _export_error(error: str) -> Method:
 
 def test_case_export_returns_zip(ipc_factory) -> None:
     client = ipc_factory([_export_ok()])
-    response = client.post("/cases/c1/export")
+    response = client.post("/cases/c1/export", headers=SAME_ORIGIN)
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"
     assert 'attachment; filename="case-c1.zip"' in response.headers["content-disposition"]
@@ -240,13 +247,13 @@ def test_case_export_returns_zip(ipc_factory) -> None:
 
 def test_case_export_not_found_404(ipc_factory) -> None:
     client = ipc_factory([_export_error("not found")])
-    response = client.post("/cases/c1/export")
+    response = client.post("/cases/c1/export", headers=SAME_ORIGIN)
     assert response.status_code == 404
 
 
 def test_case_export_too_large_413(ipc_factory) -> None:
     client = ipc_factory([_export_error("too_large")])
-    response = client.post("/cases/c1/export")
+    response = client.post("/cases/c1/export", headers=SAME_ORIGIN)
     assert response.status_code == 413
     assert "forensic store" in response.text  # friendly retrieve-from-disk message
 
@@ -276,7 +283,7 @@ def _download_error(error: str) -> Method:
 
 def test_case_evidence_download_returns_blob(ipc_factory) -> None:
     client = ipc_factory([_download_ok()])
-    response = client.post("/cases/c1/evidence/" + "a" * 64)
+    response = client.post("/cases/c1/evidence/" + "a" * 64, headers=SAME_ORIGIN)
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/octet-stream"
     assert 'attachment; filename="sudoers"' in response.headers["content-disposition"]
@@ -285,7 +292,7 @@ def test_case_evidence_download_returns_blob(ipc_factory) -> None:
 
 def test_case_evidence_download_not_in_case_404(ipc_factory) -> None:
     client = ipc_factory([_download_error("not found")])
-    response = client.post("/cases/c1/evidence/" + "b" * 64)
+    response = client.post("/cases/c1/evidence/" + "b" * 64, headers=SAME_ORIGIN)
     assert response.status_code == 404
 
 
