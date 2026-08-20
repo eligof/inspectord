@@ -1,0 +1,20 @@
+version: 1.0.0
+id: anomaly.process_event_rate_spike
+name: "process event rate spike"
+severity: low
+category: anomaly
+why: |
+  This process is generating events (per category) at a rate far outside its
+  rolling baseline. A compromised or runaway process gets noisy: file writes,
+  process spawns, connections. But so does a compiler, a build, a package
+  upgrade — which is why this is `low` and log-only. Treat it as a triage
+  breadcrumb next to whatever else fired.
+false_positives:
+  - "Builds, backups, indexers, and package upgrades all burst legitimately."
+  - "The baseline needs days of history before the 24h/7d windows mean much; early fires reflect a young baseline, not an attack."
+detect:
+  any_of:
+    - event.module == "anomaly_detector" AND event.action == "metric_anomaly" AND baseline.metric_kind == "events_per_min"
+short: "event-rate spike: {process.name} (z={baseline.deviation})"
+detail: "Event rate for {baseline.entity_key} deviates from baseline: observed {baseline.observed}/min vs mean {baseline.mean} (z={baseline.deviation}, window {baseline.window})."
+labels: [anomaly, statistical]

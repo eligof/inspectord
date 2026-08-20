@@ -1,0 +1,24 @@
+version: 1.0.0
+id: anomaly.process_egress_volume_spike
+name: "process egress volume spike"
+severity: medium
+category: anomaly
+why: |
+  The anomaly detector's rolling baseline says this process is sending far
+  more bytes per minute than its history predicts (|z| >= 3 against the 1h,
+  24h, or 7d window; the detector emits nothing until a window holds 50
+  samples, so this cannot fire on a cold start). Sudden egress inflation
+  from a process with a stable history is a classic exfiltration and
+  cryptominer-pool signal, so it notifies at `medium`.
+
+  NOTE: no collector currently emits byte counts on outbound events, so this
+  rule is dormant until one does. It ships now so the pipeline is complete
+  the day `network.bytes` appears.
+false_positives:
+  - "Backups, cloud sync, and package downloads legitimately spike egress; allowlist the process if it is expected to burst."
+detect:
+  any_of:
+    - event.module == "anomaly_detector" AND event.action == "metric_anomaly" AND baseline.metric_kind == "egress_bytes_per_min"
+short: "egress spike: {process.name} ({baseline.observed} B/min vs mean {baseline.mean})"
+detail: "Egress volume for {process.name} deviates from its baseline: observed {baseline.observed} bytes/min vs mean {baseline.mean} (stddev {baseline.stddev}, z={baseline.deviation}, window {baseline.window})."
+labels: [anomaly, statistical, network]

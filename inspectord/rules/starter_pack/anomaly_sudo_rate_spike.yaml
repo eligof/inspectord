@@ -1,0 +1,20 @@
+version: 1.0.0
+id: anomaly.sudo_rate_spike
+name: "sudo rate spike"
+severity: medium
+category: anomaly
+why: |
+  This user is invoking sudo far more often than their rolling baseline
+  predicts. Privilege-escalation attempts, credential-stuffing scripts, and
+  post-compromise enumeration all look like sudden sudo bursts. On a
+  single-user machine a genuine burst is rare enough to notify at `medium` —
+  you will remember whether it was you.
+false_positives:
+  - "A long interactive admin session (system surgery, big install) is a legitimate burst."
+  - "Configuration-management runs that sudo once per task."
+detect:
+  any_of:
+    - event.module == "anomaly_detector" AND event.action == "metric_anomaly" AND baseline.metric_kind == "sudo_per_min"
+short: "sudo rate spike for {user.name} (z={baseline.deviation})"
+detail: "sudo invocation rate for {user.name} deviates from baseline: observed {baseline.observed}/min vs mean {baseline.mean} (z={baseline.deviation}, window {baseline.window})."
+labels: [anomaly, statistical, iam]
