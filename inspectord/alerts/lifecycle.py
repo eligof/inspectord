@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from inspectord.ipc_errors import ClientFacingError
 from inspectord.schemas.alert import AlertStatus
 
 
-class InvalidTransitionError(RuntimeError):
-    pass
+class InvalidTransitionError(ClientFacingError, RuntimeError):
+    """A status change the state machine forbids.
+
+    This escapes the alert handlers uncaught and is answered to the client, so
+    it is `ClientFacingError`: "cannot transition 'resolved' -> 'acknowledged'"
+    is the answer, and it quotes nothing but two status values.
+    """
 
 
 _ALLOWED: dict[AlertStatus, set[AlertStatus]] = {

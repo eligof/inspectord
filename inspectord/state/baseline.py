@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from inspectord.ipc_errors import IpcParamError
 from inspectord.storage.db import Database
 
 _SUPPORTED = {"service", "persistence"}
@@ -16,7 +17,9 @@ _SUPPORTED = {"service", "persistence"}
 
 def capture_baseline(kind: str, db: Database) -> int:
     if kind not in _SUPPORTED:
-        raise ValueError(f"unsupported baseline kind: {kind!r}")
+        raise IpcParamError(
+            f"unsupported baseline kind: {kind!r}; expected one of " + ", ".join(sorted(_SUPPORTED))
+        )
     # Replace the previous baseline for this kind only (other kinds untouched).
     db.execute("DELETE FROM baseline_entry WHERE kind = ?", [kind])
 

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from inspectord.ipc_errors import IpcParamError
 from inspectord.state.baseline import capture_baseline
 from inspectord.storage.db import Database
 from inspectord.storage.migrations import run_migrations
@@ -93,9 +96,8 @@ def test_capture_persistence_baseline_does_not_touch_service_baseline(tmp_path: 
 
 
 def test_capture_baseline_rejects_unknown_kind(tmp_path: Path) -> None:
+    """`kind` is a client parameter, so the rejection is client-facing (IpcParamError)."""
     db = _db(tmp_path)
-    try:
+    with pytest.raises(IpcParamError) as raised:
         capture_baseline("device", db)
-        raise AssertionError("expected ValueError")
-    except ValueError:
-        pass
+    assert "device" in str(raised.value)

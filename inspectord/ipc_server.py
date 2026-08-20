@@ -4,6 +4,9 @@ Each connection is line-delimited JSON. Authentication is SO_PEERCRED:
 if `allowed_uids` is non-empty, the caller's uid must be in the list.
 Mutating methods can require a polkit check in a later phase; here we
 only check the allowlist.
+
+A handler failure answers with a generic message and a correlation id; only a
+`ClientFacingError` (see `inspectord.ipc_errors`) is passed through verbatim.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from inspectord.ipc_errors import ClientFacingError, new_error_ref
 from inspectord.log import get
 from inspectord.schemas.versions import IPC_PROTOCOL_VERSION
 
@@ -27,6 +31,10 @@ log = get(__name__)
 
 _SO_PEERCRED = 17
 _CRED_FMT = "iII"  # pid, uid, gid
+
+#: What a client is told about a failure that was not written for it. The ref is
+#: the whole message: it is what a user pastes so the traceback can be found.
+_INTERNAL_ERROR = "internal error (error_ref={ref}); the daemon log has the details"
 
 
 @dataclass
@@ -231,7 +239,21 @@ class IpcServer:
             return
         try:
             result = method.handler(req.get("params") or {})
-            conn.sendall(_ok(req_id, result))
-        except Exception as exc:
-            log.exception("handler raised")
-            conn.sendall(_err(req_id, -32000, repr(exc)))
+            response = _ok(req_id, result)
+        except ClientFacingError as exc:
+            # The message was written for the caller (see `inspectord.ipc_errors`),
+            # so it goes through as-is. No traceback: a rejected request is a
+            # normal outcome, not a daemon fault.
+            log.info("ipc: %s rejected the request: %s", method.name, exc)
+            response = _err(req_id, -32000, str(exc))
+        except Exception:
+            # Everything else is opaque to the client. `repr(exc)` used to go
+            # out here, which handed over whatever the exception held — DuckDB
+            # quotes the generated SQL and the database path in its own message,
+            # and `inspectorctl`'s web UI renders these strings on a page. The
+            # ref is the one thing worth saying: it names the log record below,
+            # which carries the exception and its full traceback.
+            ref = new_error_ref()
+            log.exception("ipc: %s failed (error_ref=%s)", method.name, ref)
+            response = _err(req_id, -32000, _INTERNAL_ERROR.format(ref=ref))
+        conn.sendall(response)

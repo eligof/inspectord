@@ -11,6 +11,7 @@ from inspectord.dependencies.backend import PackageBackend
 from inspectord.dependencies.distro import detect_distro
 from inspectord.dependencies.planner import build_plan, persist_plan
 from inspectord.dependencies.schemas import DependencyManifest
+from inspectord.ipc_errors import IpcParamError
 from inspectord.storage.db import Database
 
 
@@ -142,7 +143,7 @@ def handle_apply_dependency_plan(
 ) -> dict[str, Any]:
     plan_id = str(params.get("plan_id", ""))
     if not plan_id:
-        raise ValueError("plan_id required")
+        raise IpcParamError("plan_id is required")
     result = apply_plan(
         plan_id=plan_id,
         db_path=db_path,
