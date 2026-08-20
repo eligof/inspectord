@@ -16,5 +16,5 @@ detect:
   any_of:
     - event.module == "anomaly_detector" AND event.action == "metric_anomaly" AND baseline.metric_kind == "logins_per_min"
 short: "login rate spike for {user.name} (z={baseline.deviation})"
-detail: "Successful SSH login rate for {user.name} deviates from baseline: observed {baseline.observed}/min vs mean {baseline.mean} (z={baseline.deviation}, window {baseline.window})."
+detail: "Successful SSH login rate for {user.name} deviates from baseline: observed {baseline.observed} {baseline.bucket_label} vs mean {baseline.mean} (z={baseline.deviation}, window {baseline.window})."
 labels: [anomaly, statistical, authentication]

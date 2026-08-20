@@ -198,6 +198,8 @@ def _interpolate(tpl: str, event: Event) -> str:
 def _primary_entity_for(event: Event) -> tuple[str, str]:
     if event.process and "pid" in event.process:
         return "process", f"pid:{event.process['pid']}"
+    if event.process and "name" in event.process:
+        return "process", f"name:{event.process['name']}"
     if event.file and "path" in event.file:
         return "file", str(event.file["path"])
     if event.user and "name" in event.user:

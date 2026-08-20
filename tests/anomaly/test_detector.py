@@ -180,6 +180,7 @@ def test_drained_events_produce_signal_after_spike(tmp_path: Path) -> None:
     assert sig.category == ["anomaly"]
     assert sig.baseline is not None
     assert sig.baseline["window"] == "1h"
+    assert sig.baseline["bucket_label"] == "per minute"
     assert sig.baseline["deviation"] > 3.0
     assert sig.baseline["observed"] == 100.0
     assert sig.process == {"name": "curl"}

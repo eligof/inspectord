@@ -15,6 +15,6 @@ false_positives:
 detect:
   any_of:
     - event.module == "anomaly_detector" AND event.action == "metric_anomaly" AND baseline.metric_kind == "events_per_min"
-short: "event-rate spike: {process.name} (z={baseline.deviation})"
-detail: "Event rate for {baseline.entity_key} deviates from baseline: observed {baseline.observed}/min vs mean {baseline.mean} (z={baseline.deviation}, window {baseline.window})."
+short: "event-rate spike: {baseline.entity_key} (z={baseline.deviation})"
+detail: "Event rate for {baseline.entity_key} deviates from baseline: observed {baseline.observed} {baseline.bucket_label} vs mean {baseline.mean} (z={baseline.deviation}, window {baseline.window})."
 labels: [anomaly, statistical]

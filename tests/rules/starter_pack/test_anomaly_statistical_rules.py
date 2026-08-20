@@ -30,6 +30,7 @@ def _signal(metric_kind: str, **entity):
         "metric_kind": metric_kind,
         "entity_key": "x",
         "window": "1h",
+        "bucket_label": "per minute",
         "observed": 100.0,
         "mean": 1.0,
         "stddev": 0.5,
@@ -78,6 +79,11 @@ def test_each_rule_fires_on_its_metric_only() -> None:
         assert len(matches) == 1, fname
         assert matches[0].rule_id == rule_id
         assert matches[0].category == "anomaly"
+        # Templates must fully interpolate: no leftover {placeholder} braces,
+        # and the honest z-value must show up in the rendered detail.
+        assert "{" not in matches[0].short
+        assert "{" not in matches[0].detail
+        assert "42.0" in matches[0].detail
         # Wrong metric on an otherwise identical signal: no match.
         other = "sudo_per_min" if metric != "sudo_per_min" else "events_per_min"
         assert not evaluate_yaml_rule(rule, EvalContext(event=_signal(other, **entity))), fname

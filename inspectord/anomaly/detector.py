@@ -60,10 +60,11 @@ def _signal_event(data: SignalData, *, now: datetime) -> Event:
         "metric_kind": data.metric_kind,
         "entity_key": data.entity_key,
         "window": data.window,
+        "bucket_label": _BUCKET_LABEL[data.window],
         "observed": data.observed,
         "mean": data.mean,
         "stddev": data.stddev,
-        "deviation": data.z,
+        "deviation": round(data.z, 2),
     }
     return ev
 
