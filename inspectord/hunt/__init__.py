@@ -20,7 +20,11 @@ from inspectord.hunt.compiler import (
 from inspectord.hunt.errors import (
     HuntBoundsError,
     HuntError,
+    HuntExecutionError,
+    HuntNameError,
     HuntPathError,
+    HuntQueryExists,
+    HuntQueryNotFound,
     HuntSyntaxError,
     HuntUnsupportedError,
 )
@@ -32,7 +36,11 @@ __all__ = [
     "CompiledQuery",
     "HuntBoundsError",
     "HuntError",
+    "HuntExecutionError",
+    "HuntNameError",
     "HuntPathError",
+    "HuntQueryExists",
+    "HuntQueryNotFound",
     "HuntResult",
     "HuntRow",
     "HuntSyntaxError",
