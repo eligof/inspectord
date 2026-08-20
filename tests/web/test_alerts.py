@@ -4,14 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from inspectorctl.web.app import create_app
 from inspectord.ipc_server import IpcServer, Method
-
-# A browser posting from the dashboard always sends Origin; the same-origin guard
-# in inspectorctl.web.csrf rejects state-changing requests without it.
-SAME_ORIGIN = {"Origin": "http://testserver"}
+from tests.web import SAME_ORIGIN, web_client
 
 
 def _alerts_listing() -> Method:
@@ -119,7 +114,7 @@ def test_alert_detail_404_when_missing(tmp_path: Path) -> None:
     )
     server.start()
     try:
-        client = TestClient(create_app(socket_path=sock))
+        client = web_client(create_app(socket_path=sock))
         response = client.get("/alerts/absent")
         assert response.status_code == 404
     finally:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from importlib.resources import as_file, files
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from inspectorctl.web.csrf import SameOriginMiddleware
+from inspectorctl.web.csrf import AllowedHostMiddleware, SameOriginMiddleware
 from inspectorctl.web.routes import (
     alerts,
     cases,
@@ -30,8 +30,14 @@ from inspectorctl.web.routes import (
 )
 
 
-def create_app(*, socket_path: Path) -> FastAPI:
-    """Create a FastAPI app that proxies the daemon's IPC at ``socket_path``."""
+def create_app(*, socket_path: Path, allowed_hosts: Iterable[str] | None = None) -> FastAPI:
+    """Create a FastAPI app that proxies the daemon's IPC at ``socket_path``.
+
+    ``allowed_hosts`` names extra ``Host`` header values this app answers to, on
+    top of the always-allowed loopback spellings — the bind address and any
+    ``--allowed-host`` from :mod:`inspectorctl.web.__main__`. Callers that only
+    ever reach the dashboard over loopback can leave it unset.
+    """
 
     pkg_static = files("inspectorctl.web.static")
     pkg_templates = files("inspectorctl.web.templates")
@@ -56,6 +62,13 @@ def create_app(*, socket_path: Path) -> FastAPI:
     # middleware rather than a per-route dependency so routes added later are
     # guarded by default. See inspectorctl/web/csrf.py.
     app.add_middleware(SameOriginMiddleware)
+
+    # DNS rebinding makes both sides of that origin comparison attacker-
+    # controlled, so constrain Host as well — on every request, not just the
+    # mutating ones, because a rebinding attacker who can only GET can still
+    # read the dashboard. add_middleware() prepends, so adding this last makes
+    # it the *outermost* layer: Host is validated before anything trusts it.
+    app.add_middleware(AllowedHostMiddleware, allowed_hosts=allowed_hosts)
 
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     templates = Jinja2Templates(directory=str(tmpl_dir))

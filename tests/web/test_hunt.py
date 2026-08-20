@@ -7,8 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi.testclient import TestClient
-
 from inspectorctl.web.app import create_app
 from inspectord.hunt.ipc_handlers import handle_list_hunt_queries, handle_run_hunt_query
 from inspectord.hunt.store import save_query
@@ -17,6 +15,7 @@ from inspectord.parsers.base import build_event
 from inspectord.storage.db import Database
 from inspectord.storage.events import insert_event
 from inspectord.storage.migrations import run_migrations
+from tests.web import web_client
 
 _EVENT: dict[str, Any] = {
     "event_id": "01919e2a-0000-7000-8000-000000000001",
@@ -298,7 +297,7 @@ def test_an_internal_error_does_not_blame_the_query(ipc_factory) -> None:
 
 def test_daemon_unreachable(tmp_path: Path) -> None:
     app = create_app(socket_path=tmp_path / "no.sock")
-    client = TestClient(app)
+    client = web_client(app)
     response = client.get("/hunt", params={"q": "x"})
     assert response.status_code == 200
     assert "daemon unreachable" in response.text

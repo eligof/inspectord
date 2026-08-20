@@ -1,23 +1,32 @@
-"""Tests for the same-origin guard on state-changing dashboard requests.
+"""Tests for the Host allowlist and the same-origin guard.
 
 The dashboard binds to loopback, which stops a *remote* attacker but not a
 *cross-site* one: a form POST from any page the user visits reaches
-``http://127.0.0.1:<port>/...`` with no CORS preflight. These tests pin the
-guard that rejects those.
+``http://127.0.0.1:<port>/...`` with no CORS preflight. The same-origin guard
+rejects those.
+
+That guard alone is not enough, because it derives the app's own origin from
+``Host``. Under DNS rebinding the attacker controls *both* sides of that
+comparison — ``Host: evil.example`` with ``Origin: http://evil.example`` matches.
+The Host allowlist closes it, on every request rather than only the mutating
+ones, since a rebinding attacker limited to GET can still read the dashboard.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from inspectorctl.web.app import create_app
-from inspectorctl.web.csrf import _sanitise_for_log
+from inspectorctl.web.csrf import _sanitise_for_log, build_allowed_hosts
 from inspectord.ipc_server import IpcServer, Method
+from tests.web import BASE_URL, web_client
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -26,12 +35,31 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # silently finding nothing.
 KNOWN_MUTATING_ROUTE_COUNT = 11
 
+#: A LAN address the app is *not* reachable at unless explicitly configured.
+LAN_HOST = "192.168.1.5:8765"
+
 
 @pytest.fixture
 def bare_client(tmp_path: Path) -> TestClient:
     """A client whose requests never need to reach a route (guard rejects first)."""
 
-    return TestClient(create_app(socket_path=tmp_path / "absent.sock"))
+    return web_client(create_app(socket_path=tmp_path / "absent.sock"))
+
+
+@contextmanager
+def _serving(
+    tmp_path: Path, methods: list[Method], allowed_hosts: list[str] | None = None
+) -> Iterator[TestClient]:
+    """A live IPC server plus a client for the app in front of it."""
+
+    sock = tmp_path / "ipc.sock"
+    server = IpcServer(socket_path=sock, methods=methods, allowed_uids=[])
+    server.start()
+    try:
+        app = create_app(socket_path=sock, allowed_hosts=allowed_hosts)
+        yield TestClient(app, base_url=BASE_URL)
+    finally:
+        server.stop()
 
 
 def _suppress_alert(calls: list[dict]) -> Method:  # type: ignore[type-arg]
@@ -58,7 +86,7 @@ def test_same_origin_post_is_allowed(ipc_factory) -> None:  # type: ignore[no-un
     client = ipc_factory([_suppress_alert(calls)])
     response = client.post(
         "/alerts/a1/suppress",
-        headers={"Origin": "http://testserver"},
+        headers={"Origin": BASE_URL},
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -79,12 +107,8 @@ def test_same_origin_post_is_allowed(ipc_factory) -> None:  # type: ignore[no-un
 def test_loopback_aliases_count_as_same_origin(tmp_path: Path, origin: str) -> None:
     """A user on http://localhost:8765 must not be blocked by a 127.0.0.1 bind."""
 
-    sock = tmp_path / "ipc.sock"
     calls: list[dict] = []  # type: ignore[type-arg]
-    server = IpcServer(socket_path=sock, methods=[_suppress_alert(calls)], allowed_uids=[])
-    server.start()
-    try:
-        client = TestClient(create_app(socket_path=sock), base_url="http://127.0.0.1:8765")
+    with _serving(tmp_path, [_suppress_alert(calls)]) as client:
         response = client.post(
             "/alerts/a1/suppress",
             headers={"Origin": origin},
@@ -92,28 +116,20 @@ def test_loopback_aliases_count_as_same_origin(tmp_path: Path, origin: str) -> N
         )
         assert response.status_code == 303, origin
         assert len(calls) == 1
-    finally:
-        server.stop()
 
 
-def test_non_loopback_host_matches_itself(tmp_path: Path) -> None:
-    """The guard is not loopback-only: --host 0.0.0.0 reached by LAN IP still works."""
+def test_configured_non_loopback_host_is_served(tmp_path: Path) -> None:
+    """--host 0.0.0.0 --allowed-host 192.168.1.5, reached by that LAN IP, works."""
 
-    sock = tmp_path / "ipc.sock"
     calls: list[dict] = []  # type: ignore[type-arg]
-    server = IpcServer(socket_path=sock, methods=[_suppress_alert(calls)], allowed_uids=[])
-    server.start()
-    try:
-        client = TestClient(create_app(socket_path=sock), base_url="http://192.168.1.5:8765")
+    with _serving(tmp_path, [_suppress_alert(calls)], ["0.0.0.0", "192.168.1.5"]) as client:
         response = client.post(
             "/alerts/a1/suppress",
-            headers={"Origin": "http://192.168.1.5:8765"},
+            headers={"Host": LAN_HOST, "Origin": f"http://{LAN_HOST}"},
             follow_redirects=False,
         )
         assert response.status_code == 303
         assert len(calls) == 1
-    finally:
-        server.stop()
 
 
 # --- the attack --------------------------------------------------------------
@@ -149,10 +165,10 @@ def test_rejection_body_does_not_reflect_the_origin(bare_client: TestClient) -> 
         "null",  # opaque origin: sandboxed iframe, data: document
         "https://evil.example",
         "http://evil.example",
-        "http://testserver.evil.example",
-        "http://testserver:9999",  # right host, wrong port
-        "https://testserver",  # right host, wrong scheme
-        "http://localhost:8765",  # a loopback origin, but this app is `testserver`
+        "http://127.0.0.1.evil.example",
+        "http://127.0.0.1:9999",  # right host, wrong port
+        "https://127.0.0.1:8765",  # right host, wrong scheme
+        "http://127.0.0.1",  # loopback, but the default port is not ours
         "",  # present but empty
         "not a url",
     ],
@@ -170,7 +186,7 @@ def test_referer_is_used_when_origin_is_absent(ipc_factory) -> None:  # type: ig
     client = ipc_factory([_suppress_alert(calls)])
     response = client.post(
         "/alerts/a1/suppress",
-        headers={"Referer": "http://testserver/alerts/a1"},
+        headers={"Referer": f"{BASE_URL}/alerts/a1"},
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -192,7 +208,7 @@ def test_origin_wins_over_referer(bare_client: TestClient) -> None:
         "/alerts/a1/suppress",
         headers={
             "Origin": "https://evil.example",
-            "Referer": "http://testserver/alerts/a1",
+            "Referer": f"{BASE_URL}/alerts/a1",
         },
     )
     assert response.status_code == 403
@@ -285,3 +301,224 @@ def test_logged_header_values_are_sanitised() -> None:
     assert "\x00" not in forged
     assert _sanitise_for_log("x" * 500) == "x" * 200 + "..."
     assert _sanitise_for_log(None) == "-"
+
+
+# --- the Host allowlist ------------------------------------------------------
+
+# These tests set ``Host`` explicitly rather than through the client's base URL:
+# it is the header the guard reads, and Starlette's TestClient cannot parse an
+# IPv6 base URL at all.
+
+
+def _app(tmp_path: Path, allowed_hosts: list[str] | None = None) -> TestClient:
+    app = create_app(socket_path=tmp_path / "absent.sock", allowed_hosts=allowed_hosts)
+    return TestClient(app, base_url=BASE_URL)
+
+
+@pytest.mark.parametrize(
+    ("host", "origin", "expected"),
+    [
+        # The dashboard as the user actually reaches it.
+        ("127.0.0.1:8765", "http://127.0.0.1:8765", 303),
+        # An ordinary cross-site POST: the browser reports the attacker's origin.
+        ("127.0.0.1:8765", "https://evil.example", 403),
+        # DNS rebinding: evil.example now resolves to 127.0.0.1, so Host and
+        # Origin agree and the request is *genuinely* same-origin. The origin
+        # comparison cannot tell this apart -- only the Host allowlist can.
+        ("evil.example", "http://evil.example", 400),
+    ],
+    ids=["dashboard", "cross-site", "dns-rebinding"],
+)
+def test_the_three_host_origin_combinations(
+    tmp_path: Path, host: str, origin: str, expected: int
+) -> None:
+    calls: list[dict] = []  # type: ignore[type-arg]
+    with _serving(tmp_path, [_suppress_alert(calls)]) as client:
+        response = client.post(
+            "/alerts/a1/suppress",
+            headers={"Host": host, "Origin": origin},
+            follow_redirects=False,
+        )
+    assert response.status_code == expected
+    # The side effect happens only on the one legitimate row.
+    assert len(calls) == (1 if expected == 303 else 0)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1:8765",
+        "localhost:8765",
+        "[::1]:8765",
+        "127.0.0.2:8765",
+        "dash.localhost:8765",
+        "LOCALHOST:8765",
+        "127.0.0.1",  # no port
+        "[::1]",
+    ],
+)
+def test_loopback_hosts_are_allowed_by_default(tmp_path: Path, host: str) -> None:
+    """Every loopback spelling names this same process, so all of them are served."""
+
+    response = _app(tmp_path).get("/static/styles.css", headers={"Host": host})
+    assert response.status_code == 200, host
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "evil.example",
+        "192.168.1.5:8765",
+        "127.0.0.1.evil.example",  # loopback-looking, but a name we do not own
+        "localhost.evil.example",
+        "",
+        "@evil.example",
+        "user@127.0.0.1:8765",  # userinfo is not legal in Host
+        "127.0.0.1:notaport",
+        "127.0.0.1/evil.example",  # a bare authority has nothing after it
+    ],
+)
+def test_unknown_or_malformed_hosts_are_rejected(tmp_path: Path, host: str) -> None:
+    response = _app(tmp_path).get("/alerts", headers={"Host": host})
+    assert response.status_code == 400, host
+
+
+def test_get_is_guarded_too_not_just_mutations(tmp_path: Path) -> None:
+    """A rebinding attacker limited to GET can still *read* the dashboard."""
+
+    client = _app(tmp_path)
+    hostile = {"Host": "evil.example"}
+    for method in sorted(SAFE_METHODS):
+        assert client.request(method, "/alerts", headers=hostile).status_code == 400, method
+    # Including the assets, which are what make a rebound page render at all.
+    assert client.get("/static/styles.css", headers=hostile).status_code == 400
+
+
+def test_unknown_host_rejection_does_not_echo_the_host(tmp_path: Path) -> None:
+    response = _app(tmp_path).get("/alerts", headers={"Host": "evil.example"})
+    assert response.status_code == 400
+    assert "evil.example" not in response.text
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "host" in response.text.lower()
+
+
+def test_host_check_runs_before_the_origin_check(tmp_path: Path) -> None:
+    """Host is validated outermost, so nothing downstream trusts an alien Host."""
+
+    response = _app(tmp_path).post(
+        "/alerts/a1/suppress",
+        headers={"Host": "evil.example", "Origin": "https://elsewhere.example"},
+    )
+    assert response.status_code == 400  # not 403: the Host layer answered first
+
+
+def test_duplicate_host_headers_are_rejected(tmp_path: Path) -> None:
+    """Two Host headers are ambiguous, and a request-smuggling shape."""
+
+    response = _app(tmp_path).get(
+        "/alerts",
+        headers=[("host", "127.0.0.1:8765"), ("host", "evil.example")],
+    )
+    assert response.status_code == 400
+
+
+def test_unknown_host_is_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="inspectorctl.web.csrf"):
+        _app(tmp_path).get("/alerts", headers={"Host": "evil.example"})
+    records = [r for r in caplog.records if r.name == "inspectorctl.web.csrf"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "GET" in message
+    assert "/alerts" in message
+    assert "evil.example" in message
+
+
+def test_logged_host_is_truncated(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A hostile Host goes through the same sanitiser as a hostile Origin."""
+
+    with caplog.at_level(logging.WARNING, logger="inspectorctl.web.csrf"):
+        _app(tmp_path).get("/alerts", headers={"Host": "evil.example" + "x" * 500})
+    message = caplog.records[0].getMessage()
+    assert "x" * 300 not in message  # truncated, so it cannot flood the log
+    assert message.endswith("...)")
+
+
+# --- what the operator configures -------------------------------------------
+
+
+def test_lan_host_is_refused_when_only_the_wildcard_bind_is_configured(tmp_path: Path) -> None:
+    """`--host 0.0.0.0` alone names no browsable host, so the LAN IP stays closed."""
+
+    client = _app(tmp_path, allowed_hosts=["0.0.0.0"])
+    assert client.get("/alerts", headers={"Host": LAN_HOST}).status_code == 400
+
+
+def test_lan_host_is_served_when_configured(tmp_path: Path) -> None:
+    """`--host 0.0.0.0 --allowed-host 192.168.1.5` opens exactly that name."""
+
+    client = _app(tmp_path, allowed_hosts=["0.0.0.0", "192.168.1.5"])
+    assert client.get("/static/styles.css", headers={"Host": LAN_HOST}).status_code == 200
+
+
+def test_a_concrete_bind_address_is_allowed_without_extra_flags(tmp_path: Path) -> None:
+    """`--host 192.168.1.5` is itself the name the user will type."""
+
+    client = _app(tmp_path, allowed_hosts=["192.168.1.5"])
+    assert client.get("/static/styles.css", headers={"Host": LAN_HOST}).status_code == 200
+
+
+def test_a_configured_host_still_gets_the_origin_check(tmp_path: Path) -> None:
+    """Opening a host widens *reachability*, never the cross-site guard."""
+
+    client = _app(tmp_path, allowed_hosts=["192.168.1.5"])
+    response = client.post(
+        "/alerts/a1/suppress",
+        headers={"Host": LAN_HOST, "Origin": "https://evil.example"},
+    )
+    assert response.status_code == 403
+
+
+def test_configuring_one_host_does_not_open_others(tmp_path: Path) -> None:
+    client = _app(tmp_path, allowed_hosts=["192.168.1.5"])
+    assert client.get("/alerts", headers={"Host": "evil.example"}).status_code == 400
+
+
+def test_loopback_stays_allowed_alongside_a_configured_host(tmp_path: Path) -> None:
+    client = _app(tmp_path, allowed_hosts=["192.168.1.5"])
+    assert client.get("/static/styles.css", headers={"Host": "localhost"}).status_code == 200
+
+
+def test_build_allowed_hosts_normalises_and_drops_junk() -> None:
+    hosts = build_allowed_hosts(
+        [
+            "192.168.1.5:8765",
+            "[fe80::1]",
+            "::1",
+            "NUC.Lan",
+            "",
+            "  ",
+            "h:notaport",
+            "u@evil",
+            "http://sneaky.lan",  # a scheme is not a host
+        ]
+    )
+    assert "192.168.1.5" in hosts  # port stripped
+    assert "fe80::1" in hosts  # brackets stripped
+    assert "nuc.lan" in hosts  # lower-cased
+    assert build_allowed_hosts(["::1"]) == build_allowed_hosts([])  # folds to loopback
+    assert not any(h in hosts for h in ("", "  ", "h", "evil", "u@evil", "http", "sneaky.lan"))
+
+
+def test_build_allowed_hosts_defaults_to_loopback_only() -> None:
+    assert len(build_allowed_hosts()) == 1
+    assert build_allowed_hosts([]) == build_allowed_hosts(None)
+
+
+# --- regression --------------------------------------------------------------
+
+
+def test_malformed_origin_is_rejected_not_crashed(bare_client: TestClient) -> None:
+    """An unparseable URL must reach the 403, not raise out of urlsplit."""
+
+    response = bare_client.post("/alerts/a1/suppress", headers={"Origin": "http://[::1"})
+    assert response.status_code == 403
