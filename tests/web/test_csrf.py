@@ -263,13 +263,25 @@ def _mutating_routes(app) -> list[tuple[str, str]]:  # type: ignore[no-untyped-d
     """Every (method, concrete path) in the live router that is not a safe method."""
 
     found: list[tuple[str, str]] = []
-    for route in app.routes:
-        methods = getattr(route, "methods", None)
-        path = getattr(route, "path", None)
-        if not methods or path is None:
-            continue  # Mounts (e.g. /static) carry no methods.
-        for method in sorted(set(methods) - SAFE_METHODS):
-            found.append((method, re.sub(r"\{[^}]+\}", "x", path)))
+
+    def walk(routes: object) -> None:
+        for route in routes:  # type: ignore[attr-defined]
+            # Recurse first: whether `include_router` flattens its routes into
+            # `app.routes` or keeps them nested behind a router object is a
+            # FastAPI version detail. It flattens locally and nests on CI, where
+            # this walk consequently saw only the root route and enumerated
+            # nothing — so walk both shapes rather than depending on either.
+            nested = getattr(route, "routes", None)
+            if nested:
+                walk(nested)
+            methods = getattr(route, "methods", None)
+            path = getattr(route, "path", None)
+            if not methods or path is None:
+                continue  # Mounts (e.g. /static) carry no methods.
+            for method in sorted(set(methods) - SAFE_METHODS):
+                found.append((method, re.sub(r"\{[^}]+\}", "x", path)))
+
+    walk(app.routes)
     return found
 
 
