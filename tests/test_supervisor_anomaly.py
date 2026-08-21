@@ -192,3 +192,43 @@ def test_stop_checkpoints_engine_state(tmp_path: Path) -> None:
     ).fetchall()
     assert rows[0][0] == 3  # one row per window
     db.close()
+
+
+# --- PR3: beacon signal path ------------------------------------------------
+
+
+def _beacon_signal_event():
+    ev = build_event(
+        module="anomaly_detector",
+        action="beacon_signature",
+        category=["anomaly"],
+        type_=["info"],
+        severity="info",
+        kind="signal",
+        process={"name": "curl"},
+        destination={"ip": "203.0.113.9", "port": 443},
+    )
+    ev.baseline = {
+        "metric_kind": "beacon",
+        "entity_key": "curl->203.0.113.9:443",
+        "count": 12,
+        "interval_mean_s": 60.0,
+        "interval_stddev_s": 1.2,
+        "cv": 0.02,
+    }
+    return ev
+
+
+def test_beacon_signal_becomes_alert(tmp_path: Path) -> None:
+    cfg = _quiet_cfg(tmp_path)
+    sup = Supervisor(cfg)
+    alerts = []
+    sup.attach_alert_listener(alerts.append)
+    sup.start()
+    try:
+        sup._inject_for_test(_beacon_signal_event())
+        beacons = [a for a in alerts if a.rule.id == "anomaly.beacon_signature"]
+        assert len(beacons) == 1
+        assert beacons[0].severity.value == "medium"
+    finally:
+        sup.stop(timeout=10.0)
