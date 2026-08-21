@@ -1,10 +1,11 @@
 """Anomaly detector thread (spec 2026-08-20-anomaly-detector-design.md §2).
 
 Owns the maintenance thread. Each tick: flush the first-sighting queue, drain
-the router subscription into the metric engine, close minute buckets, emit a
-``kind=signal`` event per threshold breach (re-injected into the supervisor's
-dispatch path, where starter-pack ``anomaly.*`` rules turn them into alerts),
-and checkpoint engine state to ``metric_baseline`` when due.
+the router subscription into the metric engine and the beacon tracker, close
+minute buckets, emit a ``kind=signal`` event per threshold breach and per
+qualifying beacon observation (re-injected into the supervisor's dispatch
+path, where starter-pack ``anomaly.*`` rules turn them into alerts), and
+checkpoint engine + beacon state to ``metric_baseline`` when due.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from datetime import UTC, datetime
 from queue import Empty as QueueEmpty
 from typing import TYPE_CHECKING
 
+from inspectord.anomaly.beacon import BeaconHit, BeaconTracker
 from inspectord.anomaly.first_sighting import FirstSightingTracker
 from inspectord.anomaly.metrics import extract_samples
 from inspectord.anomaly.stats import MetricEngine, SignalData
@@ -69,6 +71,34 @@ def _signal_event(data: SignalData, *, now: datetime) -> Event:
     return ev
 
 
+def _beacon_event(hit: BeaconHit, *, now: datetime) -> Event:
+    ev = build_event(
+        module="anomaly_detector",
+        action="beacon_signature",
+        category=["anomaly"],
+        type_=["info"],
+        kind="signal",
+        severity="info",
+        ts=now,
+        message=(
+            f"{hit.process_name} connects to {hit.dst_ip}:{hit.dst_port} "
+            f"every ~{hit.mean_interval_s:.0f}s (cv={hit.cv:.3f}, "
+            f"n={hit.count}) — low-variance periodic egress"
+        ),
+        process={"name": hit.process_name},
+        destination={"ip": hit.dst_ip, "port": hit.dst_port},
+    )
+    ev.baseline = {
+        "metric_kind": "beacon",
+        "entity_key": hit.entity_key,
+        "count": hit.count,
+        "interval_mean_s": round(hit.mean_interval_s, 1),
+        "interval_stddev_s": round(hit.stddev_interval_s, 2),
+        "cv": round(hit.cv, 3),
+    }
+    return ev
+
+
 class AnomalyDetector:
     def __init__(
         self,
@@ -85,6 +115,7 @@ class AnomalyDetector:
         self._sub = subscription
         self._emit = emit
         self._engine = MetricEngine(config)
+        self._beacon = BeaconTracker(config)
         self._last_checkpoint = time.monotonic()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -97,7 +128,7 @@ class AnomalyDetector:
         return self._thread is not None and self._thread.is_alive()
 
     def load_checkpoints(self) -> int:
-        """Restore engine state from metric_baseline; delete rows that fail to
+        """Restore engine and beacon state from metric_baseline; delete rows that fail to
         parse so a bad row cannot fail every startup forever. Never raises."""
         loaded = 0
         try:
@@ -108,7 +139,13 @@ class AnomalyDetector:
             log.warning("could not read metric_baseline checkpoints: %r", exc)
             return 0
         for metric_kind, entity_key, window_name, blob in rows:
-            if self._engine.load_row(str(metric_kind), str(entity_key), str(window_name), blob):
+            if str(window_name) == "beacon":
+                ok = self._beacon.load_row(str(entity_key), blob)
+            else:
+                ok = self._engine.load_row(
+                    str(metric_kind), str(entity_key), str(window_name), blob
+                )
+            if ok:
                 loaded += 1
                 continue
             log.warning(
@@ -136,9 +173,10 @@ class AnomalyDetector:
         router subscription), while a single bulk unnest-over-list-params
         insert runs in ~2s. The rewrite also makes evicted entities'
         rows disappear for free, so there is no separate per-evicted-key
-        DELETE pass to run.
+        DELETE pass to run. Beacon tracker rows (window_name 'beacon') ride
+        along in the same rewrite rather than getting a separate table.
         """
-        rows = self._engine.checkpoint_rows()
+        rows = self._engine.checkpoint_rows() + self._beacon.checkpoint_rows()
         # Nothing left to track for these keys once the table is rewritten
         # from scratch below; drain anyway so the engine's internal evicted
         # list doesn't grow unbounded between checkpoints.
@@ -162,16 +200,36 @@ class AnomalyDetector:
         while not self._stop.wait(self._cfg.tick_s):
             self._tick(now=datetime.now(UTC))
 
-    def _drain(self) -> None:
+    def _drain(self) -> dict[str, BeaconHit]:
+        """Drain the subscription into the engine and beacon tracker.
+
+        Returns beacon hits deduped per key (last observation wins), so one
+        beaconing key yields at most one signal per tick regardless of how
+        many buffered connections qualified during the drain.
+        """
+        hits: dict[str, BeaconHit] = {}
         if self._sub is None:
-            return
+            return hits
         while True:
             try:
                 ev = self._sub.get_nowait()
             except QueueEmpty:
-                return
+                return hits
             for sample in extract_samples(ev):
                 self._engine.ingest(sample, ts=ev.ts)
+            hit = self._observe_beacon(ev)
+            if hit is not None:
+                hits[hit.entity_key] = hit
+
+    def _observe_beacon(self, ev: Event) -> BeaconHit | None:
+        if ev.action != "outbound_connection":
+            return None
+        name = (ev.process or {}).get("name")
+        ip = (ev.destination or {}).get("ip")
+        port = (ev.destination or {}).get("port")
+        if not name or not ip or not isinstance(port, int):
+            return None
+        return self._beacon.observe(process_name=str(name), dst_ip=str(ip), dst_port=port, ts=ev.ts)
 
     def _tick(self, *, now: datetime | None = None) -> None:
         if now is None:
@@ -183,10 +241,13 @@ class AnomalyDetector:
             # and a re-sighting after restart is absorbed by dedup.
             log.error("first-sighting flush failed: %r", exc)
         try:
-            self._drain()
+            beacon_hits = self._drain()
             for data in self._engine.tick(now=now):
                 if self._emit is not None:
                     self._emit(_signal_event(data, now=now))
+            if self._emit is not None:
+                for hit in beacon_hits.values():
+                    self._emit(_beacon_event(hit, now=now))
             if time.monotonic() - self._last_checkpoint >= self._cfg.checkpoint_interval_s:
                 self.checkpoint()
         except Exception as exc:

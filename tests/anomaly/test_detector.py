@@ -286,3 +286,133 @@ def test_stop_skips_final_writes_when_thread_hung(tmp_path: Path) -> None:
     # No checkpoint rows were written by stop().
     assert db.query("SELECT count(*) FROM metric_baseline").fetchall()[0][0] == 0
     db.close()
+
+
+# --- PR3: beaconing ---------------------------------------------------------
+
+
+def _cadence_events(router, n: int, *, start=None, period_s: float = 60.0) -> None:
+    base = start if start is not None else T0
+    for i in range(n):
+        router.publish(_conn_event(base + timedelta(seconds=period_s * i)))
+
+
+def test_regular_cadence_emits_one_beacon_signal_per_tick(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, router, emitted = _stat_detector(db)
+    # 14 connections 60 s apart → intervals hit 12 and 13: two qualifying
+    # observations in one drain, deduped to ONE signal for the key.
+    _cadence_events(router, 14)
+    det._tick(now=T0 + timedelta(minutes=14))
+    beacons = [s for s in emitted if s.action == "beacon_signature"]
+    assert len(beacons) == 1
+    sig = beacons[0]
+    assert sig.kind.value == "signal"
+    assert sig.module == "anomaly_detector"
+    assert sig.category == ["anomaly"]
+    assert sig.process == {"name": "curl"}
+    assert sig.destination == {"ip": "203.0.113.9", "port": 443}
+    assert sig.baseline is not None
+    assert sig.baseline["metric_kind"] == "beacon"
+    assert sig.baseline["entity_key"] == "curl->203.0.113.9:443"
+    assert sig.baseline["count"] == 13
+    assert sig.baseline["interval_mean_s"] == 60.0
+    assert sig.baseline["cv"] == 0.0
+    db.close()
+
+
+def test_jittered_cadence_emits_no_beacon_signal(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, router, emitted = _stat_detector(db)
+    ts = T0
+    for gap in [10.0, 300.0, 45.0, 900.0, 30.0, 600.0] * 4:
+        router.publish(_conn_event(ts))
+        ts = ts + timedelta(seconds=gap)
+    det._tick(now=ts + timedelta(minutes=1))
+    assert [s for s in emitted if s.action == "beacon_signature"] == []
+    db.close()
+
+
+def test_beacon_state_checkpoints_and_reloads(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, router, _ = _stat_detector(db)
+    _cadence_events(router, 10)  # 9 intervals: warm but silent
+    det._tick(now=T0 + timedelta(minutes=10))
+    det.checkpoint()
+    rows = db.query(
+        "SELECT metric_kind, entity_key FROM metric_baseline WHERE window_name = 'beacon'"
+    ).fetchall()
+    assert rows == [("beacon", "curl->203.0.113.9:443")]
+
+    det2, router2, emitted2 = _stat_detector(db)
+    det2.load_checkpoints()
+    # Reload re-anchors (no cross-restart interval): the first connection
+    # anchors, the next 3 add intervals 10..12 — fires without restarting
+    # the warm-up.
+    _cadence_events(router2, 4, start=T0 + timedelta(seconds=60.0 * 10))
+    det2._tick(now=T0 + timedelta(minutes=14))
+    assert [s.action for s in emitted2] == ["beacon_signature"]
+    db.close()
+
+
+def test_beacon_rows_survive_engine_checkpoint_rewrite(tmp_path: Path) -> None:
+    # checkpoint() rewrites metric_baseline from scratch; beacon rows must be
+    # part of the rewrite, not casualties of it.
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, router, _ = _stat_detector(db)
+    _cadence_events(router, 5)
+    det._tick(now=T0 + timedelta(minutes=5))
+    det.checkpoint()
+    det.checkpoint()  # second rewrite must not lose the beacon row
+    rows = db.query("SELECT count(*) FROM metric_baseline WHERE window_name = 'beacon'").fetchall()
+    assert rows[0][0] == 1
+    # Engine windows for the same activity are present alongside.
+    other = db.query(
+        "SELECT count(*) FROM metric_baseline WHERE window_name != 'beacon'"
+    ).fetchall()
+    assert other[0][0] > 0
+    db.close()
+
+
+def test_corrupt_beacon_checkpoint_row_is_discarded(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    db.execute(
+        "INSERT INTO metric_baseline VALUES ('beacon', 'curl->x:1', 'beacon', 'garbage', now())"
+    )
+    det, _, _ = _stat_detector(db)
+    det.load_checkpoints()  # must not raise
+    assert det._beacon.checkpoint_rows() == []
+    rows = db.query("SELECT count(*) FROM metric_baseline").fetchall()
+    assert rows[0][0] == 0
+    db.close()
+
+
+def test_connection_without_destination_is_ignored_by_beacon(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, router, emitted = _stat_detector(db)
+    for i in range(20):
+        ev = build_event(
+            module="outbound_connection_tracker",
+            action="outbound_connection",
+            category=["network"],
+            type_=["connection", "start"],
+            severity="info",
+            ts=T0 + timedelta(seconds=60.0 * i),
+            process={"pid": 2, "name": "curl"},
+        )
+        router.publish(ev)
+    det._tick(now=T0 + timedelta(minutes=20))  # must not raise
+    assert [s for s in emitted if s.action == "beacon_signature"] == []
+    db.close()
