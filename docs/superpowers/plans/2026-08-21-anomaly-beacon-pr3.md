@@ -20,12 +20,13 @@
 **Key design decisions baked into this plan** (already settled — do not relitigate):
 - `BeaconTracker` is pure and clock-injected (`ts` param); only the detector thread touches wall-clock. All beacon unit tests run without threads or sleeps.
 - Evaluation happens per observation (spec: "On each new connection it evaluates"), but the detector dedups hits **per drain**, keyed by tracker key (last hit wins) — one signal per beaconing key per tick, bounded event volume. Cross-tick repeats while a beacon persists are absorbed by the existing alert dedup, exactly like PR2's repeated statistical signals.
-- Beacon checkpoint rows use `metric_kind='beacon'`, `entity_key=f"{proc}→{ip}:{port}"`, `window_name='beacon'`. The entity_key string is opaque — it is never parsed back; reload only needs it to be deterministic so the same live key maps onto its restored row. IPv6 colons in the key are therefore harmless.
+- Beacon checkpoint rows use `metric_kind='beacon'`, `entity_key=f"{proc}->{ip}:{port}"`, `window_name='beacon'`. The entity_key string is opaque — it is never parsed back; reload only needs it to be deterministic so the same live key maps onto its restored row. IPv6 colons in the key are therefore harmless.
 - `AnomalyDetector.checkpoint()` already rewrites `metric_baseline` from scratch (DELETE + bulk INSERT); beacon rows simply join `checkpoint_rows()`'s list. Evicted beacon keys disappear for free; there is no separate delete pass. `load_checkpoints()` routes `window_name == 'beacon'` rows to the tracker and everything else to the engine; the existing corrupt-row delete path covers beacon rows unchanged.
 - Degenerate cadences cannot fire by construction: the mean-interval bounds check (`beacon_min_interval_s ≤ mean ≤ beacon_max_interval_s`, with an extra `mean > 0` guard for pathological configs) runs **before** the cv division, so same-timestamp bursts (mean ≈ 0) and backwards clock skew (negative intervals dragging the mean down) are rejected without a ZeroDivisionError.
 - Tracked-key cap reuses `max_entities_per_metric` with LRU eviction by last-observation time (spec §5 → §4.3). No new config: all beacon knobs (`beacon_min_events`, `beacon_min_interval_s`, `beacon_max_interval_s`, `beacon_max_cv`) landed in `AnomalyConfig` in PR1.
 - The signal event uses a **distinct action** `beacon_signature` (not `metric_anomaly`) so the rule keys on `event.action` and never collides with the statistical rules. It carries both `process` and `destination` dicts; `baseline` holds `metric_kind='beacon'`, `entity_key`, `count`, `interval_mean_s`, `interval_stddev_s`, `cv`.
 - Known nuance for the PR body: alert dedup keys on the primary entity (process), so two simultaneous beacons from the same process name to *different* destinations may dedup into one alert while the first is active. Signals for both are still persisted and huntable. Acceptable for a single-user host; note it, don't fix it here.
+- *(Amended during Task 1 implementation)* `load_row` restores the interval ring but resets `last_ts = None`: the first observation after a reload re-anchors without computing a bogus interval that would span daemon downtime. The persisted `last_ts` still seeds LRU ordering. Consequence: warming a restored key takes one anchoring observation before intervals accrue again (Task 2's reload test therefore feeds 4 post-reload connections to add the 3 intervals that reach 12).
 
 ---
 
@@ -95,7 +96,7 @@ def test_regular_cadence_fires_at_min_events() -> None:
     assert h.process_name == "curl"
     assert h.dst_ip == "203.0.113.9"
     assert h.dst_port == 443
-    assert h.entity_key == "curl→203.0.113.9:443"
+    assert h.entity_key == "curl->203.0.113.9:443"
     assert h.count == 12
     assert 60.0 < h.mean_interval_s < 62.0
     assert h.cv < 0.1
@@ -164,7 +165,7 @@ def test_checkpoint_round_trip_preserves_warmup() -> None:
     rows = tracker.checkpoint_rows()
     assert len(rows) == 1
     metric_kind, entity_key, window_name, blob = rows[0]
-    assert (metric_kind, entity_key, window_name) == ("beacon", "curl→203.0.113.9:443", "beacon")
+    assert (metric_kind, entity_key, window_name) == ("beacon", "curl->203.0.113.9:443", "beacon")
 
     restored = BeaconTracker(_cfg())
     assert restored.load_row(entity_key, blob) is True
@@ -177,9 +178,9 @@ def test_checkpoint_round_trip_preserves_warmup() -> None:
 
 def test_load_row_rejects_garbage_without_state() -> None:
     tracker = BeaconTracker(_cfg())
-    assert tracker.load_row("curl→203.0.113.9:443", "not json") is False
-    assert tracker.load_row("curl→203.0.113.9:443", '{"wrong": "shape"}') is False
-    assert tracker.load_row("curl→203.0.113.9:443", '{"last_ts": "x", "intervals": []}') is False
+    assert tracker.load_row("curl->203.0.113.9:443", "not json") is False
+    assert tracker.load_row("curl->203.0.113.9:443", '{"wrong": "shape"}') is False
+    assert tracker.load_row("curl->203.0.113.9:443", '{"last_ts": "x", "intervals": []}') is False
     assert tracker.checkpoint_rows() == []
 
 
@@ -189,7 +190,7 @@ def test_lru_eviction_at_key_cap() -> None:
     _feed(tracker, [60.0], port=2222, start=T0 + timedelta(minutes=10))
     _feed(tracker, [60.0], port=3333, start=T0 + timedelta(minutes=20))  # evicts :1111
     keys = {row[1] for row in tracker.checkpoint_rows()}
-    assert keys == {"curl→203.0.113.9:2222", "curl→203.0.113.9:3333"}
+    assert keys == {"curl->203.0.113.9:2222", "curl->203.0.113.9:3333"}
 
 
 def test_ring_caps_at_32_intervals() -> None:
@@ -261,7 +262,7 @@ class _KeyState:
 
 def _entity_key(process_name: str, dst_ip: str, dst_port: int) -> str:
     # Opaque and deterministic; never parsed back (see plan design decisions).
-    return f"{process_name}→{dst_ip}:{dst_port}"
+    return f"{process_name}->{dst_ip}:{dst_port}"
 
 
 class BeaconTracker:
@@ -411,7 +412,7 @@ def test_regular_cadence_emits_one_beacon_signal_per_tick(tmp_path: Path) -> Non
     assert sig.destination == {"ip": "203.0.113.9", "port": 443}
     assert sig.baseline is not None
     assert sig.baseline["metric_kind"] == "beacon"
-    assert sig.baseline["entity_key"] == "curl→203.0.113.9:443"
+    assert sig.baseline["entity_key"] == "curl->203.0.113.9:443"
     assert sig.baseline["count"] == 13
     assert sig.baseline["interval_mean_s"] == 60.0
     assert sig.baseline["cv"] == 0.0
@@ -443,14 +444,15 @@ def test_beacon_state_checkpoints_and_reloads(tmp_path: Path) -> None:
     rows = db.query(
         "SELECT metric_kind, entity_key FROM metric_baseline WHERE window_name = 'beacon'"
     ).fetchall()
-    assert rows == [("beacon", "curl→203.0.113.9:443")]
+    assert rows == [("beacon", "curl->203.0.113.9:443")]
 
     det2, router2, emitted2 = _stat_detector(db)
     det2.load_checkpoints()
-    # 3 more on-cadence connections reach 12 intervals: fires without
-    # restarting the warm-up.
-    _cadence_events(router2, 3, start=T0 + timedelta(seconds=60.0 * 10))
-    det2._tick(now=T0 + timedelta(minutes=13))
+    # Reload re-anchors (no cross-restart interval): the first connection
+    # anchors, the next 3 add intervals 10..12 — fires without restarting
+    # the warm-up.
+    _cadence_events(router2, 4, start=T0 + timedelta(seconds=60.0 * 10))
+    det2._tick(now=T0 + timedelta(minutes=14))
     assert [s.action for s in emitted2] == ["beacon_signature"]
     db.close()
 
@@ -483,7 +485,7 @@ def test_corrupt_beacon_checkpoint_row_is_discarded(tmp_path: Path) -> None:
     db.connect()
     run_migrations(db)
     db.execute(
-        "INSERT INTO metric_baseline VALUES ('beacon', 'curl→x:1', 'beacon', 'garbage', now())"
+        "INSERT INTO metric_baseline VALUES ('beacon', 'curl->x:1', 'beacon', 'garbage', now())"
     )
     det, _, _ = _stat_detector(db)
     det.load_checkpoints()  # must not raise
@@ -716,7 +718,7 @@ def _beacon_signal():
     )
     ev.baseline = {
         "metric_kind": "beacon",
-        "entity_key": "curl→203.0.113.9:443",
+        "entity_key": "curl->203.0.113.9:443",
         "count": 12,
         "interval_mean_s": 60.0,
         "interval_stddev_s": 1.2,
@@ -820,7 +822,7 @@ def _beacon_signal_event():
     )
     ev.baseline = {
         "metric_kind": "beacon",
-        "entity_key": "curl→203.0.113.9:443",
+        "entity_key": "curl->203.0.113.9:443",
         "count": 12,
         "interval_mean_s": 60.0,
         "interval_stddev_s": 1.2,

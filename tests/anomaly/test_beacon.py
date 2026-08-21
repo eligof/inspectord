@@ -46,7 +46,7 @@ def test_regular_cadence_fires_at_min_events() -> None:
     assert h.process_name == "curl"
     assert h.dst_ip == "203.0.113.9"
     assert h.dst_port == 443
-    assert h.entity_key == "curl→203.0.113.9:443"
+    assert h.entity_key == "curl->203.0.113.9:443"
     assert h.count == 12
     assert 60.0 < h.mean_interval_s < 62.0
     assert h.cv < 0.1
@@ -115,7 +115,7 @@ def test_checkpoint_round_trip_preserves_warmup() -> None:
     rows = tracker.checkpoint_rows()
     assert len(rows) == 1
     metric_kind, entity_key, window_name, blob = rows[0]
-    assert (metric_kind, entity_key, window_name) == ("beacon", "curl→203.0.113.9:443", "beacon")
+    assert (metric_kind, entity_key, window_name) == ("beacon", "curl->203.0.113.9:443", "beacon")
 
     restored = BeaconTracker(_cfg())
     assert restored.load_row(entity_key, blob) is True
@@ -128,9 +128,9 @@ def test_checkpoint_round_trip_preserves_warmup() -> None:
 
 def test_load_row_rejects_garbage_without_state() -> None:
     tracker = BeaconTracker(_cfg())
-    assert tracker.load_row("curl→203.0.113.9:443", "not json") is False
-    assert tracker.load_row("curl→203.0.113.9:443", '{"wrong": "shape"}') is False
-    assert tracker.load_row("curl→203.0.113.9:443", '{"last_ts": "x", "intervals": []}') is False
+    assert tracker.load_row("curl->203.0.113.9:443", "not json") is False
+    assert tracker.load_row("curl->203.0.113.9:443", '{"wrong": "shape"}') is False
+    assert tracker.load_row("curl->203.0.113.9:443", '{"last_ts": "x", "intervals": []}') is False
     assert tracker.checkpoint_rows() == []
 
 
@@ -140,7 +140,7 @@ def test_lru_eviction_at_key_cap() -> None:
     _feed(tracker, [60.0], port=2222, start=T0 + timedelta(minutes=10))
     _feed(tracker, [60.0], port=3333, start=T0 + timedelta(minutes=20))  # evicts :1111
     keys = {row[1] for row in tracker.checkpoint_rows()}
-    assert keys == {"curl→203.0.113.9:2222", "curl→203.0.113.9:3333"}
+    assert keys == {"curl->203.0.113.9:2222", "curl->203.0.113.9:3333"}
 
 
 def test_ring_caps_at_32_intervals() -> None:

@@ -21,7 +21,8 @@ from datetime import datetime
 
 from inspectord.config import AnomalyConfig
 
-# Spec §5: "a ring of the last 32 inter-arrival times".
+# Spec §5: "a ring of the last 32 inter-arrival times". Must stay >=
+# beacon_min_events or the tracker can never fire.
 _RING_SIZE = 32
 
 
@@ -48,8 +49,9 @@ class _KeyState:
 
 
 def _entity_key(process_name: str, dst_ip: str, dst_port: int) -> str:
-    # Opaque and deterministic; never parsed back.
-    return f"{process_name}→{dst_ip}:{dst_port}"
+    # Opaque and deterministic; never parsed back. Same separator as
+    # first_sighting._outbound_connection_key for greppability.
+    return f"{process_name}->{dst_ip}:{dst_port}"
 
 
 class BeaconTracker:
