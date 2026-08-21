@@ -128,7 +128,7 @@ class AnomalyDetector:
         return self._thread is not None and self._thread.is_alive()
 
     def load_checkpoints(self) -> int:
-        """Restore engine state from metric_baseline; delete rows that fail to
+        """Restore engine and beacon state from metric_baseline; delete rows that fail to
         parse so a bad row cannot fail every startup forever. Never raises."""
         loaded = 0
         try:
