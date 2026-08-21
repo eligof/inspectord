@@ -47,6 +47,10 @@ def test_beacon_rule_fires_on_beacon_signal() -> None:
     assert len(matches) == 1
     assert matches[0].rule_id == "anomaly.beacon_signature"
     assert matches[0].category == "anomaly"
+    assert "{" not in matches[0].short
+    assert "{" not in matches[0].detail
+    assert "203.0.113.9:443" in matches[0].short
+    assert "60.0" in matches[0].detail
 
 
 def test_beacon_rule_ignores_statistical_signals() -> None:

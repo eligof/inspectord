@@ -5,8 +5,8 @@ severity: medium
 category: anomaly
 why: |
   The anomaly detector observed this process repeatedly connecting to the
-  same destination on a near-perfect timer: at least 12 connections whose
-  inter-arrival times have a coefficient of variation below 0.1, with a
+  same destination on a near-perfect timer: at least 12 consecutive
+  inter-arrival intervals with a coefficient of variation below 0.1, with a
   mean interval between 5 seconds and 1 hour. Human-driven and normal
   application traffic is bursty; malware command-and-control channels poll
   their server on a fixed heartbeat, which is exactly this low-variance
@@ -18,5 +18,5 @@ detect:
   any_of:
     - event.module == "anomaly_detector" AND event.action == "beacon_signature"
 short: "beacon: {process.name} -> {destination.ip}:{destination.port} every ~{baseline.interval_mean_s}s"
-detail: "{process.name} has connected to {destination.ip}:{destination.port} {baseline.count} times at a near-constant interval of ~{baseline.interval_mean_s}s (stddev {baseline.interval_stddev_s}s, cv {baseline.cv}). Low-variance periodic egress to a single destination is a classic C2 beacon signature."
+detail: "{process.name} has been connecting to {destination.ip}:{destination.port} at a near-constant interval of ~{baseline.interval_mean_s}s over the last {baseline.count} arrivals (stddev {baseline.interval_stddev_s}s, cv {baseline.cv}). Low-variance periodic egress to a single destination is a classic C2 beacon signature."
 labels: [anomaly, beacon, network, c2]
