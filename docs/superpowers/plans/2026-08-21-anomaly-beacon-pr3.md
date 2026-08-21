@@ -342,7 +342,10 @@ class BeaconTracker:
             return False
         self._admit(entity_key)
         state = self._keys[entity_key]
-        state.last_ts = last_ts
+        # Amended (see design decisions): do NOT seed last_ts — the first
+        # post-reload observation re-anchors instead of computing an interval
+        # that spans daemon downtime. Persisted last_ts only orders LRU below.
+        state.last_ts = None
         state.intervals = deque(intervals[-_RING_SIZE:], maxlen=_RING_SIZE)
         self._last_seen[entity_key] = last_ts if last_ts is not None else float("-inf")
         return True
