@@ -136,8 +136,14 @@ New module `inspectord/entities/card.py`:
     shipped in `device_state` — the card follows the table, not §14.1).
   - port → v1: listener state only, no event scan (port-scoped event queries would need
     source-address interpretation — defer).
-  - executable → the process-exec payload's executable-hash field (confirm the exact
-    field name from `sched_process_exec` events before implementing).
+  - executable → `process.hash.sha256` = key (the enrichment layer's field; the path
+    lives in `process.executable`).
+
+Pre-existing gap fixed in PR1: `process_state.exe_path` / `exe_sha256` columns exist
+since migration 0004 but `_project_process` never writes them, so they are NULL for every
+row. The projector's process_start upsert gains both fields (from `process.executable`
+and `process.hash.sha256`) — without this the executable card's related-process list
+would always be empty.
   - Alert matching: same predicates against `alerts.payload_json`.
 - Key validation before any query: length ≤ 512, no control characters; kind must be in
   the fixed set. Invalid → `{"ok": False, "error": "invalid_kind" | "invalid_key"}`.
