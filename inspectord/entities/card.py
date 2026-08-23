@@ -287,7 +287,9 @@ def _user_header_related(
         [uid],
     ).fetchall()
     related = [_related_process(pid, boot, comm or str(pid), "runs") for pid, boot, comm in rows]
-    return True, header, related
+    # Spec S3: the user exists-check is "any event/process match", not a passwd
+    # hit. Event/alert matches are folded in by build_entity_card.
+    return bool(rows), header, related
 
 
 def _ip_header_related(
@@ -311,9 +313,9 @@ def _ip_header_related(
     if boot_id is not None:
         for pid, comm in db.query(
             "SELECT DISTINCT pid, comm FROM connection_state "
-            "WHERE (daddr = ? OR saddr = ?) AND pid IS NOT NULL "
+            "WHERE daddr = ? AND pid IS NOT NULL "
             f"ORDER BY pid LIMIT {_RELATED_CAP}",
-            [key, key],
+            [key],
         ).fetchall():
             related.append(_related_process(pid, boot_id, comm or str(pid), "talked-to"))
     return True, header, related
@@ -479,6 +481,8 @@ def build_entity_card(
         alerts = _alerts_section(db, kind, key)
     except Exception:
         alerts, warnings = [], [*warnings, "alerts_failed"]
+    if kind == "user" and not found:
+        found = bool(events or alerts)
     return {
         "kind": kind,
         "key": key,

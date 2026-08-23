@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import pwd
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -82,6 +84,7 @@ def test_process_card_header_and_related(tmp_path):
     assert ("child", "process", f"300@{BOOT}") in rel
     assert ("executable", "executable", "ab" * 32) in rel
     assert ("outbound", "ip", "9.9.9.9") in rel
+    assert card["warnings"] == []
 
 
 def test_process_card_not_found_still_returns_card(tmp_path):
@@ -242,3 +245,113 @@ def test_alerts_section_matches_process_pid(tmp_path):
         card = build_entity_card(db, kind="process", key=f"4242@{BOOT}", now=NOW, boot_id=BOOT)
     assert [a["alert_id"] for a in card["alerts"]] == ["a1"]
     assert card["found"] is False  # no state row; history still shown
+
+
+# --- spec-review additions ---------------------------------------------------
+
+
+def _seed_alert(db, alert_id, payload_json):
+    db.execute(
+        "INSERT INTO alerts (alert_id, rule_id, ts, severity, status, category, "
+        "dedup_key, dedup_count, first_seen_at, last_seen_at, rendered_short, "
+        "rendered_detail, payload_json) VALUES "
+        "(?, 'r.test', ?, 'high', 'new', 'file', ?, 1, ?, ?, 'short', 'detail', ?)",
+        [alert_id, NOW, alert_id, NOW, NOW, payload_json],
+    )
+
+
+def test_malformed_event_payload_degrades_events_section(tmp_path):
+    # One malformed payload_json row poisons the section query; the card
+    # degrades to an empty section plus a warning instead of failing (spec S7).
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO events_enriched (event_id, ts, kind, module, action, "
+            "severity, payload_json) VALUES ('bad1', ?, 'event', 'test', "
+            "'test_action', 'info', 'not json')",
+            [NOW],
+        )
+        _seed_event(db, ts=NOW - timedelta(hours=1), file={"path": "/etc/passwd"})
+        card = build_entity_card(db, kind="file", key="/etc/passwd", now=NOW, boot_id=BOOT)
+    assert card["events"] == []
+    assert "events_failed" in card["warnings"]
+
+
+def test_malformed_alert_payload_degrades_alerts_section(tmp_path):
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        _seed_alert(db, "bad1", "not json")
+        _seed_alert(db, "ok1", '{"file": {"path": "/etc/passwd"}}')
+        card = build_entity_card(db, kind="file", key="/etc/passwd", now=NOW, boot_id=BOOT)
+    assert card["alerts"] == []
+    assert "alerts_failed" in card["warnings"]
+
+
+def test_user_card_resolvable_user_with_no_data_not_found(tmp_path):
+    # Spec S3: user exists-check means "any event/process match", not a passwd hit.
+    username = pwd.getpwuid(os.getuid()).pw_name
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        card = build_entity_card(db, kind="user", key=username, now=NOW, boot_id=BOOT)
+    assert card["found"] is False
+
+
+def test_user_card_found_via_process_match(tmp_path):
+    username = pwd.getpwuid(os.getuid()).pw_name
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        _seed_process(db, 600, comm="shell", uid=os.getuid())
+        card = build_entity_card(db, kind="user", key=username, now=NOW, boot_id=BOOT)
+    assert card["found"] is True
+
+
+def test_user_card_found_via_event_match(tmp_path):
+    # Unresolvable user, but a matching event still flips found (spec S3).
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        _seed_event(db, ts=NOW - timedelta(hours=1), user={"name": "zz-no-such-user"})
+        card = build_entity_card(db, kind="user", key="zz-no-such-user", now=NOW, boot_id=BOOT)
+    assert card["found"] is True
+
+
+def test_ip_card_saddr_only_header_found_related_empty(tmp_path):
+    # Spec S4: saddr counts for the exists-check, but related pids match daddr only.
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO connection_state (conn_key, pid, comm, saddr, sport, daddr, "
+            "dport, proto, family, status, first_seen, last_seen, last_event_id) VALUES "
+            "('7:9.9.9.9:443:tcp', 7, 'curl', '4.4.4.4', 5555, '9.9.9.9', 443, 'tcp', "
+            "'inet', 'open', ?, ?, 'e1')",
+            [NOW, NOW],
+        )
+        card = build_entity_card(db, kind="ip", key="4.4.4.4", now=NOW, boot_id=BOOT)
+    assert card["found"] is True
+    assert card["related"] == []
+
+
+def test_alerts_cap(tmp_path):
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        for i in range(55):
+            _seed_alert(db, f"a{i}", '{"file": {"path": "/etc/passwd"}}')
+        card = build_entity_card(db, kind="file", key="/etc/passwd", now=NOW, boot_id=BOOT)
+    assert len(card["alerts"]) == 50
+
+
+def test_children_cap(tmp_path):
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        _seed_process(db, 500, comm="parent")
+        for i in range(25):
+            _seed_process(db, 1000 + i, ppid=500, comm=f"c{i}")
+        card = build_entity_card(db, kind="process", key=f"500@{BOOT}", now=NOW, boot_id=BOOT)
+    children = [r for r in card["related"] if r["relation"] == "child"]
+    assert len(children) == 20
+
+
+@pytest.mark.parametrize("key", ["noproto", "0.0.0.0:x/tcp", ":80/tcp", "/tcp"])
+def test_bad_port_keys_raise(tmp_path, key):
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db, pytest.raises(InvalidEntity):
+        build_entity_card(db, kind="port", key=key, now=NOW, boot_id=BOOT)
