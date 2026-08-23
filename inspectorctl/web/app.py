@@ -18,6 +18,7 @@ from inspectorctl.web.routes import (
     cases,
     deps,
     devices,
+    entity,
     events,
     file_integrity,
     health,
@@ -91,5 +92,6 @@ def create_app(*, socket_path: Path, allowed_hosts: Iterable[str] | None = None)
     app.include_router(scanners.router)
     app.include_router(cases.router)
     app.include_router(hunt.router)
+    app.include_router(entity.router)
 
     return app

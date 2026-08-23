@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1><span class="muted">{{ kind }}:</span> <span class="mono">{{ key }}</span></h1>
+{% if card %}
+  {% if card.warnings %}
+  <div class="error">⚠ degraded sections: {{ card.warnings | join(", ") }}</div>
+  {% endif %}
+  {% if not card.found %}
+  <div class="empty">No current state for this entity — showing history only.</div>
+  {% endif %}
+
+  <h2>Identity</h2>
+  <table>
+    <tbody>
+      {% for k, v in card.header.items() %}
+      <tr><th>{{ k }}</th><td class="mono">{{ v if v is not none else '' }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Related entities</h2>
+  {% if card.related %}
+  <table>
+    <thead><tr><th>Relation</th><th>Kind</th><th>Entity</th></tr></thead>
+    <tbody>
+      {% for r in card.related %}
+      <tr>
+        <td>{{ r.relation }}</td>
+        <td>{{ r.kind }}</td>
+        <td><a class="mono" href="/entity/{{ r.kind }}?key={{ r.key | urlencode }}">{{ r.label }}</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">None.</div>{% endif %}
+
+  <h2>Alerts</h2>
+  {% if card.alerts %}
+  <table>
+    <thead><tr><th>When</th><th>Rule</th><th>Severity</th><th>Status</th><th>Summary</th></tr></thead>
+    <tbody>
+      {% for a in card.alerts %}
+      <tr>
+        <td class="mono muted">{{ a.ts or '' }}</td>
+        <td class="mono"><a href="/alerts/{{ a.alert_id | urlencode }}">{{ a.rule_id }}</a></td>
+        <td>{{ a.severity }}</td>
+        <td>{{ a.status }}</td>
+        <td>{{ a.rendered_short }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No alerts reference this entity.</div>{% endif %}
+
+  <h2>Events (last {{ window_h }}h)</h2>
+  {% if card.events %}
+  <table>
+    <thead><tr><th>When</th><th>Module</th><th>Action</th><th>Severity</th></tr></thead>
+    <tbody>
+      {% for e in card.events %}
+      <tr>
+        <td class="mono muted">{{ e.ts or '' }}</td>
+        <td class="mono">{{ e.module }}</td>
+        <td>{{ e.action }}</td>
+        <td>{{ e.severity }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No events in the window.</div>{% endif %}
+{% endif %}
+{% endblock %}
