@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import severity_badge, status_badge %}
+{% from "_macros.html" import entity_link, severity_badge, status_badge %}
 
 {% block content %}
 <h1>Alert {{ alert.alert_id[:8] }}…</h1>
@@ -37,7 +37,18 @@
     <thead><tr><th>Kind</th><th>Key</th></tr></thead>
     <tbody>
       {% for e in alert.entities %}
-      <tr><td class="mono">{{ e.kind }}</td><td class="mono">{{ e.key }}</td></tr>
+      <tr>
+        <td class="mono">{{ e.kind }}</td>
+        <td class="mono">
+          {%- if e.kind == "process" and boot_id and e.key.startswith("pid:") -%}
+          {{ entity_link("process", e.key.removeprefix("pid:") ~ "@" ~ boot_id, e.key) }}
+          {%- elif e.kind != "process" and e.kind in card_kinds -%}
+          {{ entity_link(e.kind, e.key, e.key) }}
+          {%- else -%}
+          {{ e.key }}
+          {%- endif -%}
+        </td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>

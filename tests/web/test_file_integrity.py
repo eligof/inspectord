@@ -61,3 +61,10 @@ def test_file_integrity_feed_daemon_unreachable(tmp_path: Path) -> None:
     response = client.get("/file-integrity/feed")
     assert response.status_code == 200
     assert "daemon unreachable" in response.text
+
+
+def test_file_integrity_feed_links_path_to_entity_card(ipc_factory) -> None:
+    client = ipc_factory([_list_file_changes()])
+    response = client.get("/file-integrity/feed")
+    assert response.status_code == 200
+    assert "/entity/file?key=/etc/passwd" in response.text

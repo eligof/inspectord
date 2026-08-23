@@ -8,9 +8,17 @@ from pathlib import Path
 from typing import Any
 
 from inspectord.state.baseline import capture_baseline
+from inspectord.state.reconcile import current_boot_id
 from inspectord.storage.db import Database
 
 _INACTIVE = {"inactive", "failed", None}
+
+
+def _current_boot_id_or_none() -> str | None:
+    try:
+        return current_boot_id()
+    except OSError:
+        return None
 
 
 def _diff_status(key: str, current_active: str | None, baseline: dict[str, dict[str, Any]]) -> str:
@@ -134,7 +142,11 @@ def handle_list_processes(*, params: dict[str, Any], db_path: Path) -> dict[str,
         }
         for pid, comm, ppid, uid, status_, cmdline, first_seen in rows
     ]
-    return {"schema_version": "1.0.0", "processes": processes}
+    return {
+        "schema_version": "1.0.0",
+        "processes": processes,
+        "boot_id": _current_boot_id_or_none(),
+    }
 
 
 def handle_list_connections(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
@@ -184,7 +196,11 @@ def handle_list_connections(*, params: dict[str, Any], db_path: Path) -> dict[st
                 "active": active,
             }
         )
-    return {"schema_version": "1.0.0", "connections": connections}
+    return {
+        "schema_version": "1.0.0",
+        "connections": connections,
+        "boot_id": _current_boot_id_or_none(),
+    }
 
 
 def handle_list_listeners(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:

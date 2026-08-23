@@ -219,6 +219,12 @@ def test_list_connections_active_flag(tmp_path: Path) -> None:
     assert by_key["stale:b:2:tcp"] is False
 
 
+def test_list_connections_includes_boot_id(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    result = handle_list_connections(params={}, db_path=db_path)
+    assert isinstance(result["boot_id"], str) and result["boot_id"]
+
+
 def test_list_listeners_returns_rows_ordered_by_addr_port(tmp_path: Path) -> None:
     db_path = _fresh(tmp_path)
     _seed_listener(db_path, "0.0.0.0", 443)
@@ -272,6 +278,12 @@ def test_list_processes_first_seen_is_iso_string(tmp_path: Path) -> None:
     _seed_process(db_path, 100)
     result = handle_list_processes(params={}, db_path=db_path)
     assert result["processes"][0]["first_seen"] == "2026-06-16T00:00:00"
+
+
+def test_list_processes_includes_boot_id(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    result = handle_list_processes(params={}, db_path=db_path)
+    assert isinstance(result["boot_id"], str) and result["boot_id"]
 
 
 def test_list_devices_returns_rows(tmp_path: Path) -> None:

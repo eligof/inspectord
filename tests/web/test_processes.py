@@ -66,3 +66,39 @@ def test_processes_feed_daemon_unreachable(tmp_path: Path) -> None:
     response = client.get("/processes/feed")
     assert response.status_code == 200
     assert "daemon unreachable" in response.text
+
+
+def _list_processes_with_boot_id() -> Method:
+    def handler(params: dict[str, object]) -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "boot_id": "boot-1",
+            "processes": [
+                {
+                    "pid": 1234,
+                    "comm": "sshd",
+                    "ppid": 1,
+                    "uid": 0,
+                    "status": "running",
+                    "cmdline": "/usr/sbin/sshd -D",
+                    "first_seen": "2026-06-16T00:00:00",
+                },
+            ],
+        }
+
+    return Method(name="list_processes", handler=handler, mutates=False)
+
+
+def test_processes_feed_links_pid_to_entity_card(ipc_factory) -> None:
+    client = ipc_factory([_list_processes_with_boot_id()])
+    response = client.get("/processes/feed")
+    assert response.status_code == 200
+    assert "/entity/process?key=1234%40boot-1" in response.text
+
+
+def test_processes_feed_no_entity_link_without_boot_id(ipc_factory) -> None:
+    client = ipc_factory([_list_processes()])
+    response = client.get("/processes/feed")
+    assert response.status_code == 200
+    assert "/entity/process" not in response.text
+    assert "1234" in response.text

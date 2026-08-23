@@ -8,6 +8,7 @@ from typing import Any
 
 from inspectord.alerts.lifecycle import validate_transition
 from inspectord.schemas.alert import AlertStatus
+from inspectord.state.ipc_handlers import _current_boot_id_or_none
 from inspectord.storage.db import Database
 
 
@@ -51,9 +52,10 @@ def handle_get_alert(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]
     alert_id = str(params.get("alert_id", ""))
     with Database(db_path) as db:
         rows = db.query("SELECT payload_json FROM alerts WHERE alert_id = ?", [alert_id]).fetchall()
+    boot_id = _current_boot_id_or_none()
     if not rows:
-        return {"schema_version": "1.0.0", "alert": None}
-    return {"schema_version": "1.0.0", "alert": json.loads(rows[0][0])}
+        return {"schema_version": "1.0.0", "alert": None, "boot_id": boot_id}
+    return {"schema_version": "1.0.0", "alert": json.loads(rows[0][0]), "boot_id": boot_id}
 
 
 def _transition(db_path: Path, *, alert_id: str, target: AlertStatus) -> dict[str, Any]:

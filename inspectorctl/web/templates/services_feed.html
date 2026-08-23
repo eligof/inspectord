@@ -1,4 +1,4 @@
-{% from "_macros.html" import status_badge %}
+{% from "_macros.html" import entity_link, status_badge %}
 {% if error %}
 <div class="error">⚠ {{ error }}</div>
 {% elif services %}
@@ -16,7 +16,7 @@
   <tbody>
     {% for s in services %}
     <tr>
-      <td class="mono">{{ s.unit }}</td>
+      <td class="mono">{{ entity_link("service", s.unit, s.unit) }}</td>
       <td>{{ s.active_state or '' }}</td>
       <td class="mono muted">{{ s.sub_state or '' }}</td>
       <td class="mono muted">{{ s.load_state or '' }}</td>
