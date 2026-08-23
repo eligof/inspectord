@@ -249,6 +249,204 @@ def _process_header_related(
     return True, header, related
 
 
+def _executable_header_related(
+    db: Database, key: str, boot_id: str | None
+) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    rows = db.query(
+        "SELECT pid, boot_id, comm, exe_path, first_seen, last_seen "
+        "FROM process_state WHERE exe_sha256 = ? ORDER BY pid "
+        f"LIMIT {_RELATED_CAP}",
+        [key],
+    ).fetchall()
+    if not rows:
+        return False, {}, []
+    header = {
+        "sha256": key,
+        "paths": sorted({r[3] for r in rows if r[3]}),
+        "process_count": len(rows),
+        "first_seen": _iso(min(r[4] for r in rows)),
+        "last_seen": _iso(max(r[5] for r in rows)),
+    }
+    related = [
+        _related_process(pid, boot, comm or str(pid), "runs-as")
+        for pid, boot, comm, _path, _f, _l in rows
+    ]
+    return True, header, related
+
+
+def _user_header_related(
+    db: Database, key: str, boot_id: str | None
+) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    uid = _uid_for(key)
+    header: dict[str, Any] = {"username": key, "uid": uid}
+    if uid is None:
+        return False, header, []
+    rows = db.query(
+        "SELECT pid, boot_id, comm FROM process_state WHERE uid = ? "
+        f"ORDER BY pid LIMIT {_RELATED_CAP}",
+        [uid],
+    ).fetchall()
+    related = [_related_process(pid, boot, comm or str(pid), "runs") for pid, boot, comm in rows]
+    return True, header, related
+
+
+def _ip_header_related(
+    db: Database, key: str, boot_id: str | None
+) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    row = db.query(
+        "SELECT COUNT(*), MIN(first_seen), MAX(last_seen) FROM connection_state "
+        "WHERE daddr = ? OR saddr = ?",
+        [key, key],
+    ).fetchone()
+    if row is None or not row[0]:  # aggregate always yields a row; guard for mypy
+        return False, {}, []
+    count, first_seen, last_seen = row
+    header = {
+        "address": key,
+        "connection_count": count,
+        "first_seen": _iso(first_seen),
+        "last_seen": _iso(last_seen),
+    }
+    related = []
+    if boot_id is not None:
+        for pid, comm in db.query(
+            "SELECT DISTINCT pid, comm FROM connection_state "
+            "WHERE (daddr = ? OR saddr = ?) AND pid IS NOT NULL "
+            f"ORDER BY pid LIMIT {_RELATED_CAP}",
+            [key, key],
+        ).fetchall():
+            related.append(_related_process(pid, boot_id, comm or str(pid), "talked-to"))
+    return True, header, related
+
+
+def _file_header_related(
+    db: Database, key: str, boot_id: str | None
+) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    row = db.query(
+        "SELECT path, change_type, sha256, size, mode, uid, gid, first_seen, last_seen "
+        "FROM file_state WHERE path = ?",
+        [key],
+    ).fetchone()
+    if row is None:
+        return False, {}, []
+    path, change_type, sha256, size, mode, uid, gid, first_seen, last_seen = row
+    header = {
+        "path": path,
+        "change_type": change_type,
+        "sha256": sha256,
+        "size": size,
+        "mode": mode,
+        "uid": uid,
+        "gid": gid,
+        "first_seen": _iso(first_seen),
+        "last_seen": _iso(last_seen),
+    }
+    related = []
+    exe = db.query(
+        "SELECT DISTINCT exe_sha256 FROM process_state "
+        "WHERE exe_path = ? AND exe_sha256 IS NOT NULL LIMIT 1",
+        [key],
+    ).fetchone()
+    if exe:
+        related.append(
+            {"kind": "executable", "key": exe[0], "label": key, "relation": "executed-as"}
+        )
+    return True, header, related
+
+
+def _port_header_related(
+    db: Database, key: str, boot_id: str | None
+) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    addr, port, proto = _split_port_key(key)
+    row = db.query(
+        "SELECT addr, port, proto, family, pid, comm, first_seen, last_seen "
+        "FROM listener_state WHERE addr = ? AND port = ? AND proto = ?",
+        [addr, port, proto],
+    ).fetchone()
+    if row is None:
+        return False, {}, []
+    _a, _p, _pr, family, pid, comm, first_seen, last_seen = row
+    header = {
+        "addr": addr,
+        "port": port,
+        "proto": proto,
+        "family": family,
+        "pid": pid,
+        "comm": comm,
+        "first_seen": _iso(first_seen),
+        "last_seen": _iso(last_seen),
+    }
+    related = []
+    if pid is not None and boot_id is not None:
+        related.append(_related_process(pid, boot_id, comm or str(pid), "owner"))
+    return True, header, related
+
+
+def _service_header_related(
+    db: Database, key: str, boot_id: str | None
+) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    row = db.query(
+        "SELECT unit, active_state, sub_state, load_state, first_seen, last_seen "
+        "FROM service_state WHERE unit = ?",
+        [key],
+    ).fetchone()
+    if row is None:
+        return False, {}, []
+    unit, active, sub, load, first_seen, last_seen = row
+    return (
+        True,
+        {
+            "unit": unit,
+            "active_state": active,
+            "sub_state": sub,
+            "load_state": load,
+            "first_seen": _iso(first_seen),
+            "last_seen": _iso(last_seen),
+        },
+        [],
+    )
+
+
+def _device_header_related(
+    db: Database, key: str, boot_id: str | None
+) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    row = db.query(
+        "SELECT dev_key, vendor, product, serial, subsystem, devnode, status, "
+        "first_seen, last_seen FROM device_state WHERE dev_key = ?",
+        [key],
+    ).fetchone()
+    if row is None:
+        return False, {}, []
+    dev_key, vendor, product, serial, subsystem, devnode, status, first_seen, last_seen = row
+    return (
+        True,
+        {
+            "dev_key": dev_key,
+            "vendor": vendor,
+            "product": product,
+            "serial": serial,
+            "subsystem": subsystem,
+            "devnode": devnode,
+            "status": status,
+            "first_seen": _iso(first_seen),
+            "last_seen": _iso(last_seen),
+        },
+        [],
+    )
+
+
+_BUILDERS = {
+    "process": _process_header_related,
+    "executable": _executable_header_related,
+    "user": _user_header_related,
+    "ip": _ip_header_related,
+    "file": _file_header_related,
+    "port": _port_header_related,
+    "service": _service_header_related,
+    "device": _device_header_related,
+}
+
+
 def build_entity_card(
     db: Database,
     *,
@@ -269,10 +467,7 @@ def build_entity_card(
     header: dict[str, Any] = {}
     related: list[dict[str, Any]] = []
     try:
-        if kind == "process":
-            found, header, related = _process_header_related(db, key, boot_id)
-        else:  # Task 3 replaces this stub with the _BUILDERS dispatch
-            found, header, related = False, {}, []
+        found, header, related = _BUILDERS[kind](db, key, boot_id)
     # Broad excepts: a degraded section beats a failed card (spec §7).
     except Exception:
         warnings.append("header_failed")
