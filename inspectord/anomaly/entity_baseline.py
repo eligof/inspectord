@@ -48,7 +48,12 @@ def _cpu_ticks(stat_text: str) -> int:
 def _rss_bytes(status_text: str) -> int | None:
     for line in status_text.splitlines():
         if line.startswith("VmRSS:"):
-            return int(line.split()[1]) * 1024
+            try:
+                return int(line.split()[1]) * 1024
+            except (IndexError, ValueError):
+                # Malformed/truncated VmRSS line: treat as absent — a parse
+                # failure must never abort the sampling round.
+                return None
     return None
 
 
@@ -135,24 +140,27 @@ class ResourceSampler:
             st.pid = None
             st.prev_ticks = None
             return
-        try:
-            ticks = _cpu_ticks(stat_text)
-        except (IndexError, ValueError):
-            return
         samples: list[tuple[str, float]] = []
-        if (
-            pid == st.pid
-            and st.prev_ticks is not None
-            and st.prev_t is not None
-            and now > st.prev_t
-        ):
-            cpu_pct = (ticks - st.prev_ticks) / self._clk / (now - st.prev_t) * 100.0
-            if cpu_pct >= 0:
-                samples.append(("cpu_pct", cpu_pct))
-        st.pid, st.prev_ticks, st.prev_t = pid, ticks, now
         rss = _rss_bytes(status_text)
         if rss is not None:
             samples.append(("rss_bytes", float(rss)))
+        # RSS above is independent of stat parsing: a (theoretical) stat parse
+        # failure only skips the CPU sample, never the whole entity round.
+        try:
+            ticks: int | None = _cpu_ticks(stat_text)
+        except (IndexError, ValueError):
+            ticks = None
+        if ticks is not None:
+            if (
+                pid == st.pid
+                and st.prev_ticks is not None
+                and st.prev_t is not None
+                and now > st.prev_t
+            ):
+                cpu_pct = (ticks - st.prev_ticks) / self._clk / (now - st.prev_t) * 100.0
+                if cpu_pct >= 0:
+                    samples.append(("cpu_pct", cpu_pct))
+            st.pid, st.prev_ticks, st.prev_t = pid, ticks, now
         for metric, value in samples:
             sig = self._observe(st, key, unit, metric, value)
             if sig is not None:
