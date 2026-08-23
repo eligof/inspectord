@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from inspectord.entities.card import InvalidEntity, build_entity_card
+from inspectord.parsers.base import build_event
 from inspectord.storage.db import Database
+from inspectord.storage.events import insert_event
 from inspectord.storage.migrations import run_migrations
 
 NOW = datetime(2026, 8, 23, 12, 0, 0, tzinfo=UTC)
@@ -186,3 +188,57 @@ def test_user_card_unresolvable_user_not_found(tmp_path):
     with Database(db_path) as db:
         card = build_entity_card(db, kind="user", key="zz-no-such-user", now=NOW, boot_id=BOOT)
     assert card["found"] is False
+
+
+def _seed_event(db, *, ts, action="test_action", module="test", **fields):
+    ev = build_event(
+        module=module,
+        action=action,
+        category=["host"],
+        type_=["info"],
+        severity="info",
+        ts=ts,
+        **fields,
+    )
+    insert_event(db, ev, ev.model_dump_json(exclude_none=True))
+    return ev
+
+
+def test_events_section_matches_ip_and_respects_window(tmp_path):
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        _seed_event(db, ts=NOW - timedelta(hours=1), destination={"ip": "9.9.9.9", "port": 443})
+        _seed_event(
+            db,
+            ts=NOW - timedelta(hours=48),  # outside 24 h window
+            destination={"ip": "9.9.9.9", "port": 443},
+        )
+        _seed_event(db, ts=NOW - timedelta(hours=1), destination={"ip": "1.1.1.1", "port": 53})
+        card = build_entity_card(db, kind="ip", key="9.9.9.9", now=NOW, boot_id=BOOT)
+    assert len(card["events"]) == 1
+    assert card["events"][0]["payload"]["destination"]["ip"] == "9.9.9.9"
+
+
+def test_events_cap(tmp_path):
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        for i in range(110):
+            _seed_event(db, ts=NOW - timedelta(minutes=i), file={"path": "/etc/passwd"})
+        card = build_entity_card(db, kind="file", key="/etc/passwd", now=NOW, boot_id=BOOT)
+    assert len(card["events"]) == 100
+
+
+def test_alerts_section_matches_process_pid(tmp_path):
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO alerts (alert_id, rule_id, ts, severity, status, category, "
+            "dedup_key, dedup_count, first_seen_at, last_seen_at, rendered_short, "
+            "rendered_detail, payload_json) VALUES "
+            "('a1', 'proc.test', ?, 'high', 'new', 'process', 'dk1', 1, ?, ?, "
+            "'short', 'detail', ?)",
+            [NOW, NOW, NOW, '{"process": {"pid": 4242}}'],
+        )
+        card = build_entity_card(db, kind="process", key=f"4242@{BOOT}", now=NOW, boot_id=BOOT)
+    assert [a["alert_id"] for a in card["alerts"]] == ["a1"]
+    assert card["found"] is False  # no state row; history still shown
