@@ -106,6 +106,13 @@ def test_get_alert_returns_full_payload(tmp_path: Path) -> None:
     assert result["alert"]["rule"]["id"] == "lolbin.bash_dev_tcp"
 
 
+def test_get_alert_includes_boot_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "t.duckdb"
+    _seed_alert(db_path, alert_id="a1")
+    result = handle_get_alert(params={"alert_id": "a1"}, db_path=db_path)
+    assert isinstance(result["boot_id"], str) and result["boot_id"]
+
+
 def test_get_alert_missing_returns_none(tmp_path: Path) -> None:
     db_path = tmp_path / "t.duckdb"
     with Database(db_path) as db:
