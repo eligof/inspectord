@@ -33,8 +33,8 @@ dev = [
     # Pinned to a minor range: ruff promotes lint rules out of preview between
     # minors, so a floating range lets an upstream release fail CI with no
     # change on our side (it did: PLR0917, 2026-08-18).
-    "ruff>=0.15.14,<0.16",
-    "mypy>=1.20.2,<1.21",
+    "ruff>=0.15.14,<0.17",
+    "mypy>=1.20.2,<2.4",
     "types-Pillow>=10.0,<13",
     "types-PyYAML",
     "httpx>=0.27,<1",
