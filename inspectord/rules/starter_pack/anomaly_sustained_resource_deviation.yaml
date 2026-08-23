@@ -1,0 +1,23 @@
+version: 1.0.0
+id: anomaly.sustained_resource_deviation
+name: "sustained service resource deviation"
+severity: medium
+category: anomaly
+why: |
+  The anomaly detector sampled this service's main process every 30 seconds
+  and its CPU or memory stayed above 5x its own recent baseline for six
+  consecutive samples (about three minutes). A brief spike never fires this
+  rule — only a sustained shift does. A long-lived service that suddenly and
+  persistently works this much harder than its own history is the classic
+  host-side shape of a cryptominer payload, a runaway loop after compromise,
+  or data staging — main-spec §12.4 tracks it for exactly that reason, so it
+  notifies at `medium`.
+false_positives:
+  - "Legitimate load shifts: a backup or indexing job kicking in, a database compaction, a service legitimately handling a burst. If the unit is expected to work in bursts of minutes, allowlist it."
+  - "A baseline learned during an idle period (e.g. right after boot) can make the first period of normal load look like a deviation."
+detect:
+  any_of:
+    - event.module == "anomaly_detector" AND event.action == "resource_deviation"
+short: "resource anomaly: {service.name} {baseline.metric_kind} at {baseline.deviation}x baseline"
+detail: "{service.name} sustained {baseline.metric_kind} = {baseline.observed} against its own baseline mean of {baseline.mean} ({baseline.deviation}x) for the configured sustained window. Persistent deviation from a service's own history is a cryptominer/runaway-process signal."
+labels: [anomaly, resource, baseline]

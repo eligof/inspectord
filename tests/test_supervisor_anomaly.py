@@ -232,3 +232,63 @@ def test_beacon_signal_becomes_alert(tmp_path: Path) -> None:
         assert beacons[0].severity.value == "medium"
     finally:
         sup.stop(timeout=10.0)
+
+
+# --- PR4: resource-deviation signal path -------------------------------------
+
+
+def _resource_signal_event(action: str, *, service: dict | None):
+    ev = build_event(  # same builder style as _beacon_signal_event above
+        module="anomaly_detector",
+        action=action,
+        category=["anomaly"],
+        type_=["info"],
+        kind="signal",
+        severity="info",
+        service=service,
+        process={"name": "inspectord"} if service is None else None,
+        message="test resource signal",
+    )
+    ev.baseline = {
+        "metric_kind": "cpu_pct",
+        "entity_key": "svc:foo.service" if service else "self",
+        "observed": 80.0,
+        "mean": 10.0,
+        "deviation": 8.0,
+    }
+    return ev
+
+
+def test_resource_deviation_signal_becomes_alert(tmp_path: Path) -> None:
+    cfg = _quiet_cfg(tmp_path)
+    sup = Supervisor(cfg)
+    alerts = []
+    sup.attach_alert_listener(alerts.append)
+    sup.start()
+    try:
+        sup._inject_for_test(
+            _resource_signal_event("resource_deviation", service={"name": "foo.service"})
+        )
+        hits = [a for a in alerts if a.rule.id == "anomaly.sustained_resource_deviation"]
+        assert len(hits) == 1
+        assert hits[0].severity.value == "medium"
+        assert "foo.service" in hits[0].rendered.short
+    finally:
+        sup.stop(timeout=10.0)
+
+
+def test_monitor_health_signal_uses_dedicated_rule(tmp_path: Path) -> None:
+    cfg = _quiet_cfg(tmp_path)
+    sup = Supervisor(cfg)
+    alerts = []
+    sup.attach_alert_listener(alerts.append)
+    sup.start()
+    try:
+        sup._inject_for_test(_resource_signal_event("monitor_health_anomaly", service=None))
+        hits = [a for a in alerts if a.rule.id == "monitor_health_anomaly"]
+        assert len(hits) == 1
+        assert hits[0].severity.value == "medium"
+        # separate rule class (spec §6): never under anomaly.*
+        assert not hits[0].rule.id.startswith("anomaly.")
+    finally:
+        sup.stop(timeout=10.0)
