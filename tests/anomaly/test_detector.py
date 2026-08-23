@@ -433,11 +433,11 @@ def _resource_det(tmp_path: Path):
 class _StubSampler:
     """Records the unit list it was asked to sample; returns canned signals."""
 
-    def __init__(self, signals):
+    def __init__(self, signals: list[ResourceSignal]) -> None:
         self.signals = signals
         self.calls: list[list[str]] = []
 
-    def sample(self, units, *, now):
+    def sample(self, units: list[str], *, now: float) -> list[ResourceSignal]:
         self.calls.append(list(units))
         return self.signals
 
@@ -466,7 +466,7 @@ def _self_signal() -> ResourceSignal:
     )
 
 
-def test_sample_resources_emits_service_signal(tmp_path):
+def test_sample_resources_emits_service_signal(tmp_path: Path) -> None:
     det, emitted = _resource_det(tmp_path)
     det._sampler = _StubSampler([_svc_signal()])
     det._sample_resources(now=100.0)
@@ -481,7 +481,7 @@ def test_sample_resources_emits_service_signal(tmp_path):
     assert ev.baseline["entity_key"] == "svc:foo.service"
 
 
-def test_sample_resources_self_uses_monitor_health_action(tmp_path):
+def test_sample_resources_self_uses_monitor_health_action(tmp_path: Path) -> None:
     det, emitted = _resource_det(tmp_path)
     det._sampler = _StubSampler([_self_signal()])
     det._sample_resources(now=100.0)
@@ -490,7 +490,7 @@ def test_sample_resources_self_uses_monitor_health_action(tmp_path):
     assert emitted[0].service is None
 
 
-def test_sample_resources_lists_active_services(tmp_path):
+def test_sample_resources_lists_active_services(tmp_path: Path) -> None:
     det, _emitted = _resource_det(tmp_path)
     det._db.execute(
         "INSERT INTO service_state (unit, active_state, first_seen, last_seen) "
@@ -503,11 +503,32 @@ def test_sample_resources_lists_active_services(tmp_path):
     assert stub.calls == [["a.service"]]
 
 
-def test_sample_resources_survives_sampler_error(tmp_path):
+def test_sample_resources_survives_sampler_error(tmp_path: Path) -> None:
     class _Boom:
-        def sample(self, units, *, now):
+        def sample(self, units: list[str], *, now: float) -> list[ResourceSignal]:
             raise RuntimeError("boom")
 
     det, _emitted = _resource_det(tmp_path)
     det._sampler = _Boom()
     det._sample_resources(now=100.0)  # must not raise
+
+
+def test_run_loop_fires_both_cadences(tmp_path: Path) -> None:
+    """The dual-deadline loop must drive BOTH cadences off one thread: the
+    resource sampler on resource_tick_s and the main tick on tick_s."""
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    tracker = _CountingTracker()
+    cfg = AnomalyConfig(tick_s=0.15, resource_tick_s=0.05)
+    det = AnomalyDetector(db=db, tracker=tracker, config=cfg)
+    stub = _StubSampler([])
+    det._sampler = stub  # type: ignore[assignment]
+    det.start()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and (len(stub.calls) < 3 or tracker.flush_calls < 2):
+        time.sleep(0.02)
+    det.stop(timeout=2.0)
+    assert len(stub.calls) >= 3, "resource cadence never fired off the run loop"
+    assert tracker.flush_calls >= 2, "main tick cadence never fired off the run loop"
+    db.close()
