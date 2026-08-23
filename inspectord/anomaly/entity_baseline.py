@@ -203,5 +203,7 @@ class ResourceSampler:
         # or fires, pushes resume so adaptation absorbs a persisting tail.
         if not 0 < st.streaks[metric] < self._cfg.sustained_ticks:
             # z_threshold=inf: reuse the ring machinery, never the z-path (spec §6).
+            # The 24h/7d rings accumulate unused — only the 1h ring is ever read;
+            # the negligible waste beats maintaining a parallel ring type.
             ws.push_minute(value, min_samples=self._cfg.min_samples, z_threshold=math.inf)
         return fired

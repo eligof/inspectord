@@ -182,3 +182,28 @@ def test_unit_list_capped(roots) -> None:
     s.sample(["u0.service", "u1.service", "u2.service"], now=0.0)
     assert s.debug_ring("svc:u2.service", "rss_bytes") is None  # beyond cap: never sampled
     assert s.debug_ring("svc:u0.service", "rss_bytes") is not None
+
+
+def test_malformed_vmrss_skipped_without_error(roots) -> None:
+    proc, _cgroup = roots
+    d = proc / "7"
+    d.mkdir(parents=True)
+    (d / "stat").write_text("7 (fake) S 1 1 1 0 -1 0 0 0 0 0 100 0 0 0\n")
+    (d / "status").write_text("Name:\tfake\nVmRSS:\t\n")  # truncated: no value field
+    s = _sampler(roots, self_pid=7)
+    out = s.sample([], now=0.0)  # must not raise
+    assert out == []
+    assert len(s.debug_ring("self", "rss_bytes") or []) == 0
+
+
+def test_malformed_stat_skips_cpu_but_keeps_rss(roots) -> None:
+    proc, _cgroup = roots
+    d = proc / "7"
+    d.mkdir(parents=True)
+    (d / "stat").write_text("7 (fake) S 1 1\n")  # too few fields after ')'
+    (d / "status").write_text("Name:\tfake\nVmRSS:\t100 kB\n")
+    s = _sampler(roots, self_pid=7)
+    s.sample([], now=0.0)
+    s.sample([], now=30.0)
+    assert len(s.debug_ring("self", "rss_bytes") or []) == 2  # RSS still recorded
+    assert len(s.debug_ring("self", "cpu_pct") or []) == 0
