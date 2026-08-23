@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from inspectord.anomaly.detector import AnomalyDetector
+from inspectord.anomaly.entity_baseline import ResourceSignal
 from inspectord.anomaly.first_sighting import FirstSightingTracker
 from inspectord.config import AnomalyConfig
 from inspectord.parsers.base import build_event
@@ -416,3 +417,97 @@ def test_connection_without_destination_is_ignored_by_beacon(tmp_path: Path) -> 
     det._tick(now=T0 + timedelta(minutes=20))  # must not raise
     assert [s for s in emitted if s.action == "beacon_signature"] == []
     db.close()
+
+
+# --- PR4: resource sampling path --------------------------------------------
+
+
+def _resource_det(tmp_path: Path):
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, _router, emitted = _stat_detector(db)
+    return det, emitted
+
+
+class _StubSampler:
+    """Records the unit list it was asked to sample; returns canned signals."""
+
+    def __init__(self, signals):
+        self.signals = signals
+        self.calls: list[list[str]] = []
+
+    def sample(self, units, *, now):
+        self.calls.append(list(units))
+        return self.signals
+
+
+def _svc_signal() -> ResourceSignal:
+    return ResourceSignal(
+        entity_key="svc:foo.service",
+        unit="foo.service",
+        metric_kind="cpu_pct",
+        observed=80.0,
+        mean=10.0,
+        factor=8.0,
+        is_self=False,
+    )
+
+
+def _self_signal() -> ResourceSignal:
+    return ResourceSignal(
+        entity_key="self",
+        unit=None,
+        metric_kind="rss_bytes",
+        observed=800.0 * 1024 * 1024,
+        mean=100.0 * 1024 * 1024,
+        factor=8.0,
+        is_self=True,
+    )
+
+
+def test_sample_resources_emits_service_signal(tmp_path):
+    det, emitted = _resource_det(tmp_path)
+    det._sampler = _StubSampler([_svc_signal()])
+    det._sample_resources(now=100.0)
+    assert len(emitted) == 1
+    ev = emitted[0]
+    assert ev.kind.value == "signal"
+    assert ev.module == "anomaly_detector"
+    assert ev.action == "resource_deviation"
+    assert ev.service == {"name": "foo.service"}
+    assert ev.baseline["metric_kind"] == "cpu_pct"
+    assert ev.baseline["deviation"] == 8.0
+    assert ev.baseline["entity_key"] == "svc:foo.service"
+
+
+def test_sample_resources_self_uses_monitor_health_action(tmp_path):
+    det, emitted = _resource_det(tmp_path)
+    det._sampler = _StubSampler([_self_signal()])
+    det._sample_resources(now=100.0)
+    assert len(emitted) == 1
+    assert emitted[0].action == "monitor_health_anomaly"
+    assert emitted[0].service is None
+
+
+def test_sample_resources_lists_active_services(tmp_path):
+    det, _emitted = _resource_det(tmp_path)
+    det._db.execute(
+        "INSERT INTO service_state (unit, active_state, first_seen, last_seen) "
+        "VALUES ('a.service', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+        "('b.service', 'inactive', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+    stub = _StubSampler([])
+    det._sampler = stub
+    det._sample_resources(now=100.0)
+    assert stub.calls == [["a.service"]]
+
+
+def test_sample_resources_survives_sampler_error(tmp_path):
+    class _Boom:
+        def sample(self, units, *, now):
+            raise RuntimeError("boom")
+
+    det, _emitted = _resource_det(tmp_path)
+    det._sampler = _Boom()
+    det._sample_resources(now=100.0)  # must not raise
