@@ -17,7 +17,10 @@ import pwd
 from datetime import datetime, timedelta
 from typing import Any
 
+from inspectord.log import get
 from inspectord.storage.db import Database
+
+log = get(__name__)
 
 KINDS = frozenset({"process", "executable", "user", "ip", "file", "port", "service", "device"})
 _MAX_KEY_LEN = 512
@@ -25,6 +28,7 @@ _EVENTS_CAP = 100
 _ALERTS_CAP = 50
 _RELATED_CAP = 50
 _CHILD_CAP = 20
+_LISTENER_CAP = 20
 _IP_CAP = 20
 
 
@@ -45,7 +49,7 @@ def _validate(kind: str, key: str) -> None:
 
 def _split_process_key(key: str) -> tuple[int, str]:
     pid_s, sep, boot = key.partition("@")
-    if not sep or not pid_s.isdigit() or not boot:
+    if not sep or not (pid_s.isascii() and pid_s.isdigit()) or not boot:
         raise InvalidEntity("invalid_key")
     return int(pid_s), boot
 
@@ -55,7 +59,7 @@ def _split_port_key(key: str) -> tuple[str, int, str]:
     if not sep or not proto:
         raise InvalidEntity("invalid_key")
     addr, sep2, port_s = addr_port.rpartition(":")
-    if not sep2 or not addr or not port_s.isdigit():
+    if not sep2 or not addr or not (port_s.isascii() and port_s.isdigit()):
         raise InvalidEntity("invalid_key")
     return addr, int(port_s), proto
 
@@ -118,9 +122,9 @@ def _events_section(
     frag, params = pred
     rows = db.query(
         "SELECT event_id, ts, module, action, severity, payload_json "
-        f"FROM events_enriched WHERE ts >= ? AND {frag} "
+        f"FROM events_enriched WHERE ts >= ? AND ts <= ? AND {frag} "
         f"ORDER BY ts DESC LIMIT {_EVENTS_CAP}",
-        [now - timedelta(hours=window_h), *params],
+        [now - timedelta(hours=window_h), now, *params],
     ).fetchall()
     out = []
     for event_id, ts, module, action, severity, payload_json in rows:
@@ -241,7 +245,7 @@ def _process_header_related(
             related.append({"kind": "ip", "key": daddr, "label": daddr, "relation": "outbound"})
         for addr, port, proto in db.query(
             "SELECT addr, port, proto FROM listener_state WHERE pid = ? "
-            f"ORDER BY port LIMIT {_CHILD_CAP}",
+            f"ORDER BY port LIMIT {_LISTENER_CAP}",
             [pid],
         ).fetchall():
             k = f"{addr}:{port}/{proto}"
@@ -252,24 +256,34 @@ def _process_header_related(
 def _executable_header_related(
     db: Database, key: str, boot_id: str | None
 ) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
-    rows = db.query(
-        "SELECT pid, boot_id, comm, exe_path, first_seen, last_seen "
-        "FROM process_state WHERE exe_sha256 = ? ORDER BY pid "
-        f"LIMIT {_RELATED_CAP}",
+    row = db.query(
+        "SELECT COUNT(*), MIN(first_seen), MAX(last_seen) FROM process_state WHERE exe_sha256 = ?",
         [key],
-    ).fetchall()
-    if not rows:
+    ).fetchone()
+    if row is None or not row[0]:  # aggregate always yields a row; guard for mypy
         return False, {}, []
+    count, first_seen, last_seen = row
     header = {
         "sha256": key,
-        "paths": sorted({r[3] for r in rows if r[3]}),
-        "process_count": len(rows),
-        "first_seen": _iso(min(r[4] for r in rows)),
-        "last_seen": _iso(max(r[5] for r in rows)),
+        "paths": [
+            path
+            for (path,) in db.query(
+                "SELECT DISTINCT exe_path FROM process_state "
+                "WHERE exe_sha256 = ? AND exe_path IS NOT NULL ORDER BY exe_path",
+                [key],
+            ).fetchall()
+        ],
+        "process_count": count,
+        "first_seen": _iso(first_seen),
+        "last_seen": _iso(last_seen),
     }
     related = [
         _related_process(pid, boot, comm or str(pid), "runs-as")
-        for pid, boot, comm, _path, _f, _l in rows
+        for pid, boot, comm in db.query(
+            "SELECT pid, boot_id, comm FROM process_state WHERE exe_sha256 = ? "
+            f"ORDER BY pid LIMIT {_RELATED_CAP}",
+            [key],
+        ).fetchall()
     ]
     return True, header, related
 
@@ -312,9 +326,9 @@ def _ip_header_related(
     related = []
     if boot_id is not None:
         for pid, comm in db.query(
-            "SELECT DISTINCT pid, comm FROM connection_state "
+            "SELECT pid, max(comm) AS comm FROM connection_state "
             "WHERE daddr = ? AND pid IS NOT NULL "
-            f"ORDER BY pid LIMIT {_RELATED_CAP}",
+            f"GROUP BY pid ORDER BY pid LIMIT {_RELATED_CAP}",
             [key],
         ).fetchall():
             related.append(_related_process(pid, boot_id, comm or str(pid), "talked-to"))
@@ -345,8 +359,9 @@ def _file_header_related(
     }
     related = []
     exe = db.query(
-        "SELECT DISTINCT exe_sha256 FROM process_state "
-        "WHERE exe_path = ? AND exe_sha256 IS NOT NULL LIMIT 1",
+        "SELECT exe_sha256 FROM process_state "
+        "WHERE exe_path = ? AND exe_sha256 IS NOT NULL "
+        "ORDER BY last_seen DESC LIMIT 1",
         [key],
     ).fetchone()
     if exe:
@@ -458,6 +473,8 @@ def build_entity_card(
     boot_id: str | None,
     window_h: int = 24,
 ) -> dict[str, Any]:
+    """Build one entity card; ``now`` must be tz-aware (naive local datetime
+    silently shifts the event window)."""
     _validate(kind, key)
     # Key-shape errors must raise unguarded, before the degraded-section trys.
     if kind == "process":
@@ -472,14 +489,17 @@ def build_entity_card(
         found, header, related = _BUILDERS[kind](db, key, boot_id)
     # Broad excepts: a degraded section beats a failed card (spec §7).
     except Exception:
+        log.warning("entity card %s section failed for %s:%s", "header", kind, key, exc_info=True)
         warnings.append("header_failed")
     try:
         events = _events_section(db, kind, key, now, window_h)
     except Exception:
+        log.warning("entity card %s section failed for %s:%s", "events", kind, key, exc_info=True)
         events, warnings = [], [*warnings, "events_failed"]
     try:
         alerts = _alerts_section(db, kind, key)
     except Exception:
+        log.warning("entity card %s section failed for %s:%s", "alerts", kind, key, exc_info=True)
         alerts, warnings = [], [*warnings, "alerts_failed"]
     if kind == "user" and not found:
         found = bool(events or alerts)

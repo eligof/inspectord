@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import pwd
 from datetime import UTC, datetime, timedelta
@@ -47,13 +48,22 @@ def _seed_process(
     )
 
 
+def _seed_conn(db, *, pid, comm="curl", saddr="10.0.0.1", daddr="9.9.9.9", dport=443):
+    db.execute(
+        "INSERT INTO connection_state (conn_key, pid, comm, saddr, sport, daddr, "
+        "dport, proto, family, status, first_seen, last_seen, last_event_id) VALUES "
+        "(?, ?, ?, ?, 5555, ?, ?, 'tcp', 'inet', 'open', ?, ?, 'e1')",
+        [f"{pid}:{daddr}:{dport}:tcp", pid, comm, saddr, daddr, dport, NOW, NOW],
+    )
+
+
 def test_unknown_kind_raises(tmp_path):
     db_path = _fresh(tmp_path)
     with Database(db_path) as db, pytest.raises(InvalidEntity, match="invalid_kind"):
         build_entity_card(db, kind="nope", key="x", now=NOW, boot_id=BOOT)
 
 
-@pytest.mark.parametrize("key", ["", "a" * 513, "x\x00y", "x\ny", "12@"])
+@pytest.mark.parametrize("key", ["", "a" * 513, "x\x00y", "x\ny", "12@", "\u00b2@boot-1"])
 def test_bad_process_keys_raise(tmp_path, key):
     db_path = _fresh(tmp_path)
     with Database(db_path) as db, pytest.raises(InvalidEntity):
@@ -68,13 +78,7 @@ def test_process_card_header_and_related(tmp_path):
             db, 200, ppid=100, comm="target", exe_sha="ab" * 32, exe_path="/usr/bin/target"
         )
         _seed_process(db, 300, ppid=200, comm="child")
-        db.execute(
-            "INSERT INTO connection_state (conn_key, pid, comm, saddr, sport, daddr, "
-            "dport, proto, family, status, first_seen, last_seen, last_event_id) VALUES "
-            "('200:9.9.9.9:443:tcp', 200, 'target', '10.0.0.1', 5555, '9.9.9.9', 443, "
-            "'tcp', 'inet', 'open', ?, ?, 'e2')",
-            [NOW, NOW],
-        )
+        _seed_conn(db, pid=200, comm="target")
         card = build_entity_card(db, kind="process", key=f"200@{BOOT}", now=NOW, boot_id=BOOT)
     assert card["found"] is True
     assert card["header"]["comm"] == "target"
@@ -110,16 +114,23 @@ def test_executable_card(tmp_path):
     assert keys == {f"200@{BOOT}", f"201@{BOOT}"}
 
 
+def test_executable_stats_exact_past_related_cap(tmp_path):
+    # Stats come from an aggregate query, not the LIMITed related-row set.
+    db_path = _fresh(tmp_path)
+    sha = "ef" * 32
+    with Database(db_path) as db:
+        for i in range(55):
+            _seed_process(db, 2000 + i, comm=f"p{i}", exe_sha=sha, exe_path="/usr/bin/p")
+        card = build_entity_card(db, kind="executable", key=sha, now=NOW, boot_id=BOOT)
+    assert card["header"]["process_count"] == 55
+    assert card["header"]["paths"] == ["/usr/bin/p"]
+    assert len(card["related"]) == 50
+
+
 def test_ip_card(tmp_path):
     db_path = _fresh(tmp_path)
     with Database(db_path) as db:
-        db.execute(
-            "INSERT INTO connection_state (conn_key, pid, comm, saddr, sport, daddr, "
-            "dport, proto, family, status, first_seen, last_seen, last_event_id) VALUES "
-            "('7:9.9.9.9:443:tcp', 7, 'curl', '10.0.0.1', 5555, '9.9.9.9', 443, 'tcp', "
-            "'inet', 'open', ?, ?, 'e1')",
-            [NOW, NOW],
-        )
+        _seed_conn(db, pid=7)
         card = build_entity_card(db, kind="ip", key="9.9.9.9", now=NOW, boot_id=BOOT)
     assert card["found"] is True
     assert card["header"]["connection_count"] == 1
@@ -260,7 +271,7 @@ def _seed_alert(db, alert_id, payload_json):
     )
 
 
-def test_malformed_event_payload_degrades_events_section(tmp_path):
+def test_malformed_event_payload_degrades_events_section(tmp_path, caplog):
     # One malformed payload_json row poisons the section query; the card
     # degrades to an empty section plus a warning instead of failing (spec S7).
     db_path = _fresh(tmp_path)
@@ -275,6 +286,10 @@ def test_malformed_event_payload_degrades_events_section(tmp_path):
         card = build_entity_card(db, kind="file", key="/etc/passwd", now=NOW, boot_id=BOOT)
     assert card["events"] == []
     assert "events_failed" in card["warnings"]
+    assert any(
+        r.levelno == logging.WARNING and "entity card events section failed" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_malformed_alert_payload_degrades_alerts_section(tmp_path):
@@ -318,13 +333,7 @@ def test_ip_card_saddr_only_header_found_related_empty(tmp_path):
     # Spec S4: saddr counts for the exists-check, but related pids match daddr only.
     db_path = _fresh(tmp_path)
     with Database(db_path) as db:
-        db.execute(
-            "INSERT INTO connection_state (conn_key, pid, comm, saddr, sport, daddr, "
-            "dport, proto, family, status, first_seen, last_seen, last_event_id) VALUES "
-            "('7:9.9.9.9:443:tcp', 7, 'curl', '4.4.4.4', 5555, '9.9.9.9', 443, 'tcp', "
-            "'inet', 'open', ?, ?, 'e1')",
-            [NOW, NOW],
-        )
+        _seed_conn(db, pid=7, saddr="4.4.4.4")
         card = build_entity_card(db, kind="ip", key="4.4.4.4", now=NOW, boot_id=BOOT)
     assert card["found"] is True
     assert card["related"] == []
@@ -350,7 +359,9 @@ def test_children_cap(tmp_path):
     assert len(children) == 20
 
 
-@pytest.mark.parametrize("key", ["noproto", "0.0.0.0:x/tcp", ":80/tcp", "/tcp"])
+@pytest.mark.parametrize(
+    "key", ["noproto", "0.0.0.0:x/tcp", ":80/tcp", "/tcp", "0.0.0.0:\u00b2/tcp"]
+)
 def test_bad_port_keys_raise(tmp_path, key):
     db_path = _fresh(tmp_path)
     with Database(db_path) as db, pytest.raises(InvalidEntity):
