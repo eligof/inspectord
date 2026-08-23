@@ -257,15 +257,19 @@ def _project_process(event: Event, db: Database, boot_id: str) -> None:
     # process_start is the only other action these two modules emit, so the
     # fallthrough handles it: upsert a running row, preserving first_seen on conflict.
     ppid = (process.get("parent") or {}).get("pid")
+    exe_path = process.get("executable")
+    exe_sha256 = (process.get("hash") or {}).get("sha256")
     db.execute(
         """
         INSERT INTO process_state
-            (pid, boot_id, ppid, comm, uid, cmdline, status,
+            (pid, boot_id, ppid, comm, exe_path, exe_sha256, uid, cmdline, status,
              first_seen, last_seen, last_event_id)
-        VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
         ON CONFLICT (pid, boot_id) DO UPDATE SET
             ppid          = excluded.ppid,
             comm          = excluded.comm,
+            exe_path      = COALESCE(excluded.exe_path, process_state.exe_path),
+            exe_sha256    = COALESCE(excluded.exe_sha256, process_state.exe_sha256),
             uid           = excluded.uid,
             cmdline       = excluded.cmdline,
             last_seen     = excluded.last_seen,
@@ -277,6 +281,8 @@ def _project_process(event: Event, db: Database, boot_id: str) -> None:
             boot_id,
             ppid,
             comm,
+            exe_path,
+            exe_sha256,
             _parse_uid(event.user),
             process.get("command_line"),
             event.ts,
