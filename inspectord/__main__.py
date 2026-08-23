@@ -42,6 +42,7 @@ from inspectord.dependencies.ipc_handlers import (
 )
 from inspectord.dependencies.manifest import load_packaged_manifests
 from inspectord.dependencies.pacman_backend import PacmanBackend
+from inspectord.entities.ipc_handlers import handle_get_entity_card
 from inspectord.hunt.ipc_handlers import (
     handle_delete_hunt_query,
     handle_get_hunt_query,
@@ -256,6 +257,13 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
                 params=params, db_path=cfg.storage.db_path
             ),
             mutates=True,
+        ),
+        Method(
+            name="get_entity_card",
+            handler=lambda params: handle_get_entity_card(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
         ),
         Method(
             name="open_case",

@@ -89,6 +89,8 @@ def _process_event(
     cmdline: str | None = "bash -i",
     uid: str | None = "1000",
     exit_code: int | None = None,
+    executable: str | None = None,
+    sha256: str | None = None,
     ts: datetime = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC),
 ) -> Event:
     process: dict[str, object] = {}
@@ -98,6 +100,10 @@ def _process_event(
         process["name"] = name
     if cmdline is not None:
         process["command_line"] = cmdline
+    if executable is not None:
+        process["executable"] = executable
+    if sha256 is not None:
+        process["hash"] = {"sha256": sha256}
     if ppid is not None:
         process["parent"] = {"pid": ppid}
     if exit_code is not None:
@@ -593,6 +599,44 @@ def test_process_start_missing_uid_is_null(tmp_path: Path) -> None:
     project(_process_event(event_id="p1", uid=None), db, boot_id="b1")
     rows = db.query("SELECT uid FROM process_state WHERE pid=1234 AND boot_id='b1'").fetchall()
     assert rows == [(None,)]
+    db.close()
+
+
+def test_process_start_writes_exe_fields(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(
+        _process_event(
+            event_id="p1",
+            pid=4242,
+            name="nc",
+            cmdline="nc -l 4444",
+            executable="/usr/bin/nc",
+            sha256="ab" * 32,
+        ),
+        db,
+        boot_id="b1",
+    )
+    rows = db.query(
+        "SELECT exe_path, exe_sha256 FROM process_state WHERE pid=4242 AND boot_id='b1'"
+    ).fetchall()
+    assert rows == [("/usr/bin/nc", "ab" * 32)]
+    db.close()
+
+
+def test_process_start_without_hash_preserves_existing_exe_fields(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project(
+        _process_event(event_id="p1", pid=7, name="x", executable="/bin/x", sha256="cd" * 32),
+        db,
+        boot_id="b1",
+    )
+    # A later start event with no executable/hash (e.g. a short-lived exec the
+    # enricher could not hash) must not wipe the previously captured fields.
+    project(_process_event(event_id="p2", pid=7, name="x"), db, boot_id="b1")
+    rows = db.query(
+        "SELECT exe_path, exe_sha256 FROM process_state WHERE pid=7 AND boot_id='b1'"
+    ).fetchall()
+    assert rows == [("/bin/x", "cd" * 32)]
     db.close()
 
 
