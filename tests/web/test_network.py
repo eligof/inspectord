@@ -107,3 +107,31 @@ def test_network_feed_daemon_unreachable(tmp_path: Path) -> None:
     response = client.get("/network/feed")
     assert response.status_code == 200
     assert "daemon unreachable" in response.text
+
+
+def _list_connections_with_boot_id() -> Method:
+    def handler(params: dict[str, object]) -> dict[str, object]:
+        base = _list_connections().handler(params)
+        return {**base, "boot_id": "boot-1"}
+
+    return Method(name="list_connections", handler=handler, mutates=False)
+
+
+def test_network_feed_links_entities(ipc_factory) -> None:
+    client = ipc_factory([_list_connections_with_boot_id(), _list_listeners()])
+    response = client.get("/network/feed")
+    assert response.status_code == 200
+    # Destination IP links to the ip card.
+    assert "/entity/ip?key=1.2.3.4" in response.text
+    # Connection pid links to the process card (boot_id present).
+    assert "/entity/process?key=1234%40boot-1" in response.text
+    # Listener port links to the port card.
+    assert "/entity/port?key=0.0.0.0%3A22/tcp" in response.text
+
+
+def test_network_feed_no_process_link_without_boot_id(ipc_factory) -> None:
+    client = ipc_factory([_list_connections(), _list_listeners()])
+    response = client.get("/network/feed")
+    assert response.status_code == 200
+    assert "/entity/process" not in response.text
+    assert "/entity/ip?key=1.2.3.4" in response.text

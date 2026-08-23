@@ -37,6 +37,7 @@ def network_feed(
     socket_path = request.app.state.socket_path
     connections: list[dict[str, Any]] = []
     listeners: list[dict[str, Any]] = []
+    boot_id: str | None = None
     error: str | None = None
     try:
         conn_result = call(socket_path, "list_connections", {"limit": limit})
@@ -45,6 +46,7 @@ def network_feed(
         error = f"daemon unreachable: {exc}"
     else:
         connections = conn_result.get("connections", [])
+        boot_id = conn_result.get("boot_id")
         listeners = listener_result.get("listeners", [])
     return templates.TemplateResponse(
         request,
@@ -53,6 +55,7 @@ def network_feed(
             "request": request,
             "connections": connections,
             "listeners": listeners,
+            "boot_id": boot_id,
             "error": error,
         },
     )

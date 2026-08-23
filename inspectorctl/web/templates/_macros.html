@@ -9,3 +9,7 @@
 {% macro nav_link(href, label, current) -%}
 <a href="{{ href }}" class="{{ 'active' if current == href else '' }}">{{ label }}</a>
 {%- endmacro %}
+
+{% macro entity_link(kind, key, label) -%}
+<a class="mono" href="/entity/{{ kind }}?key={{ key | urlencode }}">{{ label }}</a>
+{%- endmacro %}

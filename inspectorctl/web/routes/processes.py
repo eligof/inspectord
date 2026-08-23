@@ -36,6 +36,7 @@ def processes_feed(
     templates: Jinja2Templates = request.app.state.templates
     socket_path = request.app.state.socket_path
     processes: list[dict[str, Any]] = []
+    boot_id: str | None = None
     error: str | None = None
     try:
         result = call(socket_path, "list_processes", {"limit": limit})
@@ -43,8 +44,9 @@ def processes_feed(
         error = f"daemon unreachable: {exc}"
     else:
         processes = result.get("processes", [])
+        boot_id = result.get("boot_id")
     return templates.TemplateResponse(
         request,
         "processes_feed.html",
-        {"request": request, "processes": processes, "error": error},
+        {"request": request, "processes": processes, "boot_id": boot_id, "error": error},
     )

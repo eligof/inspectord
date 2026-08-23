@@ -79,6 +79,7 @@ def alert_detail(request: Request, alert_id: str) -> _TemplateResponse:
             "title": f"inspectord — Alert {alert_id[:8]}",
             "current_path": "/alerts",
             "alert": alert,
+            "boot_id": result.get("boot_id"),
             "open_cases": open_cases,
         },
     )

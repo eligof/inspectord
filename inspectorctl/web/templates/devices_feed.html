@@ -1,3 +1,4 @@
+{% from "_macros.html" import entity_link %}
 {% if error %}
 <div class="error">⚠ {{ error }}</div>
 {% elif devices %}
@@ -20,7 +21,7 @@
       <td>{{ d.product or '' }}</td>
       <td class="mono muted">{{ d.serial or '' }}</td>
       <td class="mono muted">{{ d.subsystem or '' }}</td>
-      <td class="mono">{{ d.devnode or '' }}</td>
+      <td class="mono">{{ entity_link("device", d.dev_key, d.devnode or d.dev_key) }}</td>
       <td>{{ d.status or '' }}</td>
       <td class="mono muted">{{ d.first_seen or '' }}</td>
     </tr>

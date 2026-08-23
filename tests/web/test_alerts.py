@@ -247,3 +247,35 @@ def test_alert_detail_renders_case_actions(ipc_factory) -> None:  # type: ignore
     assert "/alerts/a1/attach-case" in response.text
     assert 'value="c1"' in response.text
     assert "sshd brute force" in response.text
+
+
+def _get_alert_with_boot_id() -> Method:
+    def handler(_params: dict[str, object]) -> dict[str, object]:
+        base = _get_alert().handler(_params)
+        alert = dict(base["alert"])
+        alert["entities"] = [
+            {"kind": "process", "key": "pid:9999"},
+            {"kind": "ip", "key": "1.2.3.4"},
+            {"kind": "event", "key": "e1"},
+        ]
+        return {**base, "alert": alert, "boot_id": "boot-1"}
+
+    return Method(name="get_alert", handler=handler, mutates=False)
+
+
+def test_alert_detail_links_entities(ipc_factory) -> None:
+    client = ipc_factory([_get_alert_with_boot_id()])
+    response = client.get("/alerts/01900000-0000-7000-8000-000000000001")
+    assert response.status_code == 200
+    assert "/entity/process?key=9999%40boot-1" in response.text
+    assert "/entity/ip?key=1.2.3.4" in response.text
+    # An "event" entity has no card kind, so it stays plain text.
+    assert "/entity/event" not in response.text
+
+
+def test_alert_detail_process_entity_plain_without_boot_id(ipc_factory) -> None:
+    client = ipc_factory([_get_alert()])
+    response = client.get("/alerts/01900000-0000-7000-8000-000000000001")
+    assert response.status_code == 200
+    assert "/entity/process" not in response.text
+    assert "pid:9999" in response.text

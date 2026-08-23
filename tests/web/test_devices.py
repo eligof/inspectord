@@ -68,3 +68,10 @@ def test_devices_feed_daemon_unreachable(tmp_path: Path) -> None:
     response = client.get("/devices/feed")
     assert response.status_code == 200
     assert "daemon unreachable" in response.text
+
+
+def test_devices_feed_links_devnode_to_entity_card(ipc_factory) -> None:
+    client = ipc_factory([_list_devices()])
+    response = client.get("/devices/feed")
+    assert response.status_code == 200
+    assert "/entity/device?key=usb%3A0x1234%3A0x5678%3AABC123" in response.text

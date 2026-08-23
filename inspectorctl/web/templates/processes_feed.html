@@ -1,3 +1,4 @@
+{% from "_macros.html" import entity_link %}
 {% if error %}
 <div class="error">⚠ {{ error }}</div>
 {% elif processes %}
@@ -16,7 +17,7 @@
   <tbody>
     {% for p in processes %}
     <tr>
-      <td class="mono">{{ p.pid }}</td>
+      <td class="mono">{% if boot_id %}{{ entity_link("process", p.pid ~ "@" ~ boot_id, p.pid) }}{% else %}{{ p.pid }}{% endif %}</td>
       <td>{{ p.comm or '' }}</td>
       <td class="mono">{{ p.ppid }}</td>
       <td class="mono">{{ p.uid }}</td>

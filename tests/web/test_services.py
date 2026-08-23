@@ -85,3 +85,10 @@ def test_capture_baseline_button_posts(ipc_factory) -> None:
     )
     assert response.status_code == 303
     assert any(c.get("kind") == "service" for c in calls)
+
+
+def test_services_feed_links_unit_to_entity_card(ipc_factory) -> None:
+    client = ipc_factory([_list_services()])
+    response = client.get("/services/feed")
+    assert response.status_code == 200
+    assert "/entity/service?key=sshd.service" in response.text
