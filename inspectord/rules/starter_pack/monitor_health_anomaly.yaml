@@ -1,0 +1,24 @@
+version: 1.0.0
+id: monitor_health_anomaly
+name: "inspectord self-anomaly"
+severity: medium
+category: process
+why: |
+  inspectord tracks its own CPU and memory as a baselined entity (main-spec
+  §20.6) and this fired because the monitor itself has been running above 5x
+  its own baseline for several consecutive samples. That catches three things
+  worth knowing about: a leak or runaway loop in inspectord itself (a
+  monitoring bug you want surfaced, not hidden), a misbehaving collector
+  flooding the pipeline, or an attacker trying to exhaust or degrade the
+  monitor to blind it. It uses its own dedicated rule id — deliberately
+  outside the anomaly.* class — so tuning or allowlisting ordinary anomaly
+  rules can never silence the monitor's own health signal.
+false_positives:
+  - "A genuinely busy period for the monitor: a huge event burst (package upgrade, log storm) legitimately raises inspectord's CPU for minutes."
+  - "A baseline learned while the host was idle makes the first busy period look anomalous."
+detect:
+  any_of:
+    - event.module == "anomaly_detector" AND event.action == "monitor_health_anomaly"
+short: "inspectord self-anomaly: {baseline.metric_kind} at {baseline.deviation}x baseline"
+detail: "inspectord's own {baseline.metric_kind} sustained {baseline.observed} against its baseline mean of {baseline.mean} ({baseline.deviation}x). Possible leak, runaway collector, or attempted resource exhaustion of the monitor."
+labels: [daemon, health, anomaly, self]

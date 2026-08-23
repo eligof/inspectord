@@ -18,6 +18,7 @@ from queue import Empty as QueueEmpty
 from typing import TYPE_CHECKING
 
 from inspectord.anomaly.beacon import BeaconHit, BeaconTracker
+from inspectord.anomaly.entity_baseline import ResourceSampler, ResourceSignal
 from inspectord.anomaly.first_sighting import FirstSightingTracker
 from inspectord.anomaly.metrics import extract_samples
 from inspectord.anomaly.stats import MetricEngine, SignalData
@@ -99,6 +100,40 @@ def _beacon_event(hit: BeaconHit, *, now: datetime) -> Event:
     return ev
 
 
+def _resource_event(sig: ResourceSignal, *, now: datetime) -> Event:
+    # Self-anomaly gets its own action so the dedicated monitor_health_anomaly
+    # rule (separate rule class, spec §6) is the only thing that matches it.
+    action = "monitor_health_anomaly" if sig.is_self else "resource_deviation"
+    subject = "inspectord" if sig.is_self else (sig.unit or sig.entity_key)
+    if sig.metric_kind == "cpu_pct":
+        detail = f"CPU {sig.observed:.1f}% vs baseline {sig.mean:.1f}%"
+    else:
+        mib = 1024 * 1024
+        detail = f"RSS {sig.observed / mib:.0f} MiB vs baseline {sig.mean / mib:.0f} MiB"
+    ev = build_event(
+        module="anomaly_detector",
+        action=action,
+        category=["anomaly"],
+        type_=["info"],
+        kind="signal",
+        severity="info",
+        ts=now,
+        message=(
+            f"{subject}: sustained resource deviation — {detail} ({sig.factor:.1f}x baseline)"
+        ),
+        service={"name": sig.unit} if sig.unit else None,
+        process={"name": "inspectord"} if sig.is_self else None,
+    )
+    ev.baseline = {
+        "metric_kind": sig.metric_kind,
+        "entity_key": sig.entity_key,
+        "observed": round(sig.observed, 2),
+        "mean": round(sig.mean, 2),
+        "deviation": round(sig.factor, 2),
+    }
+    return ev
+
+
 class AnomalyDetector:
     def __init__(
         self,
@@ -116,6 +151,7 @@ class AnomalyDetector:
         self._emit = emit
         self._engine = MetricEngine(config)
         self._beacon = BeaconTracker(config)
+        self._sampler: ResourceSampler = ResourceSampler(config)
         self._last_checkpoint = time.monotonic()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -197,8 +233,42 @@ class AnomalyDetector:
         self._last_checkpoint = time.monotonic()
 
     def _run(self) -> None:
-        while not self._stop.wait(self._cfg.tick_s):
-            self._tick(now=datetime.now(UTC))
+        # Two cadences on one thread (one DB handle, no locks): resource
+        # sampling every resource_tick_s (default 30 s), the main tick every
+        # tick_s (default 60 s). Wake at the nearer deadline.
+        next_tick = time.monotonic() + self._cfg.tick_s
+        next_res = time.monotonic() + self._cfg.resource_tick_s
+        while True:
+            delay = min(next_tick, next_res) - time.monotonic()
+            if self._stop.wait(max(delay, 0.0)):
+                return
+            now_m = time.monotonic()
+            if now_m >= next_res:
+                self._sample_resources(now=now_m)
+                next_res = now_m + self._cfg.resource_tick_s
+            if now_m >= next_tick:
+                self._tick(now=datetime.now(UTC))
+                next_tick = now_m + self._cfg.tick_s
+
+    def _sample_resources(self, *, now: float | None = None) -> None:
+        """One resource tick (spec §6). Errors are logged, never raised — a
+        bad round must not kill the detector thread (spec §9)."""
+        if now is None:
+            now = time.monotonic()
+        units: list[str] = []
+        try:
+            rows = self._db.query(
+                "SELECT unit FROM service_state WHERE active_state = 'active'"
+            ).fetchall()
+            units = [str(r[0]) for r in rows]
+        except Exception as exc:
+            log.warning("could not list services for resource sampling: %r", exc)
+        try:
+            for sig in self._sampler.sample(units, now=now):
+                if self._emit is not None:
+                    self._emit(_resource_event(sig, now=datetime.now(UTC)))
+        except Exception as exc:
+            log.error("resource sampling failed: %r", exc)
 
     def _drain(self) -> dict[str, BeaconHit]:
         """Drain the subscription into the engine and beacon tracker.

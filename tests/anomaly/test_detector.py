@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from inspectord.anomaly.detector import AnomalyDetector
+from inspectord.anomaly.entity_baseline import ResourceSignal
 from inspectord.anomaly.first_sighting import FirstSightingTracker
 from inspectord.config import AnomalyConfig
 from inspectord.parsers.base import build_event
@@ -415,4 +416,119 @@ def test_connection_without_destination_is_ignored_by_beacon(tmp_path: Path) -> 
         router.publish(ev)
     det._tick(now=T0 + timedelta(minutes=20))  # must not raise
     assert [s for s in emitted if s.action == "beacon_signature"] == []
+    db.close()
+
+
+# --- PR4: resource sampling path --------------------------------------------
+
+
+def _resource_det(tmp_path: Path):
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, _router, emitted = _stat_detector(db)
+    return det, emitted
+
+
+class _StubSampler:
+    """Records the unit list it was asked to sample; returns canned signals."""
+
+    def __init__(self, signals: list[ResourceSignal]) -> None:
+        self.signals = signals
+        self.calls: list[list[str]] = []
+
+    def sample(self, units: list[str], *, now: float) -> list[ResourceSignal]:
+        self.calls.append(list(units))
+        return self.signals
+
+
+def _svc_signal() -> ResourceSignal:
+    return ResourceSignal(
+        entity_key="svc:foo.service",
+        unit="foo.service",
+        metric_kind="cpu_pct",
+        observed=80.0,
+        mean=10.0,
+        factor=8.0,
+        is_self=False,
+    )
+
+
+def _self_signal() -> ResourceSignal:
+    return ResourceSignal(
+        entity_key="self",
+        unit=None,
+        metric_kind="rss_bytes",
+        observed=800.0 * 1024 * 1024,
+        mean=100.0 * 1024 * 1024,
+        factor=8.0,
+        is_self=True,
+    )
+
+
+def test_sample_resources_emits_service_signal(tmp_path: Path) -> None:
+    det, emitted = _resource_det(tmp_path)
+    det._sampler = _StubSampler([_svc_signal()])
+    det._sample_resources(now=100.0)
+    assert len(emitted) == 1
+    ev = emitted[0]
+    assert ev.kind.value == "signal"
+    assert ev.module == "anomaly_detector"
+    assert ev.action == "resource_deviation"
+    assert ev.service == {"name": "foo.service"}
+    assert ev.baseline["metric_kind"] == "cpu_pct"
+    assert ev.baseline["deviation"] == 8.0
+    assert ev.baseline["entity_key"] == "svc:foo.service"
+
+
+def test_sample_resources_self_uses_monitor_health_action(tmp_path: Path) -> None:
+    det, emitted = _resource_det(tmp_path)
+    det._sampler = _StubSampler([_self_signal()])
+    det._sample_resources(now=100.0)
+    assert len(emitted) == 1
+    assert emitted[0].action == "monitor_health_anomaly"
+    assert emitted[0].service is None
+
+
+def test_sample_resources_lists_active_services(tmp_path: Path) -> None:
+    det, _emitted = _resource_det(tmp_path)
+    det._db.execute(
+        "INSERT INTO service_state (unit, active_state, first_seen, last_seen) "
+        "VALUES ('a.service', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+        "('b.service', 'inactive', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+    stub = _StubSampler([])
+    det._sampler = stub
+    det._sample_resources(now=100.0)
+    assert stub.calls == [["a.service"]]
+
+
+def test_sample_resources_survives_sampler_error(tmp_path: Path) -> None:
+    class _Boom:
+        def sample(self, units: list[str], *, now: float) -> list[ResourceSignal]:
+            raise RuntimeError("boom")
+
+    det, _emitted = _resource_det(tmp_path)
+    det._sampler = _Boom()
+    det._sample_resources(now=100.0)  # must not raise
+
+
+def test_run_loop_fires_both_cadences(tmp_path: Path) -> None:
+    """The dual-deadline loop must drive BOTH cadences off one thread: the
+    resource sampler on resource_tick_s and the main tick on tick_s."""
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    tracker = _CountingTracker()
+    cfg = AnomalyConfig(tick_s=0.15, resource_tick_s=0.05)
+    det = AnomalyDetector(db=db, tracker=tracker, config=cfg)
+    stub = _StubSampler([])
+    det._sampler = stub  # type: ignore[assignment]
+    det.start()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and (len(stub.calls) < 3 or tracker.flush_calls < 2):
+        time.sleep(0.02)
+    det.stop(timeout=2.0)
+    assert len(stub.calls) >= 3, "resource cadence never fired off the run loop"
+    assert tracker.flush_calls >= 2, "main tick cadence never fired off the run loop"
     db.close()
