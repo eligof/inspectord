@@ -42,7 +42,7 @@
         <td class="mono">
           {%- if e.kind == "process" and boot_id and e.key.startswith("pid:") -%}
           {{ entity_link("process", e.key.removeprefix("pid:") ~ "@" ~ boot_id, e.key) }}
-          {%- elif e.kind in ("executable", "user", "ip", "file", "port", "service", "device") -%}
+          {%- elif e.kind != "process" and e.kind in card_kinds -%}
           {{ entity_link(e.kind, e.key, e.key) }}
           {%- else -%}
           {{ e.key }}

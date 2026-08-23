@@ -13,7 +13,7 @@ from inspectorctl.web.ipc import WebIpcError, call
 
 router = APIRouter()
 
-_KINDS = frozenset({"process", "executable", "user", "ip", "file", "port", "service", "device"})
+CARD_KINDS = frozenset({"process", "executable", "user", "ip", "file", "port", "service", "device"})
 
 
 @router.get("/entity/{kind}", response_class=HTMLResponse)
@@ -23,7 +23,7 @@ def entity_page(
     key: str = Query(min_length=1, max_length=512),
     window_h: int = Query(default=24, ge=1, le=168),
 ) -> _TemplateResponse:
-    if kind not in _KINDS:
+    if kind not in CARD_KINDS:
         raise HTTPException(status_code=404, detail="unknown entity kind")
     templates: Jinja2Templates = request.app.state.templates
     socket_path = request.app.state.socket_path

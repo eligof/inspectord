@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.templating import _TemplateResponse
 
 from inspectorctl.web.ipc import WebIpcError, call
+from inspectorctl.web.routes.entity import CARD_KINDS
 
 router = APIRouter()
 
@@ -80,6 +81,7 @@ def alert_detail(request: Request, alert_id: str) -> _TemplateResponse:
             "current_path": "/alerts",
             "alert": alert,
             "boot_id": result.get("boot_id"),
+            "card_kinds": CARD_KINDS,
             "open_cases": open_cases,
         },
     )

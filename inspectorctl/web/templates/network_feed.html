@@ -23,7 +23,7 @@
       <td class="mono">{% if boot_id and c.pid is not none %}{{ entity_link("process", c.pid ~ "@" ~ boot_id, c.pid) }}{% else %}{{ c.pid }}{% endif %}</td>
       <td>{{ c.comm }}</td>
       <td class="mono">{{ c.saddr }}:{{ c.sport }}</td>
-      <td class="mono">{{ entity_link("ip", c.daddr, c.daddr ~ ":" ~ c.dport) }}</td>
+      <td class="mono">{% if c.daddr %}{{ entity_link("ip", c.daddr, c.daddr ~ ":" ~ c.dport) }}{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{{ c.proto }}</td>
       <td>{{ c.family }}</td>
       <td>{{ '●' if c.active else '○' }}</td>
