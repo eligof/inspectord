@@ -31,7 +31,7 @@ def _append_event(
     )
 
 
-def _case_exists(db: Database, case_id: str) -> bool:
+def case_exists(db: Database, case_id: str) -> bool:
     return bool(db.query("SELECT 1 FROM cases WHERE case_id = ?", [case_id]).fetchall())
 
 
@@ -80,20 +80,20 @@ def open_case(db: Database, *, alert_id: str, title: str | None = None) -> str:
 
 
 def attach_alert(db: Database, *, case_id: str, alert_id: str) -> None:
-    if not _case_exists(db, case_id):
+    if not case_exists(db, case_id):
         return
     _attach(db, case_id, alert_id, datetime.now(tz=UTC), 0)
 
 
 def add_note(db: Database, *, case_id: str, text: str) -> None:
-    if not _case_exists(db, case_id):
+    if not case_exists(db, case_id):
         return
     _append_event(db, case_id, datetime.now(tz=UTC), 0, "note", text)
 
 
 def append_timeline(db: Database, *, case_id: str, kind: str, text: str | None = None) -> None:
     """Append a case_event of a custom kind (e.g. 'evidence_captured'). No-op if case missing."""
-    if not _case_exists(db, case_id):
+    if not case_exists(db, case_id):
         return
     _append_event(db, case_id, datetime.now(tz=UTC), 0, kind, text)
 

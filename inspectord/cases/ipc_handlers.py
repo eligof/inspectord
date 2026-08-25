@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 from typing import Any
 
+from inspectord.audit.log import append_audit
 from inspectord.cases import export, store
 from inspectord.evidence.store import ForensicStore
 from inspectord.ipc_errors import IpcParamError
@@ -35,26 +36,70 @@ def handle_open_case(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]
         case_id = store.open_case(
             db, alert_id=_required(params, "alert_id"), title=params.get("title")
         )
+        # The stored title may be derived (from the alert) rather than the param.
+        title_row = db.query("SELECT title FROM cases WHERE case_id = ?", [case_id]).fetchone()
+    append_audit(
+        db_path,
+        actor="user:local",
+        action="case_opened",
+        target=f"case:{case_id}",
+        details={"title": title_row[0] if title_row else None},
+    )
     return {"schema_version": "1.0.0", "case_id": case_id}
 
 
 def handle_attach_alert(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    case_id = _required(params, "case_id")
+    alert_id = _required(params, "alert_id")
     with Database(db_path) as db:
-        store.attach_alert(
-            db, case_id=_required(params, "case_id"), alert_id=_required(params, "alert_id")
+        # The store silently no-ops on a nonexistent case (same ok:True response),
+        # so gate the audit row on existence: never record an action that never
+        # happened.
+        exists = store.case_exists(db, case_id)
+        store.attach_alert(db, case_id=case_id, alert_id=alert_id)
+    if exists:
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="case_alert_attached",
+            target=f"case:{case_id}",
+            details={"alert_id": alert_id},
         )
     return {"schema_version": "1.0.0", "ok": True}
 
 
 def handle_add_note(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    case_id = _required(params, "case_id")
+    text = _required(params, "text")
     with Database(db_path) as db:
-        store.add_note(db, case_id=_required(params, "case_id"), text=_required(params, "text"))
+        # Same nonexistent-case no-op gate as handle_attach_alert.
+        exists = store.case_exists(db, case_id)
+        store.add_note(db, case_id=case_id, text=text)
+    if exists:
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="case_note_added",
+            target=f"case:{case_id}",
+            details={},  # note text stays in case_event
+        )
     return {"schema_version": "1.0.0", "ok": True}
 
 
 def handle_close_case(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    case_id = _required(params, "case_id")
     with Database(db_path) as db:
-        store.close_case(db, case_id=_required(params, "case_id"))
+        # Same nonexistent-case no-op gate as handle_attach_alert.
+        exists = store.case_exists(db, case_id)
+        store.close_case(db, case_id=case_id)
+    if exists:
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="case_closed",
+            target=f"case:{case_id}",
+            details={},
+        )
     return {"schema_version": "1.0.0", "ok": True}
 
 
@@ -95,6 +140,13 @@ def handle_export_case_zip(
         except export.ExportTooLarge:
             return {"schema_version": "1.0.0", "ok": False, "error": "too_large"}
         store.append_timeline(db, case_id=case_id, kind="exported", text="case exported as ZIP")
+    append_audit(
+        db_path,
+        actor="user:local",
+        action="case_exported",
+        target=f"case:{case_id}",
+        details={"bytes": len(data)},
+    )
     return {
         "schema_version": "1.0.0",
         "ok": True,
@@ -119,6 +171,13 @@ def handle_download_evidence(
         store.append_timeline(
             db, case_id=case_id, kind="evidence_downloaded", text=f"downloaded {sha[:12]}"
         )
+    append_audit(
+        db_path,
+        actor="user:local",
+        action="evidence_downloaded",
+        target=f"case:{case_id}",
+        details={"sha256": sha},
+    )
     return {
         "schema_version": "1.0.0",
         "ok": True,

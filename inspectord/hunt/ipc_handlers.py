@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from inspectord.audit.log import append_audit
 from inspectord.hunt import store
 from inspectord.hunt.compiler import compile_hunt_query
 from inspectord.hunt.errors import (
@@ -241,6 +242,13 @@ def handle_save_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[str
             )
     except HuntError as exc:
         return _failure(exc)
+    append_audit(
+        db_path,
+        actor="user:local",
+        action="hunt_query_saved",
+        target=f"hunt:{outcome.name}",
+        details={},
+    )
     return {
         "schema_version": _SCHEMA,
         "ok": True,
@@ -291,6 +299,13 @@ def handle_delete_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[s
             deleted = store.delete_query(db, name)
     except HuntError as exc:
         return _failure(exc)
+    append_audit(
+        db_path,
+        actor="user:local",
+        action="hunt_query_deleted",
+        target=f"hunt:{deleted.name}",
+        details={},
+    )
     return {
         "schema_version": _SCHEMA,
         "ok": True,

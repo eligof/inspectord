@@ -23,6 +23,8 @@ from inspectord.alerts.ipc_handlers import (
     handle_resolve_alert,
     handle_suppress_alert,
 )
+from inspectord.audit.ipc_handlers import handle_list_audit_log, handle_verify_audit_log
+from inspectord.audit.log import assert_audit_table
 from inspectord.cases.ipc_handlers import (
     handle_add_note,
     handle_attach_alert,
@@ -358,6 +360,23 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
             ),
             mutates=True,
         ),
+        # Audit log (audit design §7). Both are read-only views over audit_log;
+        # the audit rows themselves are only ever written by append_audit inside
+        # the mutating handlers above.
+        Method(
+            name="list_audit_log",
+            handler=lambda params: handle_list_audit_log(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="verify_audit_log",
+            handler=lambda params: handle_verify_audit_log(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
+        ),
     ]
 
 
@@ -379,6 +398,14 @@ def main() -> None:
 
     sup = Supervisor(cfg)
     sup.start()
+    # Startup probe (spec §6): run_migrations (inside sup.start()) must have
+    # left audit_log in place — a missing table would otherwise be silently
+    # swallowed by every fail-open append for the daemon's whole lifetime.
+    try:
+        assert_audit_table(cfg.storage.db_path)
+    except Exception:
+        sup.stop(timeout=5.0)
+        raise
 
     ipc = IpcServer(
         socket_path=cfg.ipc.socket_path,

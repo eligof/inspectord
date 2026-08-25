@@ -24,6 +24,7 @@ import yaml as _yaml
 from inspectord.allowlist.file_loader import load_allowlist_file
 from inspectord.anomaly.detector import AnomalyDetector
 from inspectord.anomaly.first_sighting import FirstSightingTracker
+from inspectord.audit.log import newest_anchor, set_failure_listener, verify_audit_chain
 from inspectord.config import DaemonConfig, WorkerSpec
 from inspectord.enrichment import enrich
 from inspectord.evidence.collector import EvidenceCollector
@@ -75,6 +76,13 @@ PERSIST_FAILURE_WINDOW = 20
 PERSIST_FAILURE_ALERT_THRESHOLD = 10
 # Minimum seconds between two persistence_failing events.
 PERSIST_ALERT_COOLDOWN_S = 300.0
+
+# --- audit chain maintenance (spec 2026-08-25-audit-log-design §6a/§7) ------
+# How often the supervisor anchors the audit head into the journal (as an
+# audit_head event) and verifies the whole chain. Daily: verify walks every
+# row, and the anchor only needs to be newer than the last plausible tamper
+# window, not fresh to the minute.
+AUDIT_TICK_INTERVAL_S = 86400.0
 
 
 class PersistFailed(Exception):
@@ -140,6 +148,7 @@ class Supervisor:
         restart_max_delay_s: float = RESTART_MAX_DELAY_S,
         restart_healthy_after_s: float = RESTART_HEALTHY_AFTER_S,
         restart_max_attempts: int = RESTART_MAX_ATTEMPTS,
+        audit_tick_interval_s: float = AUDIT_TICK_INTERVAL_S,
     ) -> None:
         self._cfg = config
         self._router = EventRouter()
@@ -156,6 +165,9 @@ class Supervisor:
         self._restart_max_delay_s = restart_max_delay_s
         self._restart_healthy_after_s = restart_healthy_after_s
         self._restart_max_attempts = restart_max_attempts
+        self._audit_tick_interval_s = audit_tick_interval_s
+        # None -> the audit tick runs on the first monitor tick after start.
+        self._last_audit_tick_mono: float | None = None
         self._boot_id: str | None = None
         self._listeners: list[Callable[[Event], None]] = []
         # Build the rule engine.
@@ -210,6 +222,8 @@ class Supervisor:
             reconcile_processes(self._db, self._boot_id)
         if self._first_sighting is not None:
             self._first_sighting.load(self._db)
+        # Fail-open audit appends escalate through the supervisor's event path.
+        set_failure_listener(self._report_audit_log_failing)
         if self._anomaly_detector is not None:
             self._anomaly_detector.load_checkpoints()
             self._anomaly_detector.start()
@@ -495,6 +509,60 @@ class Supervisor:
                     wp.restarts = 0
                 continue
             self._handle_dead_worker(index, wp, rc, now)
+        if (
+            self._last_audit_tick_mono is None
+            or now - self._last_audit_tick_mono >= self._audit_tick_interval_s
+        ):
+            self._last_audit_tick_mono = now
+            self._audit_tick()
+
+    def _audit_tick(self) -> None:
+        """Daily: verify the chain against the newest anchor, then re-anchor.
+
+        The anchor rides the normal event path, so it lands in the journal —
+        outside the database an attacker with DB access can rewrite — which is
+        what lets verify catch suffix truncation (spec §6a). Ordering matters:
+        verify runs FIRST, with the newest anchor, and a failed verify
+        suppresses the fresh anchor — anchoring a truncated head would bless
+        the shortened chain and launder the tamper. _db access happens on the
+        monitor thread; Database is thread-safe via thread-local cursors.
+        """
+        try:
+            verification = verify_audit_chain(self._db, anchor=newest_anchor(self._db))
+            if not verification.ok:
+                self._emit_supervisor_event(
+                    action="audit_chain_broken",
+                    severity="high",
+                    type_=["error"],
+                    message=(
+                        f"audit chain verification FAILED at seq "
+                        f"{verification.first_bad_seq} ({verification.reason})"
+                    ),
+                    raw=verification.as_dict(),
+                )
+                return  # a broken chain must not be re-anchored
+            head = self._db.query(
+                "SELECT seq, row_hash FROM audit_log ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+            if head is not None:
+                self._emit_supervisor_event(
+                    action="audit_head",
+                    severity="info",
+                    type_=["info"],
+                    message=f"audit chain head seq={head[0]}",
+                    raw={"seq": head[0], "row_hash": head[1]},
+                )
+        except Exception as exc:
+            log.error("audit tick failed: %r", exc)
+
+    def _report_audit_log_failing(self, failures: int, window: int) -> None:
+        self._emit_supervisor_event(
+            action="audit_log_failing",
+            severity="high",
+            type_=["error"],
+            message=f"failed to write {failures} of the last {window} audit rows",
+            raw={"failures": failures, "window": window},
+        )
 
     def _handle_dead_worker(self, index: int, wp: _WorkerProc, rc: int, now: float) -> None:
         if not wp.died_reported:
