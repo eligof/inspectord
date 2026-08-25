@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from inspectord.audit.log import append_audit
 from inspectord.cases import store as cases_store
 from inspectord.evidence.capture import _MAX_FILE_BYTES, read_capture
 from inspectord.evidence.netsnapshot import network_snapshot
@@ -85,6 +86,14 @@ class EvidenceCollector:
             if db.query("SELECT 1 FROM case_alert WHERE alert_id = ?", [alert.alert_id]).fetchall():
                 return  # already captured (idempotent; the lock makes check+create atomic)
             case_id = cases_store.open_case(db, alert_id=alert.alert_id, title=alert.rendered.short)
+            # open_case has committed: the auto-case exists even if capture below fails.
+            append_audit(
+                self._db_path,
+                actor="auto:evidence_collector",
+                action="case_opened",
+                target=f"case:{case_id}",
+                details={"auto": True, "alert_id": alert.alert_id},
+            )
             aid = alert.alert_id  # provenance: every blob records the triggering alert (§3.6)
             net_ok = bundle_ok = False
             # 1) network snapshot first (cheap, always bounded)

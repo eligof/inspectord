@@ -7,9 +7,17 @@ from pathlib import Path
 from typing import Any
 
 from inspectord.alerts.lifecycle import validate_transition
+from inspectord.audit.log import append_audit
 from inspectord.schemas.alert import AlertStatus
 from inspectord.state.ipc_handlers import _current_boot_id_or_none
 from inspectord.storage.db import Database
+
+#: Audit action per successful transition (spec 2026-08-25-audit-log-design §5).
+_AUDIT_ACTION = {
+    AlertStatus.acknowledged: "alert_acked",
+    AlertStatus.resolved: "alert_resolved",
+    AlertStatus.suppressed: "alert_suppressed",
+}
 
 
 def handle_list_alerts(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
@@ -69,6 +77,13 @@ def _transition(db_path: Path, *, alert_id: str, target: AlertStatus) -> dict[st
             "UPDATE alerts SET status = ? WHERE alert_id = ?",
             [target.value, alert_id],
         )
+    append_audit(
+        db_path,
+        actor="user:local",
+        action=_AUDIT_ACTION[target],
+        target=f"alert:{alert_id}",
+        details={},
+    )
     return {"schema_version": "1.0.0", "ok": True, "status": target.value}
 
 

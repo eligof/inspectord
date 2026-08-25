@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from inspectord.audit.log import append_audit
 from inspectord.state.baseline import capture_baseline
 from inspectord.state.reconcile import current_boot_id
 from inspectord.storage.db import Database
@@ -306,6 +307,13 @@ def handle_capture_baseline(*, params: dict[str, Any], db_path: Path) -> dict[st
     kind = str(params.get("kind", "service"))
     with Database(db_path) as db:
         count = capture_baseline(kind, db)
+    append_audit(
+        db_path,
+        actor="user:local",
+        action="baseline_captured",
+        target=f"baseline:{kind}",
+        details={"entries": count},
+    )
     return {"schema_version": "1.0.0", "captured": count}
 
 
