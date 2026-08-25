@@ -22,6 +22,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -162,3 +163,101 @@ def append_audit(
     with _lock:
         _outcomes.append(True)
     return seq
+
+
+@dataclass
+class AuditVerification:
+    ok: bool
+    rows: int
+    first_bad_seq: int | None
+    reason: str | None
+    anchor_checked: bool
+    last_good: dict[str, Any] | None
+    first_bad: dict[str, Any] | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "rows": self.rows,
+            "first_bad_seq": self.first_bad_seq,
+            "reason": self.reason,
+            "anchor_checked": self.anchor_checked,
+            "last_good": self.last_good,
+            "first_bad": self.first_bad,
+        }
+
+
+def _row_brief(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {"seq": row[0], "ts": _canon_ts(row[1]), "action": row[3]}
+
+
+def verify_audit_chain(db: Database, *, anchor: tuple[int, str] | None = None) -> AuditVerification:
+    """Walk the whole chain in ONE snapshot query (spec §7).
+
+    ``anchor`` is (seq, row_hash) from the newest ``audit_head`` journal
+    anchor, when available: the anchored row must exist with that hash, which
+    is what catches suffix truncation / full wipes (spec §6a).
+    """
+    rows = db.query(
+        "SELECT seq, ts, actor, action, target, details_json, prev_hash, row_hash "
+        "FROM audit_log ORDER BY seq"
+    ).fetchall()
+
+    def fail(bad_idx: int, reason: str) -> AuditVerification:
+        return AuditVerification(
+            ok=False,
+            rows=len(rows),
+            first_bad_seq=rows[bad_idx][0],
+            reason=reason,
+            anchor_checked=anchor is not None,
+            last_good=_row_brief(rows[bad_idx - 1]) if bad_idx > 0 else None,
+            first_bad=_row_brief(rows[bad_idx]),
+        )
+
+    prev_hash = ZERO_HASH
+    expected_seq = 1
+    for i, row in enumerate(rows):
+        seq, ts, actor, action, target, details_json, row_prev, row_hash = row
+        if seq != expected_seq:
+            return fail(i, "seq_gap")
+        if row_prev != prev_hash:
+            return fail(i, "prev_hash_mismatch")
+        if (
+            _row_hash_from_stored(
+                seq=seq,
+                ts=ts,
+                actor=actor,
+                action=action,
+                target=target,
+                details_json=details_json,
+                prev_hash=row_prev,
+            )
+            != row_hash
+        ):
+            return fail(i, "row_hash_mismatch")
+        prev_hash = row_hash
+        expected_seq += 1
+
+    result = AuditVerification(
+        ok=True,
+        rows=len(rows),
+        first_bad_seq=None,
+        reason=None,
+        anchor_checked=anchor is not None,
+        last_good=_row_brief(rows[-1]) if rows else None,
+        first_bad=None,
+    )
+    if anchor is not None:
+        a_seq, a_hash = anchor
+        match = next((r for r in rows if r[0] == a_seq), None)
+        if match is None or match[7] != a_hash:
+            return AuditVerification(
+                ok=False,
+                rows=len(rows),
+                first_bad_seq=a_seq,
+                reason="anchor_mismatch",
+                anchor_checked=True,
+                last_good=None,
+                first_bad=None,
+            )
+    return result
