@@ -86,14 +86,16 @@ def handle_plan_dependency_install(
         created_by=actor,
     )
     persist_plan(plan, db_path=db_path)
-    append_audit(
-        db_path,
-        actor="user:local",
-        action="dep_plan_created",
-        # One plan-level summary row (spec §2): the target names every dep planned.
-        target="dep:" + ",".join(item.name for item in plan.items),
-        details={"plan_id": plan.plan_id},
-    )
+    names = [item.name for item in plan.items]
+    if names:  # an empty plan has nothing to name — no audit row for "dep:"
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="dep_plan_created",
+            # One plan-level summary row (spec §2): the target names every dep planned.
+            target="dep:" + ",".join(names),
+            details={"plan_id": plan.plan_id},
+        )
     return {
         "schema_version": "1.0.0",
         "plan_id": plan.plan_id,

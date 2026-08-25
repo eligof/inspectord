@@ -451,6 +451,54 @@ def test_apply_plan_audited(tmp_path: Path) -> None:
     assert row["details"] == {"plan_id": _PLAN_ID}
 
 
+def test_plan_with_no_items_writes_no_audit_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty plan has nothing to name: target "dep:" would be meaningless.
+    db_path = _fresh(tmp_path)
+    monkeypatch.setattr("inspectord.dependencies.ipc_handlers.detect_distro", lambda: Distro.arch)
+    result = handle_plan_dependency_install(
+        params={"profile": "minimal", "flags": []},
+        manifests={},
+        backend=PacmanBackend(runner=_Runner({})),
+        db_path=db_path,
+    )
+    assert result["items"] == []
+    assert _newest_audit(db_path) is None
+
+
+_EMPTY_PLAN_ID = "01930000-0000-7000-8000-000000000004"
+
+
+def test_apply_empty_plan_writes_no_audit_row(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    with Database(db_path) as db:
+        created = datetime.now(UTC)
+        db.execute(
+            "INSERT INTO pending_dep_plans (plan_id, created_at, created_by, distro, "
+            "package_manager, items_json, estimated_disk_mb, expires_at, status) "
+            "VALUES (?, ?, 'test', 'arch', 'pacman', '[]', 0, ?, 'pending')",
+            [_EMPTY_PLAN_ID, created, created + timedelta(hours=1)],
+        )
+    runner = _Runner({})
+    result = apply_plan(
+        plan_id=_EMPTY_PLAN_ID,
+        db_path=db_path,
+        manifests=load_packaged_manifests(),
+        backend=PacmanBackend(
+            runner=runner,
+            lock_path=tmp_path / "absent.lck",
+            helper_command=["__in_process__"],
+            db_path=db_path,
+        ),
+        runner=runner,
+        sidecar_dirs={},
+        chown=False,
+    )
+    assert result.ok is True
+    assert _newest_audit(db_path) is None
+
+
 # --------------------------------------------------------------------------
 # evidence collector auto-case
 # --------------------------------------------------------------------------

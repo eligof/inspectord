@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from inspectord.audit.log import verify_audit_chain
+from inspectord.audit.log import newest_anchor, verify_audit_chain
 from inspectord.storage.db import Database
 
 _SCHEMA_VERSION = "1.0.0"
@@ -44,25 +44,9 @@ def handle_list_audit_log(*, params: dict[str, Any], db_path: Path) -> dict[str,
     return {"schema_version": _SCHEMA_VERSION, "ok": True, "rows": out}
 
 
-def _newest_anchor(db: Database) -> tuple[int, str] | None:
-    """(seq, row_hash) from the newest supervisor/audit_head event, if any."""
-    row = db.query(
-        "SELECT payload_json FROM events_enriched "
-        "WHERE module = 'supervisor' AND action = 'audit_head' "
-        "ORDER BY ts DESC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        return None
-    try:
-        raw = json.loads(row[0]).get("raw") or {}
-        return int(raw["seq"]), str(raw["row_hash"])
-    except (TypeError, ValueError, KeyError):
-        return None
-
-
 def handle_verify_audit_log(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
     with Database(db_path) as db:
-        verification = verify_audit_chain(db, anchor=_newest_anchor(db))
+        verification = verify_audit_chain(db, anchor=newest_anchor(db))
     return {
         "schema_version": _SCHEMA_VERSION,
         "ok": True,

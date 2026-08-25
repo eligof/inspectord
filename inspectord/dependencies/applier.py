@@ -177,11 +177,13 @@ def apply_plan(
 
     # One plan-level summary row beside the per-step dep_audit trail (spec §2/§5).
     # The apply arrives via IPC, so the actor is the local user.
-    append_audit(
-        db_path,
-        actor="user:local",
-        action="dep_plan_applied",
-        target="dep:" + ",".join(item.name for item in items),
-        details={"plan_id": plan_id},
-    )
+    names = [item.name for item in items]
+    if names:  # an empty plan has nothing to name — no audit row for "dep:"
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="dep_plan_applied",
+            target="dep:" + ",".join(names),
+            details={"plan_id": plan_id},
+        )
     return ApplierResult(plan_id=plan_id, ok=True, notes=notes)

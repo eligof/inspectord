@@ -168,6 +168,9 @@ secret: the supervisor emits a daily `audit_head` state event carrying
 (§20.5) and `events_enriched`, so rolling the audit table back past an anchor is
 detectable by comparing the newest anchor against the table (verify does this when
 anchor data is available; `verify_audit_log` reports `anchor_checked: bool`).
+The daily supervisor check runs verify WITH the newest anchor BEFORE emitting the
+fresh `audit_head`, so the day-old anchor gets one chance to catch a truncation
+before it is superseded.
 Truncation within the last day remains undetectable — stated in §8.
 
 ## 7. IPC, periodic verify, web
@@ -183,7 +186,8 @@ Truncation within the last day remains undetectable — stated in §8.
 - **Periodic verify:** the daemon runs `verify_audit_chain` daily (same scheduling home
   as the `audit_head` anchor emission); on `ok=False` it emits a high-severity
   `audit_chain_broken` event through the normal alert path. Tampering does not wait for
-  a human to click Verify.
+  a human to click Verify. A failed verify suppresses that tick's re-anchoring — a
+  fresh anchor over a truncated head would launder the tamper into a clean verify.
 - `/audit` panel (PR2): table (ts, actor, action, target, details), "Verify chain"
   POST-redirect control. On a detected break the panel states that rows ≥
   `first_bad_seq` are untrusted, shows the last-good/first-bad rows, and points at the

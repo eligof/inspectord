@@ -1,4 +1,4 @@
-"""IPC handlers for the audit log: list + verify (spec 2026-08-25 §7)."""
+"""Tests for the audit log IPC handlers (spec 2026-08-25 §7)."""
 
 from __future__ import annotations
 
@@ -101,6 +101,22 @@ def test_verify_uses_newest_audit_head_event(tmp_path: Path) -> None:
     assert out["verification"]["ok"] is False
     assert out["verification"]["reason"] == "anchor_mismatch"
     assert out["verification"]["anchor_checked"] is True
+
+
+def test_verify_anchor_event_with_null_payload_is_skipped(tmp_path: Path) -> None:
+    """A top-level JSON null/array payload must be treated as no anchor."""
+    db_path = _fresh(tmp_path)
+    append_audit(db_path, actor="user:local", action="a", target=None, details={})
+    with Database(db_path) as db:
+        db.execute(
+            "INSERT INTO events_enriched "
+            "(event_id, ts, kind, module, action, severity, payload_json) "
+            "VALUES ('ev-null', TIMESTAMP '2026-08-25 12:00:00', 'event', "
+            "'supervisor', 'audit_head', 'info', 'null')"
+        )
+    out = handle_verify_audit_log(params={}, db_path=db_path)  # no raise
+    assert out["verification"]["ok"] is True
+    assert out["verification"]["anchor_checked"] is False
 
 
 # --------------------------------------------------------------------------

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
 
+import inspectord.audit.log as audit_log
 from inspectord.audit.log import _row_hash_from_stored, append_audit, reset_for_tests
 from inspectord.journal import ZERO_HASH
 from inspectord.storage.db import Database
@@ -132,3 +133,18 @@ def test_unserializable_details_does_not_raise(tmp_path):
         details={"path": Path("/etc")},  # not JSON-serializable natively
     )
     assert seq == 1  # default=str kicked in, row written
+
+
+def test_unsortable_details_fail_open(tmp_path):
+    """A details dict json.dumps cannot serialize must be swallowed (spec §6)."""
+    db_path = _fresh(tmp_path)
+    seq = append_audit(
+        db_path,
+        actor="user:local",
+        action="a",
+        target=None,
+        details={1: "a", "b": 2},  # mixed key types: sort_keys raises TypeError
+    )
+    assert seq is None  # fail-open: swallowed, never propagated to the caller
+    assert list(audit_log._outcomes) == [False]  # counts toward the escalation window
+    assert _rows(db_path) == []

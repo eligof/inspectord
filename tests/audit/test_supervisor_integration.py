@@ -8,6 +8,7 @@ observation point the router would use.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +130,57 @@ def test_audit_tick_respects_interval(tmp_path: Path) -> None:
         sup._monitor_tick()
         sup._monitor_tick()
         assert len(_actions(dispatched, "audit_head")) == 1
+    finally:
+        sup._db.close()
+
+
+def _persist_anchor(db: Database, ev: Event) -> None:
+    """Land a captured audit_head event in events_enriched, as the router would."""
+    payload = json.dumps({"raw": ev.raw})
+    db.execute(
+        "INSERT INTO events_enriched "
+        "(event_id, ts, kind, module, action, severity, payload_json) "
+        "VALUES (?, ?, 'event', 'supervisor', 'audit_head', 'info', ?)",
+        [ev.event_id, ev.ts, payload],
+    )
+
+
+def test_audit_tick_anchor_mismatch_suppresses_reanchor(tmp_path: Path) -> None:
+    sup, db_path, dispatched = _quiet_supervisor(tmp_path, audit_tick_interval_s=0.0)
+    try:
+        append_audit(db_path, actor="user:local", action="a", target=None, details={})
+        append_audit(db_path, actor="user:local", action="b", target=None, details={})
+        sup._monitor_tick()  # tick 1: anchors seq 2
+        anchors = _actions(dispatched, "audit_head")
+        assert len(anchors) == 1
+        assert anchors[0].raw is not None and anchors[0].raw["seq"] == 2
+        _persist_anchor(sup._db, anchors[0])
+        # Truncate the newest row: the chain itself still verifies dense and
+        # linked — only the anchor comparison can see the rollback.
+        sup._db.execute("DELETE FROM audit_log WHERE seq = 2")
+        sup._monitor_tick()
+        broken = _actions(dispatched, "audit_chain_broken")
+        assert len(broken) == 1
+        assert broken[0].raw is not None
+        assert broken[0].raw["reason"] == "anchor_mismatch"
+        # A broken chain must NOT be re-anchored: a fresh anchor would bless
+        # the truncated head and launder the tamper.
+        assert len(_actions(dispatched, "audit_head")) == 1
+    finally:
+        sup._db.close()
+
+
+def test_audit_tick_clean_chain_keeps_anchoring(tmp_path: Path) -> None:
+    sup, db_path, dispatched = _quiet_supervisor(tmp_path, audit_tick_interval_s=0.0)
+    try:
+        append_audit(db_path, actor="user:local", action="a", target=None, details={})
+        sup._monitor_tick()
+        anchors = _actions(dispatched, "audit_head")
+        assert len(anchors) == 1
+        _persist_anchor(sup._db, anchors[0])
+        sup._monitor_tick()  # verify passes against the anchor; re-anchor proceeds
+        assert len(_actions(dispatched, "audit_head")) == 2
+        assert not _actions(dispatched, "audit_chain_broken")
     finally:
         sup._db.close()
 

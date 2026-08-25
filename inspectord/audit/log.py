@@ -121,9 +121,11 @@ def append_audit(
     consumed. Failures escalate via the registered failure listener.
     """
     global _last_alert_mono  # noqa: PLW0603
-    details_json = json.dumps(details, sort_keys=True, separators=(",", ":"), default=str)
-    ts = (_ts or datetime.now(UTC)).replace(tzinfo=None)
     try:
+        # Inside the try: serialization failures (e.g. unsortable mixed-type
+        # keys) must be swallowed like DB failures, not raised at the caller.
+        details_json = json.dumps(details, sort_keys=True, separators=(",", ":"), default=str)
+        ts = (_ts or datetime.now(UTC)).replace(tzinfo=None)
         with _lock:
             db = _conn(db_path)
             head = db.query(
@@ -189,6 +191,23 @@ class AuditVerification:
 
 def _row_brief(row: tuple[Any, ...]) -> dict[str, Any]:
     return {"seq": row[0], "ts": _canon_ts(row[1]), "action": row[3]}
+
+
+def newest_anchor(db: Database) -> tuple[int, str] | None:
+    """(seq, row_hash) from the newest supervisor/audit_head event, if any (§6a)."""
+    row = db.query(
+        "SELECT payload_json FROM events_enriched "
+        "WHERE module = 'supervisor' AND action = 'audit_head' "
+        "ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        raw = json.loads(row[0]).get("raw") or {}
+        return int(raw["seq"]), str(raw["row_hash"])
+    except (TypeError, ValueError, KeyError, AttributeError):
+        # AttributeError: a top-level JSON null/array payload has no .get.
+        return None
 
 
 def verify_audit_chain(db: Database, *, anchor: tuple[int, str] | None = None) -> AuditVerification:
