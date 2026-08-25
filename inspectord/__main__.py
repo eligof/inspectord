@@ -23,6 +23,7 @@ from inspectord.alerts.ipc_handlers import (
     handle_resolve_alert,
     handle_suppress_alert,
 )
+from inspectord.audit.log import assert_audit_table
 from inspectord.cases.ipc_handlers import (
     handle_add_note,
     handle_attach_alert,
@@ -379,6 +380,14 @@ def main() -> None:
 
     sup = Supervisor(cfg)
     sup.start()
+    # Startup probe (spec §6): run_migrations (inside sup.start()) must have
+    # left audit_log in place — a missing table would otherwise be silently
+    # swallowed by every fail-open append for the daemon's whole lifetime.
+    try:
+        assert_audit_table(cfg.storage.db_path)
+    except Exception:
+        sup.stop(timeout=5.0)
+        raise
 
     ipc = IpcServer(
         socket_path=cfg.ipc.socket_path,

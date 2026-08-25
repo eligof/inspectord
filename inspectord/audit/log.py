@@ -261,3 +261,15 @@ def verify_audit_chain(db: Database, *, anchor: tuple[int, str] | None = None) -
                 first_bad=None,
             )
     return result
+
+
+def assert_audit_table(db_path: Path) -> None:
+    """Startup probe (spec §6): a missing table is fatal, not fail-open fodder."""
+    with Database(db_path) as db:
+        try:
+            db.query("SELECT seq FROM audit_log LIMIT 1").fetchall()
+        except Exception as exc:
+            raise RuntimeError(
+                "audit_log table missing or unreadable - migration drift; "
+                "refusing to run with audit fail-open masking it"
+            ) from exc
