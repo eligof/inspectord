@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from inspectorctl.web.csrf import AllowedHostMiddleware, SameOriginMiddleware
 from inspectorctl.web.routes import (
     alerts,
+    audit,
     cases,
     deps,
     devices,
@@ -93,5 +94,6 @@ def create_app(*, socket_path: Path, allowed_hosts: Iterable[str] | None = None)
     app.include_router(cases.router)
     app.include_router(hunt.router)
     app.include_router(entity.router)
+    app.include_router(audit.router)
 
     return app
