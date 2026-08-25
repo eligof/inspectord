@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Audit log</h1>
+{% if verification %}
+  {% if verification.ok %}
+  <div class="ok">✓ Chain consistent — {{ verification.rows }} rows
+    {% if verification.anchor_checked %}(anchor checked){% endif %}</div>
+  {% else %}
+  <div class="error">✗ Chain BROKEN at seq {{ verification.first_bad_seq }}
+    ({{ verification.reason }}). Rows from seq {{ verification.first_bad_seq }} onward
+    are untrusted; cross-check the event journal and backups.
+    {% if verification.last_good %}Last good row: seq {{ verification.last_good.seq }}
+    at {{ verification.last_good.ts }} ({{ verification.last_good.action }}).{% endif %}
+  </div>
+  {% endif %}
+{% endif %}
+<form method="post" action="/audit/verify"><button type="submit">Verify chain</button></form>
+{% if rows %}
+<table>
+  <thead><tr><th>Seq</th><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td class="mono">{{ r.seq }}</td>
+      <td class="mono muted">{{ r.ts }}</td>
+      <td class="mono">{{ r.actor }}</td>
+      <td>{{ r.action }}</td>
+      <td class="mono">{{ r.target or '' }}</td>
+      <td class="mono muted">{{ r.details if r.details else '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No audit rows yet.</div>
+{% endif %}
+{% endblock %}
