@@ -523,3 +523,33 @@ def _all_audit(db_path: Path) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+# --------------------------------------------------------------------------
+# cases: no-ops on a nonexistent case must not be audited
+# --------------------------------------------------------------------------
+
+
+def test_attach_alert_to_missing_case_writes_no_row(tmp_path: Path) -> None:
+    """The store silently no-ops on a missing case; an audit row would record a lie."""
+    db_path = _fresh(tmp_path)
+    _seed_alert(db_path, "a1")
+    resp = cases_h.handle_attach_alert(
+        params={"case_id": "nope", "alert_id": "a1"}, db_path=db_path
+    )
+    assert resp["ok"] is True  # handler response semantics unchanged
+    assert _audit_count(db_path) == 0
+
+
+def test_add_note_to_missing_case_writes_no_row(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    resp = cases_h.handle_add_note(params={"case_id": "nope", "text": "n"}, db_path=db_path)
+    assert resp["ok"] is True
+    assert _audit_count(db_path) == 0
+
+
+def test_close_missing_case_writes_no_row(tmp_path: Path) -> None:
+    db_path = _fresh(tmp_path)
+    resp = cases_h.handle_close_case(params={"case_id": "nope"}, db_path=db_path)
+    assert resp["ok"] is True
+    assert _audit_count(db_path) == 0

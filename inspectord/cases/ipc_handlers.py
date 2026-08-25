@@ -52,42 +52,54 @@ def handle_attach_alert(*, params: dict[str, Any], db_path: Path) -> dict[str, A
     case_id = _required(params, "case_id")
     alert_id = _required(params, "alert_id")
     with Database(db_path) as db:
+        # The store silently no-ops on a nonexistent case (same ok:True response),
+        # so gate the audit row on existence: never record an action that never
+        # happened.
+        exists = store.case_exists(db, case_id)
         store.attach_alert(db, case_id=case_id, alert_id=alert_id)
-    append_audit(
-        db_path,
-        actor="user:local",
-        action="case_alert_attached",
-        target=f"case:{case_id}",
-        details={"alert_id": alert_id},
-    )
+    if exists:
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="case_alert_attached",
+            target=f"case:{case_id}",
+            details={"alert_id": alert_id},
+        )
     return {"schema_version": "1.0.0", "ok": True}
 
 
 def handle_add_note(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
     case_id = _required(params, "case_id")
+    text = _required(params, "text")
     with Database(db_path) as db:
-        store.add_note(db, case_id=case_id, text=_required(params, "text"))
-    append_audit(
-        db_path,
-        actor="user:local",
-        action="case_note_added",
-        target=f"case:{case_id}",
-        details={},  # note text stays in case_event
-    )
+        # Same nonexistent-case no-op gate as handle_attach_alert.
+        exists = store.case_exists(db, case_id)
+        store.add_note(db, case_id=case_id, text=text)
+    if exists:
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="case_note_added",
+            target=f"case:{case_id}",
+            details={},  # note text stays in case_event
+        )
     return {"schema_version": "1.0.0", "ok": True}
 
 
 def handle_close_case(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
     case_id = _required(params, "case_id")
     with Database(db_path) as db:
+        # Same nonexistent-case no-op gate as handle_attach_alert.
+        exists = store.case_exists(db, case_id)
         store.close_case(db, case_id=case_id)
-    append_audit(
-        db_path,
-        actor="user:local",
-        action="case_closed",
-        target=f"case:{case_id}",
-        details={},
-    )
+    if exists:
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="case_closed",
+            target=f"case:{case_id}",
+            details={},
+        )
     return {"schema_version": "1.0.0", "ok": True}
 
 
