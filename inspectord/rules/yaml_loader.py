@@ -196,10 +196,20 @@ def _interpolate(tpl: str, event: Event) -> str:
 
 
 def _primary_entity_for(event: Event) -> tuple[str, str]:
-    if event.process and "pid" in event.process:
-        return "process", f"pid:{event.process['pid']}"
-    if event.process and "name" in event.process:
-        return "process", f"name:{event.process['name']}"
+    if event.vulnerability and "avg_id" in event.vulnerability and "package" in event.vulnerability:
+        # One alert per advisory per package, not per CVE (vuln design §5) —
+        # without this branch the dedup key would fall through to the
+        # per-event fallback and never dedup at all.
+        avg_id = event.vulnerability["avg_id"]
+        package = event.vulnerability["package"]
+        return "package", f"{avg_id}/{package}"
+    if event.process and ("pid" in event.process or "name" in event.process):
+        key = (
+            f"pid:{event.process['pid']}"
+            if "pid" in event.process
+            else f"name:{event.process['name']}"
+        )
+        return "process", key
     if event.file and "path" in event.file:
         return "file", str(event.file["path"])
     if event.user and "name" in event.user:

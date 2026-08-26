@@ -7,7 +7,7 @@ pairs are a no-op — adding collectors never breaks projection.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from inspectord.schemas.event import Event
@@ -34,6 +34,8 @@ def project(event: Event, db: Database, *, boot_id: str | None = None) -> None:
         _project_persistence(event, db)
     elif event.module == "scanner_runner":
         _project_scan_run(event, db)
+    elif event.module == "vuln_scanner":
+        _project_vulnerability(event, db)
 
 
 def _family(addr: str) -> str:
@@ -466,3 +468,79 @@ def _project_scan_skipped(event: Event, db: Database, raw: dict[str, Any], scann
             event.event_id,
         ],
     )
+
+
+def _project_vulnerability(event: Event, db: Database) -> None:
+    """Materialize vuln_scanner's full-set emission into `vulnerabilities` (§5).
+
+    Upserts never touch `first_seen_at`, `acked_at` or `acked_note` (an ack
+    must survive every rescan), and always clear `resolved_at` (a reappearing
+    match un-resolves its row). The `vuln_scan_completed` sweep is what makes
+    resolution correct across daemon downtime: any unresolved row not
+    re-emitted by this scan — and not owned by a skipped AVG — is resolved.
+    Rows are never deleted.
+    """
+    if event.action == "vulnerability_found":
+        _project_vulnerability_found(event, db)
+    elif event.action == "vuln_scan_completed":
+        _project_vulnerability_sweep(event, db)
+
+
+def _project_vulnerability_found(event: Event, db: Database) -> None:
+    v = event.vulnerability or {}
+    avg_id = v.get("avg_id")
+    cve_id = v.get("cve_id")
+    package = v.get("package")
+    if not avg_id or not cve_id or not package:
+        return
+    db.execute(
+        """
+        INSERT INTO vulnerabilities
+            (avg_id, cve_id, package, installed_version, fixed_version, severity,
+             status, fix_in_testing, first_seen_at, last_seen, last_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (avg_id, cve_id, package) DO UPDATE SET
+            installed_version = excluded.installed_version,
+            fixed_version     = excluded.fixed_version,
+            severity          = excluded.severity,
+            status            = excluded.status,
+            fix_in_testing    = excluded.fix_in_testing,
+            last_seen         = excluded.last_seen,
+            last_event_id     = excluded.last_event_id,
+            resolved_at       = NULL
+        """,
+        [
+            avg_id,
+            cve_id,
+            package,
+            v.get("installed_version"),
+            v.get("fixed_version"),
+            v.get("severity"),
+            v.get("status"),
+            bool(v.get("fix_in_testing")),
+            event.ts,
+            event.ts,
+            event.event_id,
+        ],
+    )
+
+
+def _project_vulnerability_sweep(event: Event, db: Database) -> None:
+    raw = event.raw or {}
+    started_raw = raw.get("scan_started_at")
+    if not isinstance(started_raw, str):
+        return
+    try:
+        scan_started_at = datetime.fromisoformat(started_raw)
+    except ValueError:
+        return
+    skipped = [s for s in (raw.get("skipped_avg_ids") or []) if isinstance(s, str)]
+    # A malformed AVG must never silently resolve real CVEs: rows owned by a
+    # skipped AVG are excluded from the sweep.
+    sql = "UPDATE vulnerabilities SET resolved_at = ? WHERE resolved_at IS NULL AND last_seen < ?"
+    params: list[Any] = [event.ts, scan_started_at]
+    if skipped:
+        placeholders = ", ".join("?" for _ in skipped)
+        sql += f" AND avg_id NOT IN ({placeholders})"
+        params.extend(skipped)
+    db.execute(sql, params)
