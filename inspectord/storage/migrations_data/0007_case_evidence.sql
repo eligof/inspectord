@@ -3,7 +3,7 @@
 -- content stay distinct rows. Content lives in the forensic store, keyed by sha256.
 CREATE TABLE IF NOT EXISTS case_evidence (
     case_id       VARCHAR NOT NULL,
-    kind          VARCHAR NOT NULL,   -- file | net_state | event_bundle
+    kind          VARCHAR NOT NULL,   -- file | net_state | event_bundle | process_tree
     sha256        VARCHAR NOT NULL,
     original_path VARCHAR NOT NULL DEFAULT '',
     captured_at   TIMESTAMP NOT NULL,

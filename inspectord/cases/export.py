@@ -110,6 +110,11 @@ def _build_narrative(case: dict[str, Any], *, skipped: list[tuple[str, str]]) ->
         "case.json stands in for audit.log (plain, not-yet-tamper-evident), and event bundles "
         "are included as evidence/<sha> blobs (kind=event_bundle), not top-level events/*.jsonl."
     )
+    lines.append(
+        "process_tree evidence contains redacted-but-structured environment data: secret "
+        "values are replaced with <redacted>, but variable NAMES are kept — sharing this ZIP "
+        "discloses which services/credentials exist on the captured host."
+    )
     if skipped:
         lines.append("")
         lines.append("## Missing evidence")
@@ -211,7 +216,7 @@ def read_evidence_blob(
         raise EvidenceNotFound(sha)
     if len(blob) > _MAX_EXPORT_BYTES:
         raise ExportTooLarge(sha)
-    if kind in ("net_state", "event_bundle"):
+    if kind in ("net_state", "event_bundle", "process_tree"):
         return blob, f"{sha[:12]}-{kind}.json", "application/json"
     filename = _basename(original_path) or f"{sha[:12]}.bin"
     return blob, filename, "application/octet-stream"

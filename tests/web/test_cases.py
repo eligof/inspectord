@@ -304,3 +304,22 @@ def test_case_detail_shows_export_and_download_links(ipc_factory) -> None:
     assert f'action="/cases/c1/evidence/{CASE["evidence"][0]["sha256"]}"' in response.text
     # The old placeholder text is gone
     assert "coming soon" not in response.text
+
+
+def test_case_detail_info_shows_process_tree_node_count(ipc_factory) -> None:
+    case = copy.deepcopy(CASE)
+    case["evidence"] = [
+        {
+            "kind": "process_tree",
+            "sha256": "def456abc7890abc123",
+            "original_path": "",
+            "captured_at": "2026-08-26T00:00:00",
+            "meta": {"root_pid": 4242, "nodes": 5, "truncated": False},
+        }
+    ]
+    client = ipc_factory([_get_case(case)])
+    response = client.get("/cases/c1")
+    assert response.status_code == 200
+    assert "process_tree" in response.text
+    # Info cell falls back to meta.nodes when size/socket_count are absent
+    assert '<td class="mono muted">5</td>' in response.text

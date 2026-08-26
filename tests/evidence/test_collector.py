@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,6 +77,7 @@ def _make_event(
     event_id: str = "ev-1",
     file: dict | None = None,
     persistence: dict | None = None,
+    process: dict | None = None,
 ) -> Event:
     return Event(
         ts=datetime(2026, 6, 20, tzinfo=UTC),
@@ -86,6 +90,7 @@ def _make_event(
         module="fim_watcher",
         file=file,
         persistence=persistence,
+        process=process,
     )
 
 
@@ -268,3 +273,132 @@ def test_timeline_evidence_captured_event(tmp_path: Path, monkeypatch: pytest.Mo
             "SELECT COUNT(*) FROM case_event WHERE kind = 'evidence_captured'"
         ).fetchall()
         assert rows[0][0] == 1
+
+
+# --- process tree (proc-tree spec §5) ---
+
+
+def test_process_tree_captured_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live child with a secret env var: real walk, real store, redaction in the bytes."""
+    monkeypatch.setattr(collector_mod, "network_snapshot", _fixed_snapshot)
+    db_path = _db_path(tmp_path)
+    _seed_alert(db_path, "a1", "high", "suspicious")
+    store = ForensicStore(tmp_path / "ev")
+    collector = EvidenceCollector(db_path, store)
+
+    child = subprocess.Popen(
+        ["sleep", "30"],
+        env={"PATH": os.environ.get("PATH", "/usr/bin"), "E2E_API_TOKEN": "e2e-supersecret-42"},
+    )
+    try:
+        # pid as a string: the collector must int-parse event process.pid
+        event = _make_event(process={"pid": str(child.pid)})
+        collector.capture(_make_alert(alert_id="a1"), event)
+    finally:
+        child.kill()
+        child.wait()
+
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT sha256, meta_json FROM case_evidence WHERE kind = 'process_tree'"
+        ).fetchall()
+        assert len(rows) == 1
+        sha, meta_json = rows[0]
+        meta = json.loads(meta_json)
+        assert meta["root_pid"] == child.pid
+        assert meta["nodes"] >= 1
+        assert meta["truncated"] in (True, False)
+        assert meta["alert_id"] == "a1"
+        blob = store.path_for(sha).read_bytes()
+        snapshot = json.loads(blob)
+        assert snapshot["root_pid"] == child.pid
+        assert len(snapshot["nodes"]) == meta["nodes"]
+        # redaction is visible in the stored bytes: value gone, name kept
+        assert b"e2e-supersecret-42" not in blob
+        assert b"E2E_API_TOKEN" in blob
+        assert b"<redacted>" in blob
+        # timeline mentions the tree
+        texts = db.query("SELECT text FROM case_event WHERE kind = 'evidence_captured'").fetchall()
+        assert len(texts) == 1
+        assert f"process tree ({meta['nodes']} nodes)" in texts[0][0]
+
+
+def test_no_pid_event_no_process_tree_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(collector_mod, "network_snapshot", _fixed_snapshot)
+    db_path = _db_path(tmp_path)
+    _seed_alert(db_path, "a1", "high", "suspicious")
+    store = ForensicStore(tmp_path / "ev")
+    collector = EvidenceCollector(db_path, store)
+    collector.capture(_make_alert(alert_id="a1"), _make_event())
+
+    with Database(db_path) as db:
+        n = db.query("SELECT COUNT(*) FROM case_evidence WHERE kind = 'process_tree'").fetchall()[
+            0
+        ][0]
+        assert n == 0
+        # other captures landed, and the timeline does not mention a tree
+        kinds = {r[0] for r in db.query("SELECT kind FROM case_evidence").fetchall()}
+        assert {"net_state", "event_bundle"} <= kinds
+        text = db.query("SELECT text FROM case_event WHERE kind = 'evidence_captured'").fetchall()[
+            0
+        ][0]
+        assert "process tree" not in text
+
+
+def test_unparseable_pid_no_process_tree_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(collector_mod, "network_snapshot", _fixed_snapshot)
+    db_path = _db_path(tmp_path)
+    _seed_alert(db_path, "a1", "high", "suspicious")
+    store = ForensicStore(tmp_path / "ev")
+    collector = EvidenceCollector(db_path, store)
+    collector.capture(_make_alert(alert_id="a1"), _make_event(process={"pid": "not-a-pid"}))
+
+    with Database(db_path) as db:
+        n = db.query("SELECT COUNT(*) FROM case_evidence WHERE kind = 'process_tree'").fetchall()[
+            0
+        ][0]
+        assert n == 0
+
+
+def test_dead_pid_no_process_tree_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(collector_mod, "network_snapshot", _fixed_snapshot)
+    db_path = _db_path(tmp_path)
+    _seed_alert(db_path, "a1", "high", "suspicious")
+    store = ForensicStore(tmp_path / "ev")
+    collector = EvidenceCollector(db_path, store)
+    # capture_process_tree returns None for a dead root: no blob, no row
+    collector.capture(_make_alert(alert_id="a1"), _make_event(process={"pid": 2**22 - 1}))
+
+    with Database(db_path) as db:
+        n = db.query("SELECT COUNT(*) FROM case_evidence WHERE kind = 'process_tree'").fetchall()[
+            0
+        ][0]
+        assert n == 0
+
+
+def test_proctree_raising_other_captures_land(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(collector_mod, "network_snapshot", _fixed_snapshot)
+
+    def _boom(pid: int, **_kw: object) -> dict:
+        raise RuntimeError("proctree exploded")
+
+    monkeypatch.setattr(collector_mod, "capture_process_tree", _boom)
+    db_path = _db_path(tmp_path)
+    _seed_alert(db_path, "a1", "high", "suspicious")
+    store = ForensicStore(tmp_path / "ev")
+    collector = EvidenceCollector(db_path, store)
+
+    target = tmp_path / "evil.bin"
+    target.write_bytes(b"malware bytes")
+    event = _make_event(file={"path": str(target)}, process={"pid": os.getpid()})
+    collector.capture(_make_alert(alert_id="a1"), event)
+
+    with Database(db_path) as db:
+        kinds = {r[0] for r in db.query("SELECT kind FROM case_evidence").fetchall()}
+        # the raising step never blocks later steps: the file capture still lands
+        assert {"net_state", "event_bundle", "file"} <= kinds
+        assert "process_tree" not in kinds

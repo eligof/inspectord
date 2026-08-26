@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
@@ -13,6 +14,16 @@ from inspectorctl.web.ipc import WebIpcError, call
 from inspectorctl.web.routes.entity import CARD_KINDS
 
 router = APIRouter()
+
+# Redirect targets embed these ids; restrict to token characters so a
+# crafted id can never alter the redirect URL structure (CodeQL py/url-redirection).
+_ID_RE = re.compile(r"[A-Za-z0-9_.:-]+")
+
+
+def _checked_id(value: str) -> str:
+    if not _ID_RE.fullmatch(value):
+        raise HTTPException(status_code=400, detail="invalid id")
+    return value
 
 
 @router.get("/alerts", response_class=HTMLResponse)
@@ -118,7 +129,7 @@ def alert_open_case(request: Request, alert_id: str) -> RedirectResponse:
     except WebIpcError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     case_id = result["case_id"]
-    return RedirectResponse(url=f"/cases/{case_id}", status_code=303)
+    return RedirectResponse(url=f"/cases/{_checked_id(case_id)}", status_code=303)
 
 
 @router.post("/alerts/{alert_id}/attach-case")
@@ -133,4 +144,4 @@ def alert_attach_case(
         )
     except WebIpcError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return RedirectResponse(url=f"/alerts/{alert_id}", status_code=303)
+    return RedirectResponse(url=f"/alerts/{_checked_id(alert_id)}", status_code=303)

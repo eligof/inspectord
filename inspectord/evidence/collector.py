@@ -19,6 +19,7 @@ from inspectord.audit.log import append_audit
 from inspectord.cases import store as cases_store
 from inspectord.evidence.capture import _MAX_FILE_BYTES, read_capture
 from inspectord.evidence.netsnapshot import network_snapshot
+from inspectord.evidence.proctree import capture_process_tree
 from inspectord.evidence.store import ForensicStore
 from inspectord.schemas.alert import Alert
 from inspectord.schemas.event import Event, Severity
@@ -49,6 +50,17 @@ def implicated_paths(alert: Alert, event: Event) -> list[str]:
             seen.add(p)
             deduped.append(p)
     return deduped
+
+
+def _event_pid(event: Event) -> int | None:
+    """The event's process.pid as an int, or None when absent or unparseable."""
+    raw = (event.process or {}).get("pid")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 class EvidenceCollector:
@@ -91,6 +103,39 @@ class EvidenceCollector:
             "meta_json) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
             [case_id, kind, sha, original_path, datetime.now(tz=UTC), json.dumps(meta)],
         )
+
+    def _capture_process_tree(
+        self, db: Database, case_id: str, aid: str, event: Event
+    ) -> tuple[bool, int]:
+        """Snapshot the ancestry of the event's process.pid (proc-tree spec §5).
+
+        Bounded by proctree's own depth/size caps plus this collector's lock; the
+        file-capture deadline starts later and does not cover this step. Best-effort:
+        never blocks later steps. Returns (captured, node_count).
+        """
+        try:
+            pid = _event_pid(event)
+            snapshot = capture_process_tree(pid) if pid is not None else None
+            if snapshot is None:
+                return False, 0
+            sha = self._store.put(json.dumps(snapshot).encode())
+            self._insert(
+                db,
+                case_id,
+                "process_tree",
+                sha,
+                "",
+                {
+                    "root_pid": pid,
+                    "nodes": len(snapshot["nodes"]),
+                    "truncated": snapshot["truncated"],
+                    "alert_id": aid,
+                },
+            )
+            return True, len(snapshot["nodes"])
+        except Exception:
+            log.exception("evidence: process tree capture failed")
+            return False, 0
 
     def _capture(self, alert: Alert, event: Event) -> None:
         with Database(self._db_path) as db:
@@ -141,7 +186,9 @@ class EvidenceCollector:
                 bundle_ok = True
             except Exception:
                 log.exception("evidence: event bundle failed")
-            # 3) implicated files (hard-bounded)
+            # 3) process ancestry (proc-tree spec §5)
+            tree_ok, tree_nodes = self._capture_process_tree(db, case_id, aid, event)
+            # 4) implicated files (hard-bounded)
             n_files, total, partial = 0, 0, False
             deadline = time.monotonic() + _CAPTURE_DEADLINE_S
             for path in implicated_paths(alert, event):
@@ -179,6 +226,8 @@ class EvidenceCollector:
                 parts.append("net snapshot")
             if bundle_ok:
                 parts.append("event bundle")
+            if tree_ok:
+                parts.append(f"process tree ({tree_nodes} nodes)")
             summary = "captured " + ", ".join(parts)
             if partial:
                 summary += " (partial — bounds hit)"

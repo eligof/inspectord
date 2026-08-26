@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -13,6 +14,16 @@ from starlette.templating import _TemplateResponse
 from inspectorctl.web.ipc import WebIpcError, call
 
 router = APIRouter()
+
+# Redirect targets embed these ids; restrict to token characters so a
+# crafted id can never alter the redirect URL structure (CodeQL py/url-redirection).
+_ID_RE = re.compile(r"[A-Za-z0-9_.:-]+")
+
+
+def _checked_id(value: str) -> str:
+    if not _ID_RE.fullmatch(value):
+        raise HTTPException(status_code=400, detail="invalid id")
+    return value
 
 
 @router.get("/cases", response_class=HTMLResponse)
@@ -68,7 +79,7 @@ def _case_mutate(
         call(socket_path, method, params)
     except WebIpcError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return RedirectResponse(url=f"/cases/{case_id}", status_code=303)
+    return RedirectResponse(url=f"/cases/{_checked_id(case_id)}", status_code=303)
 
 
 @router.post("/cases/{case_id}/notes")
