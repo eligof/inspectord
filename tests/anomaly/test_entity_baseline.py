@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -207,3 +208,97 @@ def test_malformed_stat_skips_cpu_but_keeps_rss(roots) -> None:
     s.sample([], now=30.0)
     assert len(s.debug_ring("self", "rss_bytes") or []) == 2  # RSS still recorded
     assert len(s.debug_ring("self", "cpu_pct") or []) == 0
+
+
+# --- checkpointing (2026-08-26 anomaly-checkpoint spec §2.1) -----------------
+
+
+def _rss_blob(values: list[float]) -> str:
+    return json.dumps({"ring": values})
+
+
+def test_checkpoint_rows_one_per_nonempty_ring(roots) -> None:
+    proc, _cgroup = roots
+    _write_proc(proc, 7, ticks=0, rss_kb=100)
+    s = _sampler(roots, self_pid=7)
+    assert s.checkpoint_rows() == []  # nothing sampled yet
+    s.sample([], now=0.0)  # rss recorded; cpu ring still empty (anchor only)
+    rows = s.checkpoint_rows()
+    assert rows == [("resource.rss_bytes", "self", "1h", _rss_blob([100.0 * 1024]))]
+
+
+def test_checkpoint_load_round_trip_arms_sustained_rule(roots) -> None:
+    proc, _cgroup = roots
+    _write_proc(proc, 7, ticks=0, rss_kb=100)
+    s1 = _sampler(roots, self_pid=7)
+    now = 0.0
+    for _ in range(6):  # min_samples=5 satisfied
+        s1.sample([], now=now)
+        now += 30.0
+    rows = s1.checkpoint_rows()
+
+    s2 = _sampler(roots, self_pid=7)
+    for metric_kind, entity_key, window_name, blob in rows:
+        assert s2.load_row(metric_kind, entity_key, window_name, blob)
+    assert list(s2.debug_ring("self", "rss_bytes") or []) == [100.0 * 1024] * 6
+    # Sustained rule is live immediately: a 10x breach fires after exactly
+    # sustained_ticks=3 post-restart samples — no warm-up restart.
+    _write_proc(proc, 7, ticks=0, rss_kb=1000)
+    fired: list[ResourceSignal] = []
+    for _ in range(3):
+        fired += s2.sample([], now=now)
+        now += 30.0
+    rss_sigs = [f for f in fired if f.metric_kind == "rss_bytes"]
+    assert len(rss_sigs) == 1
+    assert rss_sigs[0].mean == pytest.approx(100.0 * 1024)
+
+
+def test_load_resets_streaks_and_pid_state(roots) -> None:
+    proc, _cgroup = roots
+    _write_proc(proc, 7, ticks=0, rss_kb=100)
+    s1 = _sampler(roots, self_pid=7)
+    now = 0.0
+    for _ in range(6):
+        s1.sample([], now=now)
+        now += 30.0
+    # Two elevated samples: a pre-fire streak (2 < sustained_ticks=3) is live.
+    _write_proc(proc, 7, ticks=0, rss_kb=1000)
+    for _ in range(2):
+        assert s1.sample([], now=now) == []
+        now += 30.0
+    assert s1._entities["self"].streaks["rss_bytes"] == 2
+    rows = s1.checkpoint_rows()
+
+    s2 = _sampler(roots, self_pid=7)
+    for metric_kind, entity_key, window_name, blob in rows:
+        assert s2.load_row(metric_kind, entity_key, window_name, blob)
+    st = s2._entities["self"]
+    assert st.streaks == {"cpu_pct": 0, "rss_bytes": 0}  # streaks reset
+    assert st.pid is None and st.prev_ticks is None and st.prev_t is None
+    # The half-stale streak did NOT carry over: a genuine sustained deviation
+    # must re-accumulate the full sustained_ticks before firing.
+    fired: list[ResourceSignal] = []
+    for _ in range(2):
+        fired += s2.sample([], now=now)
+        now += 30.0
+    assert fired == []
+    fired += s2.sample([], now=now)
+    assert [f.metric_kind for f in fired] == ["rss_bytes"]
+
+
+def test_load_row_rejects_bad_rows_without_state_change(roots) -> None:
+    s = _sampler(roots, self_pid=7)
+    good = _rss_blob([1.0, 2.0])
+    assert not s.load_row("resource.rss_bytes", "self", "1h", "garbage")
+    assert s.debug_ring("self", "rss_bytes") is None  # no entity created
+    assert not s.load_row("resource.bogus_metric", "self", "1h", good)
+    assert not s.load_row("rss_bytes", "self", "1h", good)  # missing prefix
+    assert not s.load_row("resource.rss_bytes", "self", "24h", good)  # 1h only
+    assert s._entities == {}
+
+
+def test_corrupt_blob_leaves_existing_entity_untouched(roots) -> None:
+    s = _sampler(roots, self_pid=7)
+    assert s.load_row("resource.rss_bytes", "self", "1h", _rss_blob([5.0, 6.0]))
+    assert not s.load_row("resource.rss_bytes", "self", "1h", '{"ring": ["x"]}')
+    assert list(s.debug_ring("self", "rss_bytes") or []) == [5.0, 6.0]

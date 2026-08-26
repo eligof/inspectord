@@ -5,7 +5,8 @@ the router subscription into the metric engine and the beacon tracker, close
 minute buckets, emit a ``kind=signal`` event per threshold breach and per
 qualifying beacon observation (re-injected into the supervisor's dispatch
 path, where starter-pack ``anomaly.*`` rules turn them into alerts), and
-checkpoint engine + beacon state to ``metric_baseline`` when due.
+checkpoint engine + beacon + resource-sampler state to ``metric_baseline``
+when due.
 """
 
 from __future__ import annotations
@@ -35,6 +36,12 @@ log = get(__name__)
 
 
 _BUCKET_LABEL = {"1h": "per minute", "24h": "per 5 min", "7d": "per 15 min"}
+
+# resource.* checkpoint rows older than this are skipped AND deleted at load:
+# a days-old resource profile misrepresents the unit, and dead units' rows
+# would otherwise live forever. Engine/beacon rows keep their no-cutoff
+# behavior (anomaly-checkpoint spec §2.1).
+_RESOURCE_CHECKPOINT_MAX_AGE_S = 86400
 
 
 def _signal_event(data: SignalData, *, now: datetime) -> Event:
@@ -164,23 +171,40 @@ class AnomalyDetector:
         return self._thread is not None and self._thread.is_alive()
 
     def load_checkpoints(self) -> int:
-        """Restore engine and beacon state from metric_baseline; delete rows that fail to
-        parse so a bad row cannot fail every startup forever. Never raises."""
+        """Restore engine, beacon, and resource-sampler state from metric_baseline;
+        delete rows that fail to parse so a bad row cannot fail every startup
+        forever. resource.* rows older than _RESOURCE_CHECKPOINT_MAX_AGE_S are
+        skipped and deleted (stale profile / dead unit). Never raises."""
         loaded = 0
         try:
+            # age_s in SQL sidesteps tz mixing: updated_at was written from
+            # CURRENT_TIMESTAMP cast to this TIMESTAMP column, so the same
+            # cast on the other side yields a like-for-like difference.
             rows = self._db.query(
-                "SELECT metric_kind, entity_key, window_name, state_json FROM metric_baseline"
+                "SELECT metric_kind, entity_key, window_name, state_json, "
+                "date_diff('second', updated_at, CURRENT_TIMESTAMP::TIMESTAMP) "
+                "FROM metric_baseline"
             ).fetchall()
         except Exception as exc:
             log.warning("could not read metric_baseline checkpoints: %r", exc)
             return 0
-        for metric_kind, entity_key, window_name, blob in rows:
-            if str(window_name) == "beacon":
+        for metric_kind, entity_key, window_name, blob, age_s in rows:
+            kind = str(metric_kind)
+            if kind.startswith("resource."):
+                if age_s is not None and age_s > _RESOURCE_CHECKPOINT_MAX_AGE_S:
+                    log.info(
+                        "dropping stale resource checkpoint row (%s, %s): %ds old",
+                        metric_kind,
+                        entity_key,
+                        age_s,
+                    )
+                    self._delete_checkpoint_row(metric_kind, entity_key, window_name)
+                    continue
+                ok = self._sampler.load_row(kind, str(entity_key), str(window_name), blob)
+            elif str(window_name) == "beacon":
                 ok = self._beacon.load_row(str(entity_key), blob)
             else:
-                ok = self._engine.load_row(
-                    str(metric_kind), str(entity_key), str(window_name), blob
-                )
+                ok = self._engine.load_row(kind, str(entity_key), str(window_name), blob)
             if ok:
                 loaded += 1
                 continue
@@ -190,15 +214,20 @@ class AnomalyDetector:
                 entity_key,
                 window_name,
             )
-            try:
-                self._db.execute(
-                    "DELETE FROM metric_baseline "
-                    "WHERE metric_kind = ? AND entity_key = ? AND window_name = ?",
-                    [metric_kind, entity_key, window_name],
-                )
-            except Exception as exc:
-                log.warning("could not delete corrupt checkpoint row: %r", exc)
+            self._delete_checkpoint_row(metric_kind, entity_key, window_name)
         return loaded
+
+    def _delete_checkpoint_row(
+        self, metric_kind: object, entity_key: object, window_name: object
+    ) -> None:
+        try:
+            self._db.execute(
+                "DELETE FROM metric_baseline "
+                "WHERE metric_kind = ? AND entity_key = ? AND window_name = ?",
+                [metric_kind, entity_key, window_name],
+            )
+        except Exception as exc:
+            log.warning("could not delete checkpoint row: %r", exc)
 
     def checkpoint(self) -> None:
         """Atomically rewrite metric_baseline from current engine state.
@@ -209,10 +238,15 @@ class AnomalyDetector:
         router subscription), while a single bulk unnest-over-list-params
         insert runs in ~2s. The rewrite also makes evicted entities'
         rows disappear for free, so there is no separate per-evicted-key
-        DELETE pass to run. Beacon tracker rows (window_name 'beacon') ride
-        along in the same rewrite rather than getting a separate table.
+        DELETE pass to run. Beacon tracker rows (window_name 'beacon')
+        and resource sampler rows (metric_kind 'resource.*') ride along in
+        the same rewrite rather than getting separate tables.
         """
-        rows = self._engine.checkpoint_rows() + self._beacon.checkpoint_rows()
+        rows = (
+            self._engine.checkpoint_rows()
+            + self._beacon.checkpoint_rows()
+            + self._sampler.checkpoint_rows()
+        )
         # Nothing left to track for these keys once the table is rewritten
         # from scratch below; drain anyway so the engine's internal evicted
         # list doesn't grow unbounded between checkpoints.
