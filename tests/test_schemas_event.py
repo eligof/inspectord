@@ -53,3 +53,21 @@ def test_roundtrip_json() -> None:
     payload = original.model_dump_json()
     parsed = Event.model_validate_json(payload)
     assert parsed == original
+
+
+def test_vulnerability_namespace_roundtrips() -> None:
+    payload = _minimal_event_dict() | {
+        "vulnerability": {"avg_id": "AVG-1", "cve_id": "CVE-2026-1", "package": "p"}
+    }
+    ev = Event.model_validate(payload)
+    assert ev.vulnerability == {"avg_id": "AVG-1", "cve_id": "CVE-2026-1", "package": "p"}
+    parsed = Event.model_validate_json(ev.model_dump_json())
+    assert parsed == ev
+
+
+def test_unknown_namespace_still_rejected() -> None:
+    # extra="forbid" is the reason the vulnerability field is a schema change,
+    # not an optional convenience — pin that it still rejects unknown blocks.
+    bad = _minimal_event_dict() | {"vulnerabilty": {"avg_id": "AVG-1"}}
+    with pytest.raises(ValidationError):
+        Event.model_validate(bad)

@@ -61,6 +61,7 @@ class Event(BaseModel):
     package: dict[str, Any] | None = None
     device: dict[str, Any] | None = None
     persistence: dict[str, Any] | None = None
+    vulnerability: dict[str, Any] | None = None
     rule: dict[str, Any] | None = None
     threat: dict[str, Any] | None = None
     baseline: dict[str, Any] | None = None

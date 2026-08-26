@@ -95,3 +95,29 @@ def test_build_event_carries_threat_block() -> None:
 def test_build_event_threat_defaults_to_none() -> None:
     ev = build_event(module="m", action="a", category=["host"], type_=["info"], severity="info")
     assert ev.threat is None
+
+
+def test_build_event_carries_vulnerability_block() -> None:
+    ev = build_event(
+        module="vuln_scanner",
+        action="vulnerability_found",
+        category=["package"],
+        type_=["info"],
+        severity="low",
+        kind="state",
+        vulnerability={
+            "avg_id": "AVG-2870",
+            "cve_id": "CVE-2026-1234",
+            "package": "openssl",
+            "installed_version": "3.3.1-1",
+            "fixed_version": "3.3.2-1",
+            "severity": "Critical",
+            "status": "Fixed",
+            "fix_in_testing": False,
+            "new": True,
+            "advisory_url": "https://security.archlinux.org/AVG-2870",
+        },
+    )
+    assert ev.vulnerability is not None
+    assert ev.vulnerability["avg_id"] == "AVG-2870"
+    assert ev.vulnerability["new"] is True

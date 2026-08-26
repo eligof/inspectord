@@ -84,6 +84,28 @@ module = "inspectord.workers.udev_monitor"
 name = "persistence_snapshotter"
 module = "inspectord.workers.persistence_snapshotter"
 
+# vuln_scanner matches `pacman -Q` against a LOCAL copy of the Arch security
+# advisories JSON. inspectord never fetches it -- zero egress, not even opt-in
+# (user decision on record, 2026-08-26). YOU keep the file fresh, e.g. a cron:
+#   curl -s https://security.archlinux.org/json -o /var/lib/inspectord/advisories.json.tmp \
+#     && mv /var/lib/inspectord/advisories.json.tmp /var/lib/inspectord/advisories.json
+# (the `mv` matters: the replace must be atomic). Until the file exists, every
+# scan reports `vuln_scan_failed` with reason `advisories_missing` -- honest,
+# not noisy: once per scan interval, not per poll. The panel shows the file's
+# age and warns past advisory_stale_after_s, so a silently dead cron is visible.
+# See docs/superpowers/specs/2026-08-26-vuln-scanner-design.md.
+[[workers]]
+name = "vuln_scanner"
+module = "inspectord.workers.vuln_scanner"
+[workers.config]
+advisory_path = "/var/lib/inspectord/advisories.json"
+# Full-rescan backstop; advisory-file and pacman-db changes rescan sooner.
+interval_s = 86400.0
+# The worker's own tick -- cheap; stat + trigger checks only.
+poll_s = 60.0
+# 14 days: past this the panel styles the advisory-age line as a warning.
+advisory_stale_after_s = 1209600.0
+
 # scanner_runner is the first worker whose job takes MINUTES. Every scanner
 # ships ENABLED -- a scanner nobody turns on detects nothing -- and one that is
 # not set up yet emits `scan_skipped` with a reason instead of failing.

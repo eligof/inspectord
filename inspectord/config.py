@@ -196,6 +196,25 @@ def dev_config(*, base: Path) -> DaemonConfig:
                     "config": {},
                 },
                 {
+                    "name": "vuln_scanner",
+                    "module": "inspectord.workers.vuln_scanner",
+                    # No `enabled` key anywhere: WorkerSpec has none, and
+                    # inclusion in this list IS enablement (vuln design §9).
+                    "config": {
+                        # User-maintained local copy of the Arch advisory JSON
+                        # (their own cron refreshes it; zero egress from us).
+                        "advisory_path": "/var/lib/inspectord/advisories.json",
+                        # Full rescan cadence; file/pacman-db changes trigger
+                        # earlier rescans, so daily is a backstop, not a lag.
+                        "interval_s": 86400.0,
+                        # The worker's own tick -- cheap; stat + trigger checks.
+                        "poll_s": 60.0,
+                        # Panel styles the advisory-age line as a warning past
+                        # this (a silently dead refresh cron gets a face, §6).
+                        "advisory_stale_after_s": 14 * 86400.0,
+                    },
+                },
+                {
                     "name": "scanner_runner",
                     "module": "inspectord.workers.scanner_runner",
                     "config": {

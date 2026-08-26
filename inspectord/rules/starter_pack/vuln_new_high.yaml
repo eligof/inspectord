@@ -1,0 +1,21 @@
+version: 1.0.0
+id: vuln.new_high
+name: "new high-severity vulnerability advisory"
+severity: medium
+category: vuln
+why: |
+  An installed package just started matching a High-severity Arch security
+  advisory that was not matched on the previous scan. One tier below
+  vuln.new_critical, one tier quieter: a desktop-notification `medium` rather
+  than `high`. Medium/Low/Unknown advisories get rows and panel visibility,
+  never alerts.
+false_positives:
+  - "A same-name custom-repo or AUR rebuild whose version scheme diverges from the advisory's."
+  - "A stale advisory file replayed after edits: the row set is trustworthy, the timing is not."
+detect:
+  any_of:
+    # status Unknown gets a row and an event but never an alert (design §4).
+    - event.module == "vuln_scanner" AND event.action == "vulnerability_found" AND vulnerability.new == true AND vulnerability.severity == "High" AND vulnerability.status != "Unknown"
+short: "high-severity vulnerability in {vulnerability.package}: {vulnerability.avg_id}"
+detail: "{vulnerability.package} {vulnerability.installed_version} is affected by {vulnerability.cve_id} ({vulnerability.avg_id}, High, status {vulnerability.status}); fixed version: {vulnerability.fixed_version}. {vulnerability.advisory_url}"
+labels: [vuln, cve]
