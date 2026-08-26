@@ -57,7 +57,13 @@ class ParsedAdvisories:
 
 
 def _clean(value: str) -> str:
-    """Strip control characters (C0 + DEL) and cap the length."""
+    """Strip control characters (C0 + DEL) and cap the length.
+
+    Pre-slice before stripping: a single multi-megabyte string field would
+    otherwise cost a full O(len) pass per scan attempt. 4x the cap leaves
+    room for stripped characters without unbounded work.
+    """
+    value = value[: 4 * MAX_STRING_LEN]
     stripped = "".join(ch for ch in value if ch >= " " and ch != "\x7f")
     return stripped[:MAX_STRING_LEN]
 
@@ -132,7 +138,10 @@ def parse_advisories(data: bytes) -> ParsedAdvisories:
     """Parse the raw dump. Raises AdvisoryLoadError when no scan can proceed."""
     try:
         doc = json.loads(data)
-    except (ValueError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        # RecursionError: ~100 KB of "["*N blows the JSON parser's stack while
+        # sitting far under the size cap; it must fail honestly, not escape the
+        # worker's typed-failure handling (spec section 6).
         raise AdvisoryLoadError("parse_failed") from exc
     if not isinstance(doc, list):
         raise AdvisoryLoadError("parse_failed")

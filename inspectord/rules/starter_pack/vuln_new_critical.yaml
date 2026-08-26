@@ -18,5 +18,5 @@ detect:
     # the tracker has not determined the impact yet, so alerting would guess.
     - event.module == "vuln_scanner" AND event.action == "vulnerability_found" AND vulnerability.new == true AND vulnerability.severity == "Critical" AND vulnerability.status != "Unknown"
 short: "critical vulnerability in {vulnerability.package}: {vulnerability.avg_id}"
-detail: "{vulnerability.package} {vulnerability.installed_version} is affected by {vulnerability.cve_id} ({vulnerability.avg_id}, Critical, status {vulnerability.status}); fixed in {vulnerability.fixed_version}. {vulnerability.advisory_url}"
+detail: "{vulnerability.package} {vulnerability.installed_version} is affected by {vulnerability.cve_id} ({vulnerability.avg_id}, Critical, status {vulnerability.status}); fixed version: {vulnerability.fixed_version}. {vulnerability.advisory_url}"
 labels: [vuln, cve]

@@ -220,3 +220,8 @@ def test_load_valid_file_round_trips(tmp_path: Path) -> None:
 
 def test_default_cap_is_64_mb() -> None:
     assert MAX_FILE_BYTES == 64 * 1024 * 1024
+
+
+def test_deeply_nested_json_fails_typed() -> None:
+    with pytest.raises(AdvisoryLoadError):
+        parse_advisories(b"[" * 100_000)
