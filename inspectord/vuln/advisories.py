@@ -68,7 +68,7 @@ def _clean(value: str) -> str:
     return stripped[:MAX_STRING_LEN]
 
 
-def _clean_optional(value: object) -> str | None | _Invalid:
+def _clean_optional(value: object) -> str | _Invalid | None:
     if value is None:
         return None
     if isinstance(value, str):
