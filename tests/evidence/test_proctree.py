@@ -488,9 +488,9 @@ def test_cmdline_name_value_prefix() -> None:
 
 def test_cmdline_url_userinfo_password() -> None:
     got = scrub_cmdline(["git", "clone", "https://bob:pw123@github.com/x/y.git"])
-    assert "pw123" not in got
-    assert "github.com" in got
-    assert "bob" in got
+    # Exact-output comparison (a substring check here trips CodeQL's
+    # incomplete-url-sanitization heuristic and asserts less anyway).
+    assert got == "git clone 'https://bob:<redacted>@github.com/x/y.git'"
 
 
 def test_cmdline_benign_verbatim() -> None:
