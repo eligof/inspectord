@@ -29,6 +29,7 @@ from inspectorctl.web.routes import (
     processes,
     scanners,
     services,
+    vulnerabilities,
 )
 
 
@@ -95,5 +96,6 @@ def create_app(*, socket_path: Path, allowed_hosts: Iterable[str] | None = None)
     app.include_router(hunt.router)
     app.include_router(entity.router)
     app.include_router(audit.router)
+    app.include_router(vulnerabilities.router)
 
     return app

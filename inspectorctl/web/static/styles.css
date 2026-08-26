@@ -71,6 +71,7 @@ td pre { margin: 4px 0 0; max-width: 60ch; white-space: pre-wrap; overflow-wrap:
 .muted { color: var(--muted); }
 .bad { color: var(--bad); }
 .ok { color: var(--ok); }
+.warn { color: var(--high); }
 button, input[type=submit] {
   background: var(--panel); color: var(--text);
   border: 1px solid var(--border); padding: 6px 12px;

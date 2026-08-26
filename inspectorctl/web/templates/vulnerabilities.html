@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% from "_macros.html" import severity_badge %}
+
+{% block content %}
+<h1>Vulnerabilities</h1>
+
+{% if freshness %}
+  {% if freshness.mode == 'never' %}
+  <div class="muted">never scanned — the vuln_scanner worker has not reported yet.</div>
+  {% elif freshness.mode == 'failed' %}
+  <div class="error">last scan attempt {{ freshness.ts }} — failed: {{ freshness.reason }}</div>
+  {% else %}
+  <div class="muted">last scan {{ freshness.ts }};
+    {% if freshness.stale %}
+    <span class="warn">{% if freshness.age_days is none %}advisories age unknown{% else %}advisories updated {{ freshness.age_days }} days ago{% endif %} — is the refresh cron alive?</span>
+    {% else %}
+    <span>advisories updated {{ freshness.age_days }} days ago</span>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endif %}
+
+<form class="filter-bar" method="get" action="/vulnerabilities">
+  <label class="muted">Severity:</label>
+  <select name="severity">
+    <option value="" {{ 'selected' if not severity else '' }}>any</option>
+    <option value="Critical" {{ 'selected' if severity == 'Critical' else '' }}>Critical</option>
+    <option value="High" {{ 'selected' if severity == 'High' else '' }}>High</option>
+    <option value="Medium" {{ 'selected' if severity == 'Medium' else '' }}>Medium</option>
+    <option value="Low" {{ 'selected' if severity == 'Low' else '' }}>Low</option>
+    <option value="Unknown" {{ 'selected' if severity == 'Unknown' else '' }}>Unknown</option>
+  </select>
+  <label class="muted">Acked:</label>
+  <select name="include_acked">
+    <option value="1" {{ 'selected' if include_acked else '' }}>include</option>
+    <option value="0" {{ 'selected' if not include_acked else '' }}>hide</option>
+  </select>
+  <label class="muted">Resolved:</label>
+  <select name="include_resolved">
+    <option value="0" {{ 'selected' if not include_resolved else '' }}>hide</option>
+    <option value="1" {{ 'selected' if include_resolved else '' }}>include</option>
+  </select>
+  <button type="submit">Filter</button>
+</form>
+
+{% if rows %}
+<table>
+  <thead>
+    <tr>
+      <th>Package</th>
+      <th>Installed</th>
+      <th>CVE</th>
+      <th>Severity</th>
+      <th>Fixed in</th>
+      <th>Status</th>
+      <th>Fix</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for v in rows %}
+    <tr>
+      <td class="mono">{{ v.package }}</td>
+      <td class="mono">{{ v.installed_version }}</td>
+      <td class="mono">
+        <a href="{{ v.advisory_url }}" target="_blank" rel="noopener">{{ v.cve_id }}</a>
+        <span class="muted">({{ v.avg_id }})</span>
+      </td>
+      <td>{{ severity_badge(v.severity | lower) }}</td>
+      <td class="mono">{{ v.fixed_version or '—' }}{% if v.fix_in_testing %} <span class="warn">(in [testing])</span>{% endif %}</td>
+      <td>{{ v.status }}</td>
+      <td class="mono muted" title="suggested remediation">pacman -Syu {{ v.package }}{% if v.fix_in_testing %} — fix in [testing] only{% endif %}</td>
+      <td>
+        {% if v.resolved_at %}<span class="ok">resolved {{ v.resolved_at }}</span>{% endif %}
+        {% if v.acked_at %}
+        <span class="muted">acked {{ v.acked_at }}{% if v.acked_note %} — {{ v.acked_note }}{% endif %}</span>
+        {% else %}
+        <form method="post" action="/vulnerabilities/ack" class="inline">
+          <input type="hidden" name="avg_id" value="{{ v.avg_id }}">
+          <input type="hidden" name="cve_id" value="{{ v.cve_id }}">
+          <input type="hidden" name="package" value="{{ v.package }}">
+          <input type="text" name="note" placeholder="note (optional)">
+          <button type="submit">Ack</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No vulnerabilities match the current filters.</div>
+{% endif %}
+{% endblock %}

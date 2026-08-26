@@ -69,6 +69,10 @@ from inspectord.state.ipc_handlers import (
 )
 from inspectord.storage.db import Database
 from inspectord.supervisor import Supervisor
+from inspectord.vuln.ipc_handlers import (
+    handle_ack_vulnerability,
+    handle_list_vulnerabilities,
+)
 
 log = get("inspectord")
 
@@ -376,6 +380,21 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
                 params=params, db_path=cfg.storage.db_path
             ),
             mutates=False,
+        ),
+        # Vulnerabilities (vuln-scanner design §7).
+        Method(
+            name="list_vulnerabilities",
+            handler=lambda params: handle_list_vulnerabilities(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="ack_vulnerability",
+            handler=lambda params: handle_ack_vulnerability(
+                params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=True,
         ),
     ]
 
