@@ -117,6 +117,48 @@ class ResourceSampler:
             self._sample_one(key, unit, pid, now, out)
         return out
 
+    def checkpoint_rows(self) -> list[tuple[str, str, str, str]]:
+        """Rows shaped for metric_baseline: (metric_kind, entity_key, window_name, blob).
+
+        Only the 1h ring is checkpointed — it is the only ring ``_observe``
+        ever reads (the 24h/7d rings accumulate unused by design). Entities
+        whose ring is still empty are skipped: an empty-blob row restores
+        nothing and would only clutter the table.
+        """
+        return [
+            (f"resource.{metric}", key, "1h", st.baselines[metric].serialize_window("1h"))
+            for key, st in self._entities.items()
+            for metric in _METRICS
+            if st.baselines[metric].ring("1h")
+        ]
+
+    def load_row(self, metric_kind: str, entity_key: str, window_name: str, blob: str) -> bool:
+        """Restore one entity-metric's 1h ring from a checkpoint blob. False
+        (and no state change) on any unknown kind/window or parse problem —
+        reload must never fail.
+
+        Deliberately NOT restored: ``pid``/``prev_ticks``/``prev_t`` (stale
+        after a restart — the first sample re-resolves and re-anchors them)
+        and ``streaks`` (reset to 0 so a genuine sustained deviation must
+        re-accumulate the full ``sustained_ticks`` rather than firing off a
+        half-stale streak).
+        """
+        prefix = "resource."
+        if not metric_kind.startswith(prefix) or window_name != "1h":
+            return False
+        metric = metric_kind[len(prefix) :]
+        if metric not in _METRICS:
+            return False
+        st = self._entities.get(entity_key)
+        fresh = st is None
+        if st is None:
+            st = _EntityState()
+        if not st.baselines[metric].load_window("1h", blob):
+            return False
+        if fresh:
+            self._entities[entity_key] = st
+        return True
+
     def debug_ring(self, entity_key: str, metric: str) -> deque[float] | None:
         """Test/introspection hook: the entity-metric's 1h baseline ring."""
         st = self._entities.get(entity_key)

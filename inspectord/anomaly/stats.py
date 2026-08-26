@@ -256,10 +256,18 @@ class MetricEngine:
             rows.extend(
                 (metric_kind, entity_key, name, ws.serialize_window(name)) for name, _, _ in WINDOWS
             )
+            entity = self._entities.get((metric_kind, entity_key))
+            if entity:
+                # Persist the rendering context too, so a signal that fires
+                # between restart and the entity's first fresh observation
+                # does not render context-less. Empty dict: no row, no noise.
+                rows.append((metric_kind, entity_key, "entity", json.dumps(entity)))
         return rows
 
     def load_row(self, metric_kind: str, entity_key: str, window_name: str, blob: str) -> bool:
         key = (metric_kind, entity_key)
+        if window_name == "entity":
+            return self._load_entity_row(key, blob)
         created = key not in self._stats
         if created:
             self._admit(key, {})
@@ -269,6 +277,24 @@ class MetricEngine:
                 self._entities.pop(key, None)
                 self._last_active.pop(key, None)
             return False
+        return True
+
+    def _load_entity_row(self, key: tuple[str, str], blob: str) -> bool:
+        """Restore one entity dict from a checkpoint blob. False (and no
+        state change) on any parse or shape problem — reload must never fail.
+        Order-independent: works whether the key's window rows loaded first
+        (dict replaces the empty admit-time one) or load later (the key is
+        admitted here and its rings restore into it)."""
+        try:
+            entity = json.loads(blob)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(entity, dict) or not all(isinstance(v, dict) for v in entity.values()):
+            return False
+        if key not in self._stats:
+            self._admit(key, entity)
+        else:
+            self._entities[key] = entity
         return True
 
     def _admit(self, key: tuple[str, str], entity: dict[str, dict[str, object]]) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 from inspectord.anomaly.stats import MetricEngine, MetricSample
@@ -140,6 +141,7 @@ def test_checkpoint_rows_round_trip() -> None:
         ("new_conn_per_min", "curl", "1h"),
         ("new_conn_per_min", "curl", "24h"),
         ("new_conn_per_min", "curl", "7d"),
+        ("new_conn_per_min", "curl", "entity"),
     }
     eng2 = MetricEngine(_cfg())
     for metric_kind, entity_key, window_name, blob in rows:
@@ -172,3 +174,66 @@ def test_restored_entity_survives_warmup_reset() -> None:
     eng2.ingest(_sample(100.0), ts=_min(6))
     signals = eng2.tick(now=_min(7))
     assert any(s.z > 3.0 for s in signals)
+
+
+# --- entity-dict persistence (anomaly-checkpoint spec §2.2) ------------------
+
+
+def _warm_rows() -> list[tuple[str, str, str, str]]:
+    """Checkpoint rows for one warm entity: calm ring, nonzero stddev."""
+    eng = MetricEngine(_cfg())
+    for i, v in enumerate([10.0, 10.0, 12.0, 10.0, 10.0, 10.0]):
+        eng.ingest(_sample(v), ts=_min(i))
+        eng.tick(now=_min(i + 1))
+    return eng.checkpoint_rows()
+
+
+def test_entity_row_round_trip_context_present_before_any_observe() -> None:
+    rows = _warm_rows()
+    entity_rows = [r for r in rows if r[2] == "entity"]
+    assert len(entity_rows) == 1
+    assert json.loads(entity_rows[0][3]) == {"process": {"name": "curl"}}
+
+    eng2 = MetricEngine(_cfg())
+    for r in rows:
+        assert eng2.load_row(*r) is True
+    # A signal fired before ANY post-restart observe renders with full
+    # context: the first zero-filled minute breaches the calm baseline.
+    eng2.tick(now=_min(7))  # initializes the tick clock, closes nothing
+    signals = eng2.tick(now=_min(8))  # zero-fills minute 7 -> breach
+    assert signals and all(s.entity == {"process": {"name": "curl"}} for s in signals)
+
+
+def test_empty_entity_dict_produces_no_row() -> None:
+    eng = MetricEngine(_cfg())
+    # Window-row-only load admits the key with an empty dict.
+    blob = json.dumps({"ring": [1.0, 2.0]})
+    assert eng.load_row("new_conn_per_min", "curl", "1h", blob) is True
+    rows = eng.checkpoint_rows()
+    assert [r for r in rows if r[2] == "entity"] == []
+
+
+def test_entity_row_loads_in_either_order() -> None:
+    rows = _warm_rows()
+    entity_row = next(r for r in rows if r[2] == "entity")
+    window_rows = [r for r in rows if r[2] != "entity"]
+    for ordering in ([entity_row, *window_rows], [*window_rows, entity_row]):
+        eng2 = MetricEngine(_cfg())
+        for r in ordering:
+            assert eng2.load_row(*r) is True
+        assert eng2._entities[("new_conn_per_min", "curl")] == {"process": {"name": "curl"}}
+        ws = eng2.stats_for("new_conn_per_min", "curl")
+        assert ws is not None and len(ws.ring("1h")) == 6
+
+
+def test_corrupt_entity_blob_rejected_without_state_change() -> None:
+    eng = MetricEngine(_cfg())
+    assert eng.load_row("new_conn_per_min", "curl", "entity", "garbage") is False
+    assert eng.load_row("new_conn_per_min", "curl", "entity", "[1, 2]") is False
+    assert eng.load_row("new_conn_per_min", "curl", "entity", '{"process": 7}') is False
+    assert eng.stats_for("new_conn_per_min", "curl") is None
+    assert ("new_conn_per_min", "curl") not in eng._entities
+    # On an already-tracked key a corrupt blob must not clobber the dict.
+    eng.ingest(_sample(1.0), ts=_min(0))
+    assert eng.load_row("new_conn_per_min", "curl", "entity", "garbage") is False
+    assert eng._entities[("new_conn_per_min", "curl")] == {"process": {"name": "curl"}}

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
+import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from inspectord.anomaly import beacon, metrics
 from inspectord.anomaly.detector import AnomalyDetector
 from inspectord.anomaly.entity_baseline import ResourceSignal
 from inspectord.anomaly.first_sighting import FirstSightingTracker
@@ -222,13 +226,15 @@ def test_checkpoint_persists_and_reloads(tmp_path: Path) -> None:
         "SELECT window_name FROM metric_baseline "
         "WHERE metric_kind = 'new_conn_per_min' AND entity_key = 'curl'"
     ).fetchall()
-    assert {r[0] for r in rows} == {"1h", "24h", "7d"}
+    assert {r[0] for r in rows} == {"1h", "24h", "7d", "entity"}
 
     det2, _, _ = _stat_detector(db)
     det2.load_checkpoints()
     ws = det2._engine.stats_for("new_conn_per_min", "curl")
     assert ws is not None
     assert len(ws.ring("1h")) == 6
+    # The rendering context rode along: present before any fresh observe.
+    assert det2._engine._entities[("new_conn_per_min", "curl")] == {"process": {"name": "curl"}}
     db.close()
 
 
@@ -441,6 +447,9 @@ class _StubSampler:
         self.calls.append(list(units))
         return self.signals
 
+    def checkpoint_rows(self) -> list[tuple[str, str, str, str]]:
+        return []
+
 
 def _svc_signal() -> ResourceSignal:
     return ResourceSignal(
@@ -532,3 +541,86 @@ def test_run_loop_fires_both_cadences(tmp_path: Path) -> None:
     assert len(stub.calls) >= 3, "resource cadence never fired off the run loop"
     assert tracker.flush_calls >= 2, "main tick cadence never fired off the run loop"
     db.close()
+
+
+# --- resource baseline checkpointing (anomaly-checkpoint spec §2.1) ----------
+
+
+def _seeded_sampler(det: AnomalyDetector, values: list[float] | None = None) -> None:
+    """Give the detector's real sampler a warm 1h rss ring for one service."""
+    blob = json.dumps({"ring": values if values is not None else [102400.0] * 6})
+    assert det._sampler.load_row("resource.rss_bytes", "svc:foo.service", "1h", blob)
+
+
+def test_checkpoint_writes_resource_rows_and_reload_restores_all_three(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    det, router, _ = _stat_detector(db)
+    # Engine + beacon state: 10 connections at a steady 60 s cadence.
+    _cadence_events(router, 10)
+    det._tick(now=T0 + timedelta(minutes=10))
+    _seeded_sampler(det)
+    det.checkpoint()
+    rows = db.query(
+        "SELECT entity_key, window_name FROM metric_baseline "
+        "WHERE metric_kind = 'resource.rss_bytes'"
+    ).fetchall()
+    assert rows == [("svc:foo.service", "1h")]
+
+    det2, _, _ = _stat_detector(db)
+    loaded = det2.load_checkpoints()
+    assert loaded > 0
+    # Engine restored.
+    ws = det2._engine.stats_for("new_conn_per_min", "curl")
+    assert ws is not None and len(ws.ring("1h")) == 10
+    # Beacon restored.
+    assert len(det2._beacon.checkpoint_rows()) == 1
+    # Sampler restored.
+    assert list(det2._sampler.debug_ring("svc:foo.service", "rss_bytes") or []) == [102400.0] * 6
+    db.close()
+
+
+def test_stale_resource_row_skipped_and_deleted_engine_rows_kept(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.duckdb")
+    db.connect()
+    run_migrations(db)
+    good_blob = json.dumps({"ring": [1.0, 2.0, 3.0]})
+    db.execute(
+        "INSERT INTO metric_baseline VALUES "
+        "('resource.rss_bytes', 'svc:dead.service', '1h', ?, now() - INTERVAL 25 HOUR), "
+        "('resource.cpu_pct', 'svc:live.service', '1h', ?, now()), "
+        "('new_conn_per_min', 'curl', '1h', ?, now() - INTERVAL 25 HOUR)",
+        [good_blob, good_blob, good_blob],
+    )
+    det, _, _ = _stat_detector(db)
+    det.load_checkpoints()
+    # Stale resource row: skipped (no state) AND deleted.
+    assert det._sampler.debug_ring("svc:dead.service", "rss_bytes") is None
+    # Fresh resource row: loaded and kept.
+    assert list(det._sampler.debug_ring("svc:live.service", "cpu_pct") or []) == [1.0, 2.0, 3.0]
+    # Engine rows have NO cutoff: the 25 h old row is loaded and kept.
+    ws = det._engine.stats_for("new_conn_per_min", "curl")
+    assert ws is not None and list(ws.ring("1h")) == [1.0, 2.0, 3.0]
+    remaining = db.query(
+        "SELECT metric_kind, entity_key FROM metric_baseline ORDER BY metric_kind"
+    ).fetchall()
+    assert remaining == [
+        ("new_conn_per_min", "curl"),
+        ("resource.cpu_pct", "svc:live.service"),
+    ]
+    db.close()
+
+
+def test_no_engine_or_beacon_metric_kind_collides_with_resource_prefix() -> None:
+    """The resource.* dispatch prefix must be unclaimable by the other two
+    checkpoint sources (anomaly-checkpoint spec §2.1)."""
+    engine_kinds = re.findall(r'metric_kind="([^"]+)"', inspect.getsource(metrics))
+    assert engine_kinds, "extract_samples metric kinds not found — update this test"
+    assert all(not k.startswith("resource.") for k in engine_kinds)
+    # BeaconTracker.checkpoint_rows uses the single fixed kind "beacon".
+    cfg = AnomalyConfig()
+    tracker = beacon.BeaconTracker(cfg)
+    tracker.observe(process_name="curl", dst_ip="203.0.113.9", dst_port=443, ts=T0)
+    beacon_kinds = {row[0] for row in tracker.checkpoint_rows()}
+    assert beacon_kinds == {"beacon"}

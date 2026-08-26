@@ -190,7 +190,7 @@ def test_stop_checkpoints_engine_state(tmp_path: Path) -> None:
     rows = db.query(
         "SELECT count(*) FROM metric_baseline WHERE metric_kind = 'sudo_per_min'"
     ).fetchall()
-    assert rows[0][0] == 3  # one row per window
+    assert rows[0][0] == 4  # one row per window + the entity-dict row
     db.close()
 
 
