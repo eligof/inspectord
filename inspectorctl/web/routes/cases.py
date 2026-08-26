@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -68,7 +69,7 @@ def _case_mutate(
         call(socket_path, method, params)
     except WebIpcError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return RedirectResponse(url=f"/cases/{case_id}", status_code=303)
+    return RedirectResponse(url=f"/cases/{quote(case_id, safe='')}", status_code=303)
 
 
 @router.post("/cases/{case_id}/notes")

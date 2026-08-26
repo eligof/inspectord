@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -118,7 +119,7 @@ def alert_open_case(request: Request, alert_id: str) -> RedirectResponse:
     except WebIpcError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     case_id = result["case_id"]
-    return RedirectResponse(url=f"/cases/{case_id}", status_code=303)
+    return RedirectResponse(url=f"/cases/{quote(case_id, safe='')}", status_code=303)
 
 
 @router.post("/alerts/{alert_id}/attach-case")
@@ -133,4 +134,4 @@ def alert_attach_case(
         )
     except WebIpcError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return RedirectResponse(url=f"/alerts/{alert_id}", status_code=303)
+    return RedirectResponse(url=f"/alerts/{quote(alert_id, safe='')}", status_code=303)
