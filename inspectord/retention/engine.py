@@ -72,6 +72,19 @@ def _naive_utc(now: datetime) -> datetime:
     return now.astimezone(UTC).replace(tzinfo=None)
 
 
+def _size_or_zero(path: Path) -> int:
+    """stat() that tolerates a file vanishing between iterdir and stat.
+
+    Note: a .jsonl.gz-named symlink is followed here, so quota accounting uses
+    the target's size while deletion would unlink only the link -- accounting
+    skew only, never over-deletion; the dir is daemon-owned 0700.
+    """
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def prune_events(db: Database, *, now: datetime, days: int, max_rows: int) -> int:
     """Delete enriched events older than ``days``, at most ``max_rows`` per run (§5.1).
 
@@ -91,7 +104,7 @@ def prune_events(db: Database, *, now: datetime, days: int, max_rows: int) -> in
             "  AND event_id NOT IN ("
             "    SELECT event_id FROM events_enriched"
             "    WHERE module = 'supervisor' AND action = 'audit_head'"
-            "    ORDER BY ts DESC LIMIT 1)"
+            "    ORDER BY ts DESC, event_id DESC LIMIT 1)"
             "  LIMIT ?)",
             [cutoff, limit],
         ).fetchone()
@@ -162,8 +175,8 @@ def prune_journal_files(
 
     # Quota pass: evict oldest-first while over quota; the floor bounds a flood.
     quota_bytes = quota_mb * 2**20
-    usage = sum(p.stat().st_size for _, p in remaining)
-    usage += sum(p.stat().st_size for p in unparseable)
+    usage = sum(_size_or_zero(p) for _, p in remaining)
+    usage += sum(_size_or_zero(p) for p in unparseable)
     floor_cutoff = today - timedelta(days=floor_days)
     deletable = sorted(
         (file_date, path)
@@ -173,7 +186,7 @@ def prune_journal_files(
     for _file_date, path in deletable:
         if usage <= quota_bytes:
             break
-        size = path.stat().st_size
+        size = _size_or_zero(path)
         path.unlink()
         usage -= size
         result.files_deleted += 1

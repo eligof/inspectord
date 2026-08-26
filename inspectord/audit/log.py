@@ -198,7 +198,7 @@ def newest_anchor(db: Database) -> tuple[int, str] | None:
     row = db.query(
         "SELECT payload_json FROM events_enriched "
         "WHERE module = 'supervisor' AND action = 'audit_head' "
-        "ORDER BY ts DESC LIMIT 1"
+        "ORDER BY ts DESC, event_id DESC LIMIT 1"
     ).fetchone()
     if row is None:
         return None
