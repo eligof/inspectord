@@ -250,3 +250,31 @@ def test_read_evidence_blob_missing_from_store_raises(tmp_path: Path) -> None:
     _add_evidence(db, case_id, "file", sha, "/pruned")
     with pytest.raises(export.EvidenceNotFound):
         export.read_evidence_blob(db, fstore, case_id, sha)
+
+
+def test_read_evidence_blob_process_tree_downloads_as_json(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    fstore = _store(tmp_path)
+    _seed_alert(db, "a1")
+    case_id = store.open_case(db, alert_id="a1")
+    sha = fstore.put(b'{"root_pid": 42, "nodes": []}')
+    _add_evidence(db, case_id, "process_tree", sha, "")
+    _data, filename, media = export.read_evidence_blob(db, fstore, case_id, sha)
+    assert media == "application/json"
+    assert filename == f"{sha[:12]}-process_tree.json"
+
+
+def test_build_narrative_notes_process_tree_redacted_env() -> None:
+    case = {
+        "case_id": "c1",
+        "title": "t",
+        "status": "open",
+        "opened_at": "x",
+        "closed_at": None,
+        "alerts": [],
+        "timeline": [],
+        "evidence": [],
+    }
+    text = export._build_narrative(case, skipped=[])
+    assert "process_tree" in text
+    assert "redacted-but-structured environment data" in text

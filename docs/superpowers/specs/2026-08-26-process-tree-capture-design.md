@@ -108,10 +108,14 @@ All rules are module constants in `proctree.py`, reviewable at a glance.
    shape (`eyJ` + two dot-separated base64url segments). Matched spans →
    `<redacted>`.
 5. **cmdline scrub** (mirrors the env philosophy): redact the value after
-   `Authorization:`/`Bearer`, `-u`/`--user` colon-pairs, `--password=X` /
-   `password=X`, the argument following `sshpass -p` and `mysql -p<glued>`, URL
-   userinfo passwords (rule 3), and `NAME=value` prefixes whose NAME matches rule 1.
-   Everything else verbatim.
+   `Authorization:`/`Bearer` (including the three-arg split form), `-u`/`--user`
+   colon-pairs, `--password=X` / `--password X` / `password=X`, the argument
+   following `sshpass -p`, glued `-pSECRET` for the mysql family (mysql,
+   mysqldump, mysqladmin, mariadb, mariadb-dump), URL userinfo passwords
+   (rule 3 — split at the LAST `@`, so raw-`@` passwords redact fully), and
+   `NAME=value` prefixes whose NAME matches rule 1. Everything else verbatim.
+   Stated gap: other tools' space-form password flags (beyond `--password`) are
+   not enumerated; the rule-4 backstop still catches recognizable token formats.
 
 `env_redacted` counts redacted variables. Rationale unchanged: predictable, auditable
 list-based matching over entropy heuristics; the backstop covers unambiguous formats
