@@ -226,13 +226,15 @@ def test_checkpoint_persists_and_reloads(tmp_path: Path) -> None:
         "SELECT window_name FROM metric_baseline "
         "WHERE metric_kind = 'new_conn_per_min' AND entity_key = 'curl'"
     ).fetchall()
-    assert {r[0] for r in rows} == {"1h", "24h", "7d"}
+    assert {r[0] for r in rows} == {"1h", "24h", "7d", "entity"}
 
     det2, _, _ = _stat_detector(db)
     det2.load_checkpoints()
     ws = det2._engine.stats_for("new_conn_per_min", "curl")
     assert ws is not None
     assert len(ws.ring("1h")) == 6
+    # The rendering context rode along: present before any fresh observe.
+    assert det2._engine._entities[("new_conn_per_min", "curl")] == {"process": {"name": "curl"}}
     db.close()
 
 
