@@ -57,6 +57,17 @@ class EvidenceCollector:
         self._store = store
         self._lock = threading.Lock()
 
+    @property
+    def capture_lock(self) -> threading.Lock:
+        """The lock serializing captures.
+
+        The retention evidence pruner runs entirely under it (retention spec
+        §5.4): ``ForensicStore.put`` is idempotent-by-existence, so an
+        unserialized pruner could unlink a blob a concurrent capture just
+        deduped against.
+        """
+        return self._lock
+
     def capture(self, alert: Alert, event: Event) -> None:
         if alert.severity not in _TRIGGER:
             return

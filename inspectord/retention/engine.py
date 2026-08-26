@@ -9,10 +9,16 @@ are converted to naive UTC at the query boundary, matching the DB convention
 
 from __future__ import annotations
 
+import contextlib
+import json
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from inspectord.config import RetentionConfig
+from inspectord.evidence.store import ForensicStore
 from inspectord.storage.db import Database
 
 # One DELETE per chunk keeps individual statements bounded; the per-run budget
@@ -20,6 +26,9 @@ from inspectord.storage.db import Database
 _EVENTS_DELETE_CHUNK = 10_000
 
 _JOURNAL_SUFFIX = ".jsonl.gz"
+
+# Crashed-put() debris (`.tmp-*` under evidence_root) older than this is swept (§5.4).
+_TMP_DEBRIS_MAX_AGE_S = 86400.0
 
 
 @dataclass
@@ -192,3 +201,186 @@ def prune_alerts(db: Database, *, now: datetime, days: int) -> int:
         [cutoff],
     ).fetchone()
     return int(row[0]) if row is not None else 0
+
+
+@dataclass
+class EvidencePruneResult:
+    """Outcome of the evidence pruner alone (folded into RetentionReport)."""
+
+    blobs_deleted: int = 0
+    pruned_shas: list[str] = field(default_factory=list)
+
+
+def _has_younger_row(db: Database, sha: str, cutoff: datetime) -> bool:
+    row = db.query(
+        "SELECT 1 FROM case_evidence WHERE sha256 = ? AND captured_at >= ? LIMIT 1",
+        [sha, cutoff],
+    ).fetchone()
+    return row is not None
+
+
+def _stamp_tombstones(db: Database, sha: str, pruned_at_iso: str) -> None:
+    """Merge the pruned-provenance marker into every tombstone row for ``sha`` (§5.4).
+
+    A missing blob WITHOUT this marker is itself an indicator of tampering;
+    the marker also removes the sha from future candidate scans.
+    """
+    rows = db.query(
+        "SELECT case_id, kind, original_path, meta_json FROM case_evidence WHERE sha256 = ?",
+        [sha],
+    ).fetchall()
+    for case_id, kind, original_path, meta_json in rows:
+        meta: dict[str, object] = {}
+        if meta_json:
+            with contextlib.suppress(ValueError):
+                parsed = json.loads(meta_json)
+                if isinstance(parsed, dict):
+                    meta = parsed
+        meta["pruned_at"] = pruned_at_iso
+        meta["pruned_by"] = "auto:retention"
+        db.execute(
+            "UPDATE case_evidence SET meta_json = ? "
+            "WHERE case_id = ? AND kind = ? AND sha256 = ? AND original_path = ?",
+            [json.dumps(meta), case_id, kind, sha, original_path],
+        )
+
+
+def prune_evidence(
+    db: Database,
+    evidence_root: Path,
+    *,
+    now: datetime,
+    days: int,
+    capture_lock: threading.Lock | None,
+) -> EvidencePruneResult:
+    """Delete forensic blobs whose every reference is stale and unprotected (§5.4).
+
+    Candidates are the DISTINCT shas among ``case_evidence`` rows older than
+    the cutoff whose ``meta_json`` does not already carry a ``pruned_at``
+    marker. A sha is prunable iff it has no younger row, every referencing
+    case is closed, and no referencing case has a critical alert (§4.2). The
+    whole body runs under the EvidenceCollector's capture lock so a concurrent
+    capture cannot dedup against a blob mid-unlink. ``case_evidence`` rows are
+    never deleted; on unlink (or an already-missing blob) every row for the
+    sha is stamped with pruned provenance — but a missing blob counts nothing.
+    Also sweeps ``.tmp-*`` debris older than one day under ``evidence_root``.
+    """
+    cutoff = _naive_utc(now) - timedelta(days=days)
+    pruned_at_iso = now.astimezone(UTC).isoformat()
+    result = EvidencePruneResult()
+    store = ForensicStore(evidence_root)
+    lock: contextlib.AbstractContextManager[object] = (
+        capture_lock if capture_lock is not None else contextlib.nullcontext()
+    )
+    with lock:
+        candidates = [
+            str(r[0])
+            for r in db.query(
+                "SELECT DISTINCT sha256 FROM case_evidence "
+                "WHERE captured_at < ? "
+                "  AND (meta_json IS NULL OR meta_json NOT LIKE '%\"pruned_at\"%') "
+                "ORDER BY sha256",
+                [cutoff],
+            ).fetchall()
+        ]
+        for sha in candidates:
+            if _has_younger_row(db, sha, cutoff):
+                continue
+            not_closed = db.query(
+                "SELECT 1 FROM case_evidence ce JOIN cases c ON c.case_id = ce.case_id "
+                "WHERE ce.sha256 = ? AND c.status != 'closed' LIMIT 1",
+                [sha],
+            ).fetchone()
+            if not_closed is not None:
+                continue
+            critical = db.query(
+                "SELECT 1 FROM case_evidence ce "
+                "JOIN case_alert ca ON ca.case_id = ce.case_id "
+                "JOIN alerts a ON a.alert_id = ca.alert_id "
+                "WHERE ce.sha256 = ? AND a.severity = 'critical' LIMIT 1",
+                [sha],
+            ).fetchone()
+            if critical is not None:
+                continue
+            blob = store.path_for(sha)
+            if blob.exists():
+                # Belt-and-braces inside the lock: re-check for a row captured
+                # since the candidate scan immediately before the unlink.
+                if _has_younger_row(db, sha, cutoff):
+                    continue
+                blob.unlink()
+                # Best-effort: drop the shard dir once its last blob is gone.
+                with contextlib.suppress(OSError):
+                    blob.parent.rmdir()
+                result.blobs_deleted += 1
+                result.pruned_shas.append(sha)
+            # Already-missing blob: stamp the tombstones the same way, but
+            # count nothing — no phantom daily counts.
+            _stamp_tombstones(db, sha, pruned_at_iso)
+        # Sweep crashed-put() debris.
+        root = Path(evidence_root)
+        if root.is_dir():
+            debris_cutoff = time.time() - _TMP_DEBRIS_MAX_AGE_S
+            for tmp in root.rglob(".tmp-*"):
+                with contextlib.suppress(OSError):
+                    if tmp.is_file() and tmp.stat().st_mtime < debris_cutoff:
+                        tmp.unlink()
+    return result
+
+
+def run_retention(
+    db: Database,
+    *,
+    cfg: RetentionConfig,
+    journal_dir: Path,
+    evidence_root: Path,
+    now: datetime,
+    capture_lock: threading.Lock | None = None,
+) -> RetentionReport:
+    """Run every pruner, each independently guarded, then checkpoint (§5, §5.5).
+
+    ``cfg.enabled`` is the caller's gate (the supervisor tick); the engine
+    always runs. A failing surface lands in ``errors`` and the remaining
+    surfaces still run. When any DB-surface count is > 0, a best-effort
+    ``CHECKPOINT`` makes the freed blocks reusable (failure → ``errors``).
+    """
+    _naive_utc(now)  # a naive `now` must raise at the caller, not land in errors
+    report = RetentionReport()
+    try:
+        report.events_deleted = prune_events(
+            db, now=now, days=cfg.events_days, max_rows=cfg.events_max_rows_per_run
+        )
+    except Exception as exc:
+        report.errors.append(f"events: {exc!r}")
+    try:
+        journal = prune_journal_files(
+            db,
+            journal_dir,
+            now=now,
+            days=cfg.journal_days,
+            quota_mb=cfg.journal_quota_mb,
+            floor_days=cfg.journal_quota_floor_days,
+        )
+        report.journal_files_deleted = journal.files_deleted
+        report.skipped_files = journal.skipped_files
+        report.quota_overage_bytes = journal.quota_overage_bytes
+    except Exception as exc:
+        report.errors.append(f"journal: {exc!r}")
+    try:
+        report.alerts_deleted = prune_alerts(db, now=now, days=cfg.alerts_days)
+    except Exception as exc:
+        report.errors.append(f"alerts: {exc!r}")
+    try:
+        evidence = prune_evidence(
+            db, evidence_root, now=now, days=cfg.evidence_days, capture_lock=capture_lock
+        )
+        report.evidence_blobs_deleted = evidence.blobs_deleted
+        report.pruned_shas = evidence.pruned_shas
+    except Exception as exc:
+        report.errors.append(f"evidence: {exc!r}")
+    if report.events_deleted or report.alerts_deleted or report.evidence_blobs_deleted:
+        try:
+            db.execute("CHECKPOINT")
+        except Exception as exc:
+            report.errors.append(f"checkpoint: {exc!r}")
+    return report

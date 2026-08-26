@@ -7,12 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from inspectord.config import RetentionConfig
 from inspectord.parsers.base import build_event
 from inspectord.retention.engine import (
     RetentionReport,
     prune_alerts,
     prune_events,
     prune_journal_files,
+    run_retention,
 )
 from inspectord.storage.db import Database
 from inspectord.storage.events import insert_event
@@ -317,3 +319,114 @@ def test_report_any_deletions_per_count(field_name: str) -> None:
 def test_report_skips_and_overage_are_not_deletions() -> None:
     report = RetentionReport(skipped_files=["junk.jsonl.gz"], quota_overage_bytes=42)
     assert report.any_deletions is False
+
+
+# --- run_retention orchestrator (§5, §5.5) ---
+
+
+def _run(db: Database, tmp_path: Path, cfg: RetentionConfig | None = None) -> RetentionReport:
+    return run_retention(
+        db,
+        cfg=cfg or RetentionConfig(),
+        journal_dir=tmp_path / "journal",
+        evidence_root=tmp_path / "evidence",
+        now=NOW,
+    )
+
+
+def test_run_retention_folds_all_surfaces(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_event(db, ts=NOW - timedelta(days=40))
+    _seed_alert(db, "old", ts=NOW - timedelta(days=400))
+    _journal_file(tmp_path / "journal", _name_for(40))
+    _journal_file(tmp_path / "journal", "junk.jsonl.gz")
+    report = _run(db, tmp_path)
+    assert report.events_deleted == 1
+    assert report.journal_files_deleted == 1
+    assert report.alerts_deleted == 1
+    assert report.evidence_blobs_deleted == 0
+    assert report.skipped_files == ["junk.jsonl.gz"]
+    assert report.errors == []
+    assert report.any_deletions is True
+
+
+def test_run_retention_ignores_enabled_flag(tmp_path: Path) -> None:
+    """`enabled` gates the supervisor tick, not the engine: run_retention always runs."""
+    db = _db(tmp_path)
+    _seed_event(db, ts=NOW - timedelta(days=40))
+    report = _run(db, tmp_path, RetentionConfig(enabled=False))
+    assert report.events_deleted == 1
+
+
+def test_run_retention_one_surface_fails_others_run(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_event(db, ts=NOW - timedelta(days=40))
+    db.execute("DROP TABLE alerts")
+    report = _run(db, tmp_path)
+    assert report.events_deleted == 1  # events pruned despite the failures
+    assert report.errors  # journal (critical-day query) and alerts both fail
+    assert any(err.startswith("alerts:") for err in report.errors)
+
+
+def _spy_checkpoints(db: Database, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    original = db.execute
+
+    def spy(sql: str, params: list[object] | None = None) -> None:
+        if sql.strip().upper().startswith("CHECKPOINT"):
+            calls.append(sql)
+        original(sql, params)
+
+    monkeypatch.setattr(db, "execute", spy)
+    return calls
+
+
+def test_run_retention_checkpoints_after_db_deletions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _db(tmp_path)
+    _seed_event(db, ts=NOW - timedelta(days=40))
+    calls = _spy_checkpoints(db, monkeypatch)
+    report = _run(db, tmp_path)
+    assert report.events_deleted == 1
+    assert len(calls) == 1
+
+
+def test_run_retention_skips_checkpoint_when_nothing_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _db(tmp_path)
+    calls = _spy_checkpoints(db, monkeypatch)
+    report = _run(db, tmp_path)
+    assert report.any_deletions is False
+    assert calls == []
+
+
+def test_run_retention_checkpoint_failure_lands_in_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _db(tmp_path)
+    _seed_event(db, ts=NOW - timedelta(days=40))
+    original = db.execute
+
+    def boom(sql: str, params: list[object] | None = None) -> None:
+        if sql.strip().upper().startswith("CHECKPOINT"):
+            raise RuntimeError("checkpoint blocked")
+        original(sql, params)
+
+    monkeypatch.setattr(db, "execute", boom)
+    report = _run(db, tmp_path)
+    assert report.events_deleted == 1
+    assert any(err.startswith("checkpoint:") for err in report.errors)
+
+
+def test_run_retention_rejects_naive_now(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        run_retention(
+            db,
+            cfg=RetentionConfig(),
+            journal_dir=tmp_path / "journal",
+            evidence_root=tmp_path / "evidence",
+            now=NAIVE_NOW,
+        )
