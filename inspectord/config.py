@@ -55,6 +55,21 @@ class AnomalyConfig(BaseModel):
     sustained_ticks: int = 6
 
 
+class RetentionConfig(BaseModel):
+    """Retention & rotation settings (spec 2026-08-26-retention-design.md §3)."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    events_days: int = Field(default=30, ge=1)
+    events_max_rows_per_run: int = Field(default=100_000, ge=1000)
+    journal_days: int = Field(default=30, ge=1)
+    # MiB — quota backstop on the journal dir (quota_bytes = journal_quota_mb * 2**20).
+    journal_quota_mb: int = Field(default=500, ge=10)
+    journal_quota_floor_days: int = Field(default=7, ge=1)
+    alerts_days: int = Field(default=365, ge=1)
+    evidence_days: int = Field(default=365, ge=1)
+
+
 class DaemonConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: str
@@ -63,6 +78,7 @@ class DaemonConfig(BaseModel):
     workers: list[WorkerSpec] = Field(default_factory=list)
     notifier_desktop_enabled: bool = False
     anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
 
 
 def load(path: Path) -> DaemonConfig:

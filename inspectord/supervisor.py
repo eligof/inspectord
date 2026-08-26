@@ -15,6 +15,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from datetime import UTC, datetime
 from importlib.resources import files
 from queue import Empty as QueueEmpty
 from typing import Any
@@ -24,7 +25,12 @@ import yaml as _yaml
 from inspectord.allowlist.file_loader import load_allowlist_file
 from inspectord.anomaly.detector import AnomalyDetector
 from inspectord.anomaly.first_sighting import FirstSightingTracker
-from inspectord.audit.log import newest_anchor, set_failure_listener, verify_audit_chain
+from inspectord.audit.log import (
+    append_audit,
+    newest_anchor,
+    set_failure_listener,
+    verify_audit_chain,
+)
 from inspectord.config import DaemonConfig, WorkerSpec
 from inspectord.enrichment import enrich
 from inspectord.evidence.collector import EvidenceCollector
@@ -32,6 +38,7 @@ from inspectord.evidence.store import ForensicStore
 from inspectord.journal import Journal
 from inspectord.log import get
 from inspectord.parsers.base import build_event
+from inspectord.retention.engine import run_retention
 from inspectord.router import DropPolicy, EventRouter, RouterFull
 from inspectord.rule_engine import RuleEngine
 from inspectord.rules.python_loader import load_python_rules
@@ -83,6 +90,12 @@ PERSIST_ALERT_COOLDOWN_S = 300.0
 # row, and the anchor only needs to be newer than the last plausible tamper
 # window, not fresh to the minute.
 AUDIT_TICK_INTERVAL_S = 86400.0
+
+# --- retention (spec 2026-08-26-retention-design §6) -------------------------
+# How often the retention pruners run. Daily, and ordered strictly AFTER the
+# audit tick in the same monitor tick: the fresh anchor is emitted before
+# retention can touch the events table.
+RETENTION_TICK_INTERVAL_S = 86400.0
 
 
 class PersistFailed(Exception):
@@ -149,6 +162,7 @@ class Supervisor:
         restart_healthy_after_s: float = RESTART_HEALTHY_AFTER_S,
         restart_max_attempts: int = RESTART_MAX_ATTEMPTS,
         audit_tick_interval_s: float = AUDIT_TICK_INTERVAL_S,
+        retention_tick_interval_s: float = RETENTION_TICK_INTERVAL_S,
     ) -> None:
         self._cfg = config
         self._router = EventRouter()
@@ -168,6 +182,9 @@ class Supervisor:
         self._audit_tick_interval_s = audit_tick_interval_s
         # None -> the audit tick runs on the first monitor tick after start.
         self._last_audit_tick_mono: float | None = None
+        self._retention_tick_interval_s = retention_tick_interval_s
+        # None -> the retention tick runs on the first monitor tick after start.
+        self._last_retention_tick_mono: float | None = None
         self._boot_id: str | None = None
         self._listeners: list[Callable[[Event], None]] = []
         # Build the rule engine.
@@ -515,6 +532,15 @@ class Supervisor:
         ):
             self._last_audit_tick_mono = now
             self._audit_tick()
+        # Strictly AFTER the audit tick (retention spec §6): the fresh anchor
+        # is emitted before retention can touch the events table. The marker
+        # is set BEFORE the run so a failing run waits a full interval.
+        if self._cfg.retention.enabled and (
+            self._last_retention_tick_mono is None
+            or now - self._last_retention_tick_mono >= self._retention_tick_interval_s
+        ):
+            self._last_retention_tick_mono = now
+            self._retention_tick()
 
     def _audit_tick(self) -> None:
         """Daily: verify the chain against the newest anchor, then re-anchor.
@@ -554,6 +580,61 @@ class Supervisor:
                 )
         except Exception as exc:
             log.error("audit tick failed: %r", exc)
+
+    def _retention_tick(self) -> None:
+        """Daily: run the retention pruners; audit deletions, surface errors.
+
+        Retention spec §6. Real deletions produce exactly ONE audit row per
+        run (a no-op run writes nothing); a run with errors emits a
+        medium-severity ``retention_failed`` supervisor event — retention
+        failure is a maintenance problem, not an intrusion signal, and a
+        persistently failing run repeats the event daily, which is the
+        desired nagging. The whole body catches like ``_audit_tick``: the
+        monitor thread must outlive any single failure.
+        """
+        try:
+            collector = self._evidence_collector
+            report = run_retention(
+                self._db,
+                cfg=self._cfg.retention,
+                journal_dir=self._cfg.storage.journal_dir,
+                evidence_root=self._cfg.storage.evidence_dir,
+                now=datetime.now(UTC),
+                capture_lock=collector.capture_lock if collector is not None else None,
+            )
+            if report.any_deletions:
+                details: dict[str, Any] = {
+                    "events_deleted": report.events_deleted,
+                    "journal_files_deleted": report.journal_files_deleted,
+                    "alerts_deleted": report.alerts_deleted,
+                    "evidence_blobs_deleted": report.evidence_blobs_deleted,
+                    "pruned_shas": report.pruned_shas[:50],
+                    "skipped_files": report.skipped_files,
+                    "quota_overage_bytes": report.quota_overage_bytes,
+                }
+                if len(report.pruned_shas) > 50:
+                    details["more"] = len(report.pruned_shas) - 50
+                append_audit(
+                    self._cfg.storage.db_path,
+                    actor="auto:retention",
+                    action="retention_pruned",
+                    target="retention:daily",
+                    details=details,
+                )
+            if report.errors:
+                log.error("retention run had errors: %s", "; ".join(report.errors))
+                message = "; ".join(report.errors[:5])
+                if len(report.errors) > 5:
+                    message += f" and {len(report.errors) - 5} more"
+                self._emit_supervisor_event(
+                    action="retention_failed",
+                    severity="medium",
+                    type_=["error"],
+                    message=message,
+                    raw={"errors": report.errors[:20]},
+                )
+        except Exception as exc:
+            log.error("retention tick failed: %r", exc)
 
     def _report_audit_log_failing(self, failures: int, window: int) -> None:
         self._emit_supervisor_event(
