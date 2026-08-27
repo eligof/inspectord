@@ -113,6 +113,24 @@ class VulnScannerWorker(Worker):
         self._pacman_db_mtime: float | None = None
         self._stats_observed = False
         self._lock_reported = False
+        #: Set on the reader thread by the `rescan` command, consumed by the
+        #: next scan. Bool flips are atomic under the GIL; no lock needed.
+        self._rescan_requested = False
+
+    # -- commands (worker-command-channel design §7) -------------------------
+
+    def handle_command(self, command: str, args: dict[str, Any]) -> dict[str, Any]:
+        """`rescan`: make the next poll unconditionally due.
+
+        Runs on the stdin reader thread — it only flips the flag; the base
+        class sets the wake event, and the poll cadence is the natural bound
+        (one scan per tick). The db.lck guard still applies: a locked pacman
+        DB keeps the request pending and retries on the next poll.
+        """
+        if command != "rescan":
+            return {"status": "rejected", "detail": f"unknown command: {command}"}
+        self._rescan_requested = True
+        return {"status": "accepted", "detail": "rescan will run at the next poll"}
 
     # -- config ------------------------------------------------------------
 
@@ -150,6 +168,12 @@ class VulnScannerWorker(Worker):
         self._run_scan(now)
 
     def _scan_due(self, now: float) -> bool:
+        # A user-requested rescan bypasses FILE_TRIGGER_MIN_INTERVAL_S: that
+        # guard absorbs mid-`mv` mtime flapping, not human clicks — "file
+        # refreshed -> auto scan -> user clicks Rescan" must not be accepted
+        # and then silently deferred for five minutes (§7).
+        if self._rescan_requested:
+            return True
         if self._next_interval_due is None or now >= self._next_interval_due:
             return True
         if self._pending_file_trigger:
@@ -187,7 +211,10 @@ class VulnScannerWorker(Worker):
     def _run_scan(self, now: float) -> None:
         file_triggered = self._pending_file_trigger
         # Whatever happens below counts as the attempt: reschedule first so a
-        # failure fires at the scan cadence, never once per poll (§6).
+        # failure fires at the scan cadence, never once per poll (§6). The
+        # rescan flag is consumed here too, but deliberately touches none of
+        # the file-trigger bookkeeping below (§7).
+        self._rescan_requested = False
         self._pending_file_trigger = False
         self._lock_reported = False
         self._next_interval_due = now + self._interval_s()

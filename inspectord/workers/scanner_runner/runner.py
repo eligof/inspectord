@@ -417,6 +417,10 @@ class _ActiveRun:
     started_at: float
     argv: list[str]
     job: _ScanJob
+    #: True when this run claimed the scheduled slot. A triggered-only run
+    #: (worker-command-channel design §7) never consumes the slot, so its
+    #: completion must not re-base the scheduled cadence either.
+    scheduled: bool = True
 
 
 # --------------------------------------------------------------------------
@@ -453,6 +457,34 @@ class ScannerRunnerWorker(Worker):
         # identical skip events.
         self._skip_notified: set[str] = set()
         self._scheduled = False
+        # Scanners queued by the `run_scanner` command (worker-command-channel
+        # design §7). Added on the stdin reader thread, consumed on the step
+        # thread — set add/discard are atomic under the GIL. Entries survive
+        # _reschedule (a completion re-basing next_due must not clobber a
+        # queued trigger) and are removed only when _start_run resolves them.
+        self._run_next: set[str] = set()
+
+    # -- commands (worker-command-channel design §7) -------------------------
+
+    def handle_command(self, command: str, args: dict[str, Any]) -> dict[str, Any]:
+        """`run_scanner {name}`: queue one triggered run of a configured scanner.
+
+        Runs on the stdin reader thread; only flips small structures. The
+        worker's own config is the authority: unknown and disabled scanners
+        are honest rejections, not silent swallows.
+        """
+        if command != "run_scanner":
+            return {"status": "rejected", "detail": f"unknown command: {command}"}
+        name = str(args.get("name", ""))
+        if name not in self._adapters:
+            return {"status": "rejected", "detail": "unknown_scanner"}
+        if not self._enabled(name):
+            return {"status": "rejected", "detail": "scanner_disabled"}
+        self._run_next.add(name)
+        if self._active is not None:
+            # Single-flight respected; the trigger fires after the current run.
+            return {"status": "accepted", "detail": "queued behind current run"}
+        return {"status": "accepted", "detail": "run scheduled for the next tick"}
 
     # -- config ------------------------------------------------------------
 
@@ -506,12 +538,18 @@ class ScannerRunnerWorker(Worker):
         for name in sorted(self._adapters):
             if not self._enabled(name):
                 continue
-            if self._next_due.get(name, 0.0) > now:
+            triggered = name in self._run_next
+            scheduled_due = self._next_due.get(name, 0.0) <= now
+            if not triggered and not scheduled_due:
                 continue
             if self._active is not None:
-                self._notify_in_flight(name)
+                # A queued trigger stays queued silently — its sender already
+                # got "queued behind current run"; only the scheduled cadence
+                # reports its once-per-window skip.
+                if scheduled_due:
+                    self._notify_in_flight(name)
                 continue
-            self._start_run(name, now)
+            self._start_run(name, now, scheduled=scheduled_due)
 
     def teardown(self) -> None:
         """Kill any in-flight scan by process group and report it. Never raises."""
@@ -541,14 +579,18 @@ class ScannerRunnerWorker(Worker):
         self._skip_notified.add(name)
         self._emit_skipped(name, "run_in_flight")
 
-    def _start_run(self, name: str, now: float) -> None:
+    def _start_run(self, name: str, now: float, *, scheduled: bool = True) -> None:
+        # The trigger is resolved by whatever _start_run does with it — a
+        # launch or an explicit skip event — never silently requeued: a
+        # missing binary would otherwise re-trigger every tick forever.
+        self._run_next.discard(name)
         adapter = self._adapters[name]
         config = self._scanner_config(name)
 
         if shutil.which(adapter.binary) is None:
             # Decision 14: silence here would let the user believe AIDE runs
             # nightly when the binary was never installed.
-            self._skip_slot(name, "binary_not_found", now)
+            self._skip_slot(name, "binary_not_found", now, consume=scheduled)
             return
 
         try:
@@ -560,13 +602,13 @@ class ScannerRunnerWorker(Worker):
             # Adapters promise not to raise; the runner assumes they will anyway.
             reason = "preflight_error"
         if reason is not None:
-            self._skip_slot(name, str(reason), now)
+            self._skip_slot(name, str(reason), now, consume=scheduled)
             return
 
         try:
             argv = [str(part) for part in adapter.argv(config)]
         except Exception:
-            self._skip_slot(name, "argv_error", now)
+            self._skip_slot(name, "argv_error", now, consume=scheduled)
             return
 
         run_id = str(uuid7())
@@ -579,8 +621,13 @@ class ScannerRunnerWorker(Worker):
         # Claim the slot before the run begins, so the scanner is no longer
         # "due" while its own scan is in flight — otherwise every tick of a
         # multi-minute run would report it as skipped against itself.
-        # _reschedule() re-bases this on the completion time.
-        self._consume_slot(name, now)
+        # _reschedule() re-bases this on the completion time. A triggered-only
+        # run does NOT consume the slot (§7): its next_due is already in the
+        # future, and the scheduled cadence continues from its original anchor
+        # — triggering must never push the next scheduled scan a full interval
+        # away (the anti-forensics nudge).
+        if scheduled:
+            self._consume_slot(name, now)
         self._emit_started(name, run_id, argv)
         job.start()
         self._active = _ActiveRun(
@@ -590,19 +637,24 @@ class ScannerRunnerWorker(Worker):
             started_at=now,
             argv=argv,
             job=job,
+            scheduled=scheduled,
         )
 
-    def _skip_slot(self, name: str, reason: str, now: float) -> None:
+    def _skip_slot(self, name: str, reason: str, now: float, *, consume: bool = True) -> None:
         """Report a due window that never became a scan, and give up the slot.
 
         Clearing the retry flag is the point: nothing was attempted here, so a
         skip must not consume the retry a previous failure is still owed. (The
         run-start path deliberately leaves the flag alone — resetting it there
         would let a scanner retry forever instead of once.)
+
+        ``consume=False`` is the triggered-only case (§7): the trigger is
+        answered with the skip event, but the scheduled slot stays anchored.
         """
         self._emit_skipped(name, reason)
         self._retried[name] = False
-        self._consume_slot(name, now)
+        if consume:
+            self._consume_slot(name, now)
 
     def _consume_slot(self, name: str, now: float) -> None:
         """Push *name* to its next scheduled slot and end its skip window.
@@ -652,7 +704,11 @@ class ScannerRunnerWorker(Worker):
                 findings_dropped=dropped,
             )
         )
-        self._guard(lambda: self._reschedule(run.scanner, outcome, reason, now))
+        # A triggered-only run never consumed the slot, so its completion must
+        # not re-base the cadence off its own completion time nor touch the
+        # retry state (§7): a failed triggered run is simply re-clickable.
+        if run.scheduled:
+            self._guard(lambda: self._reschedule(run.scanner, outcome, reason, now))
 
     def _guard(self, action: Callable[[], Any]) -> None:
         """Run *action*, recording any failure on the heartbeat instead of raising."""
