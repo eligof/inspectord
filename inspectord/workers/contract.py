@@ -157,6 +157,13 @@ class Worker(abc.ABC):
                 # wait below returns immediately and the trigger is acted on at
                 # the next iteration, never a full interval later.
                 self._wake.clear()
+                # request_stop() sets _stop BEFORE _wake, so a stop whose wake
+                # was just erased by the clear above is still visible here —
+                # without this check a SIGTERM landing in that window would
+                # block a full step interval and blow the supervisor's stop
+                # budget (SIGKILL, teardown skipped).
+                if self._stop.is_set():
+                    break
                 try:
                     self.step()
                 except Exception as exc:
@@ -186,7 +193,11 @@ class Worker(abc.ABC):
             if not line:
                 return  # EOF: the incarnation's channel is closed.
             if len(line) > COMMAND_LINE_MAX_BYTES:
-                self._drain_overlong(stream)
+                if not line.endswith(b"\n"):
+                    # Only a truncated read leaves tail bytes to discard; an
+                    # exact-boundary line already consumed its newline and
+                    # draining would eat the NEXT (innocent) command.
+                    self._drain_overlong(stream)
                 log.warning(
                     "worker %s: command line over %d bytes dropped",
                     self.name,
@@ -225,7 +236,8 @@ class Worker(abc.ABC):
             log.warning("worker %s: command without request_id dropped", self.name)
             return
 
-        # `or` folds None/falsy garbage into values the validator rejects.
+        # `or` folds None/falsy garbage into values the validator rejects (command) or an
+        # empty args object (harmless: broken-supervisor-only path).
         command = payload.get("command") or ""
         args = payload.get("args") or {}
         error = _command_validation_error(command, args)

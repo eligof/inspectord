@@ -144,8 +144,10 @@ flooding stdin cannot turn into an event flood. The reader thread exits on EOF
   unknown → `rejected/unknown_scanner`; disabled → `rejected/scanner_disabled`
   (honest, not silently swallowed). The run-next entry **survives `_reschedule`**
   (a completion re-basing `next_due` must not clobber a queued trigger for the
-  running scanner) and is removed only when `_start_run` actually launches that
-  scanner; single-flight respected (`accepted`, detail "queued behind current
+  running scanner) and is removed when `_start_run` handles that scanner — including its
+  skip paths (binary_not_found/preflight), whose emitted skip event answers the
+  trigger visibly; a launch-only reading would re-trigger a missing binary every
+  tick forever; single-flight respected (`accepted`, detail "queued behind current
   run"). **A triggered run does not consume the scheduled slot** — the scheduled
   cadence continues from its original anchor, so triggering cannot push the next
   scheduled scan a full interval away (anti-forensics nudge otherwise).

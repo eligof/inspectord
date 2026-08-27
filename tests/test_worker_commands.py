@@ -419,3 +419,35 @@ def test_concurrent_step_and_command_result_emission_every_line_parses() -> None
     parsed = [json.loads(line) for line in lines]  # raises on any torn line
     results = [e for e in parsed if e.get("action") == "command_result"]
     assert len(results) == 100
+
+
+def test_stop_during_wake_window_breaks_immediately() -> None:
+    """request_stop landing right after _wake.clear() must not block an interval."""
+    out = io.BytesIO()
+    worker = _CommandWorker(interval_s=30.0, stdout=out)
+
+    original_step = worker.step
+
+    def step_then_stop() -> None:
+        original_step()
+        worker.request_stop()  # lands after this iteration's _wake.clear()
+
+    worker.step = step_then_stop  # type: ignore[method-assign]
+    t = threading.Thread(target=worker.run)
+    start = time.monotonic()
+    t.start()
+    t.join(timeout=10.0)
+    assert not t.is_alive()
+    assert time.monotonic() - start < 10.0  # never a 30s interval wait
+
+
+def test_exact_boundary_overlong_line_does_not_eat_next_command() -> None:
+    """A cap+1-byte line ENDING in newline must not drain the following command."""
+    out = io.BytesIO()
+    worker = _CommandWorker(stdout=out)
+    overlong = b"x" * COMMAND_LINE_MAX_BYTES + b"\n"  # over cap, newline-terminated
+    valid = _command_line("noop", request_id="req-boundary")
+    stream = io.BytesIO(overlong + valid)
+    worker._command_reader(stream)
+    results = _results(out)
+    assert [r["raw"]["request_id"] for r in results] == ["req-boundary"]
