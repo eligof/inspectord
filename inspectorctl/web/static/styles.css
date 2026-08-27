@@ -94,3 +94,5 @@ input[type=text] {
 /* Hunt: query text, field paths and bounds are literal text, so they render as code. */
 .hunt .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
 .hunt .filter-bar input[type=text] { font-family: ui-monospace, SFMono-Regular, monospace; }
+.notice { background: rgba(46,160,67,0.1); border: 1px solid var(--ok); color: var(--ok); padding: 12px; border-radius: 6px; margin: 16px 0; }
+.notice-warn { background: rgba(255,166,87,0.1); border: 1px solid var(--high); color: var(--high); padding: 12px; border-radius: 6px; margin: 16px 0; }

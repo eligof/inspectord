@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Form, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.templating import _TemplateResponse
 
 from inspectorctl.web.ipc import WebIpcError, call
+from inspectorctl.web.worker_commands import outcome_banner, run_command_redirect
 
 router = APIRouter()
 
 
 @router.get("/scanners", response_class=HTMLResponse)
-def scanners_shell(request: Request) -> _TemplateResponse:
+def scanners_shell(
+    request: Request,
+    cmd_status: str | None = Query(default=None),
+    cmd_detail: str | None = Query(default=None),
+) -> _TemplateResponse:
     templates: Jinja2Templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
@@ -24,7 +29,25 @@ def scanners_shell(request: Request) -> _TemplateResponse:
             "request": request,
             "title": "inspectord — Scanners",
             "current_path": "/scanners",
+            "command_banner": outcome_banner(cmd_status, cmd_detail),
         },
+    )
+
+
+@router.post("/scanners/run")
+def scanners_run(request: Request, name: str = Form(...)) -> RedirectResponse:
+    """Run now → run_worker_command (worker-command design §2 PR2, §7).
+
+    ``name`` is forwarded verbatim; the scanner roster lives in the worker's
+    own config, so validation (unknown/disabled) is the worker's verdict and
+    comes back as a rejected banner rather than being second-guessed here.
+    """
+    return run_command_redirect(
+        request.app.state.socket_path,
+        worker="scanner_runner",
+        command="run_scanner",
+        args={"name": name},
+        redirect_to="/scanners",
     )
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from inspectorctl.web.app import create_app
+from inspectord.ipc_commands import RATE_LIMIT_PER_MIN, WorkerCommandError
 from inspectord.ipc_server import Method
 from tests.web import SAME_ORIGIN, web_client
 
@@ -248,3 +249,129 @@ def test_nav_link_present(ipc_factory) -> None:
     response = client.get("/vulnerabilities")
     assert 'href="/vulnerabilities"' in response.text
     assert "Vulnerabilities" in response.text
+
+
+# --------------------------------------------------------------------------
+# Rescan now (worker-command-channel design §2 PR2, §6, §8)
+# --------------------------------------------------------------------------
+
+
+def _cmd_method(
+    response: dict[str, Any] | None = None,
+    calls: list[dict[str, Any]] | None = None,
+    error: Exception | None = None,
+) -> Method:
+    def handler(params: dict[str, Any]) -> dict[str, Any]:
+        if calls is not None:
+            calls.append(params)
+        if error is not None:
+            raise error
+        if response is not None:
+            return response
+        return {"schema_version": "1.0.0", "ok": True, "status": "accepted", "detail": ""}
+
+    return Method(name="run_worker_command", handler=handler, mutates=True)
+
+
+def test_rescan_button_renders(ipc_factory) -> None:
+    client = ipc_factory([_list_method(_ok())])
+    response = client.get("/vulnerabilities")
+    assert 'action="/vulnerabilities/rescan"' in response.text
+    assert "Rescan now" in response.text
+
+
+def test_rescan_button_renders_when_daemon_down(tmp_path: Path) -> None:
+    app = create_app(socket_path=tmp_path / "no.sock")
+    client = web_client(app)
+    response = client.get("/vulnerabilities")
+    assert response.status_code == 200
+    assert "daemon unreachable" in response.text
+    assert 'action="/vulnerabilities/rescan"' in response.text
+
+
+def test_rescan_post_calls_ipc_and_redirects(ipc_factory) -> None:
+    calls: list[dict[str, Any]] = []
+    client = ipc_factory([_list_method(_ok()), _cmd_method(calls=calls)])
+    response = client.post("/vulnerabilities/rescan", headers=SAME_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/vulnerabilities?")
+    assert "cmd_status=accepted" in location
+    assert calls == [{"worker": "vuln_scanner", "command": "rescan"}]
+
+
+def test_rescan_accepted_banner(ipc_factory) -> None:
+    client = ipc_factory([_list_method(_ok()), _cmd_method()])
+    response = client.post("/vulnerabilities/rescan", headers=SAME_ORIGIN, follow_redirects=True)
+    assert response.status_code == 200
+    assert "accepted" in response.text
+    assert 'class="notice"' in response.text
+
+
+def test_rescan_rejected_banner_shows_detail(ipc_factory) -> None:
+    rejected = {
+        "schema_version": "1.0.0",
+        "ok": False,
+        "status": "rejected",
+        "detail": "scan already in progress",
+    }
+    client = ipc_factory([_list_method(_ok()), _cmd_method(response=rejected)])
+    response = client.post("/vulnerabilities/rescan", headers=SAME_ORIGIN, follow_redirects=True)
+    assert response.status_code == 200
+    assert "rejected" in response.text
+    assert "scan already in progress" in response.text
+    assert 'class="notice-warn"' in response.text
+
+
+def test_rescan_timeout_banner_says_may_still_run(ipc_factory) -> None:
+    timeout = {"schema_version": "1.0.0", "ok": False, "status": "timeout", "detail": ""}
+    client = ipc_factory([_list_method(_ok()), _cmd_method(response=timeout)])
+    response = client.post("/vulnerabilities/rescan", headers=SAME_ORIGIN, follow_redirects=True)
+    assert response.status_code == 200
+    assert "may still run" in response.text
+
+
+def test_rescan_worker_unavailable_banner(ipc_factory) -> None:
+    unavailable = {
+        "schema_version": "1.0.0",
+        "ok": False,
+        "status": "worker_unavailable",
+        "detail": "not_running",
+    }
+    client = ipc_factory([_list_method(_ok()), _cmd_method(response=unavailable)])
+    response = client.post("/vulnerabilities/rescan", headers=SAME_ORIGIN, follow_redirects=True)
+    assert response.status_code == 200
+    assert "worker unavailable" in response.text
+    assert 'class="error"' in response.text
+
+
+def test_rescan_rate_limited_error_banner(ipc_factory) -> None:
+    limited = WorkerCommandError(
+        f"run_worker_command rate limit exceeded ({RATE_LIMIT_PER_MIN}/min)"
+    )
+    client = ipc_factory([_list_method(_ok()), _cmd_method(error=limited)])
+    response = client.post("/vulnerabilities/rescan", headers=SAME_ORIGIN, follow_redirects=True)
+    assert response.status_code == 200
+    assert "rate limit exceeded" in response.text
+    assert 'class="error"' in response.text
+
+
+def test_rescan_hostile_detail_escaped(ipc_factory) -> None:
+    hostile = "<script>alert(1)</script>"
+    rejected = {"schema_version": "1.0.0", "ok": False, "status": "rejected", "detail": hostile}
+    client = ipc_factory([_list_method(_ok()), _cmd_method(response=rejected)])
+    response = client.post("/vulnerabilities/rescan", headers=SAME_ORIGIN, follow_redirects=True)
+    assert response.status_code == 200
+    assert "<script>alert(1)" not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
+
+
+def test_rescan_daemon_down_redirects_with_error_banner(tmp_path: Path) -> None:
+    app = create_app(socket_path=tmp_path / "no.sock")
+    client = web_client(app)
+    response = client.post("/vulnerabilities/rescan", headers=SAME_ORIGIN, follow_redirects=False)
+    assert response.status_code == 303
+    assert "cmd_status=error" in response.headers["location"]
+    followed = client.get(response.headers["location"])
+    assert followed.status_code == 200
+    assert "command failed" in followed.text

@@ -34,7 +34,7 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Every mutating route that exists today. The enumeration test derives its own
 # list from the live router; this constant only guards against the enumeration
 # silently finding nothing.
-KNOWN_MUTATING_ROUTE_COUNT = 11
+KNOWN_MUTATING_ROUTE_COUNT = 13
 
 #: A LAN address the app is *not* reachable at unless explicitly configured.
 LAN_HOST = "192.168.1.5:8765"

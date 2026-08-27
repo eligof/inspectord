@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.templating import _TemplateResponse
 
 from inspectorctl.web.ipc import WebIpcError, call
+from inspectorctl.web.worker_commands import outcome_banner, run_command_redirect
 
 router = APIRouter()
 
@@ -67,6 +68,8 @@ def vulnerabilities_page(
     include_acked: int = Query(default=1),
     include_resolved: int = Query(default=0),
     limit: int = Query(default=100, ge=1, le=500),
+    cmd_status: str | None = Query(default=None),
+    cmd_detail: str | None = Query(default=None),
 ) -> _TemplateResponse:
     templates: Jinja2Templates = request.app.state.templates
     socket_path = request.app.state.socket_path
@@ -101,8 +104,20 @@ def vulnerabilities_page(
             "severity": severity,
             "include_acked": bool(include_acked),
             "include_resolved": bool(include_resolved),
+            "command_banner": outcome_banner(cmd_status, cmd_detail),
             "error": error,
         },
+    )
+
+
+@router.post("/vulnerabilities/rescan")
+def vulnerability_rescan(request: Request) -> RedirectResponse:
+    """Rescan now → run_worker_command (worker-command design §2 PR2, §7)."""
+    return run_command_redirect(
+        request.app.state.socket_path,
+        worker="vuln_scanner",
+        command="rescan",
+        redirect_to="/vulnerabilities",
     )
 
 
