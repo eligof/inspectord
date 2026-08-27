@@ -52,6 +52,7 @@ from inspectord.hunt.ipc_handlers import (
     handle_run_hunt_query,
     handle_save_hunt_query,
 )
+from inspectord.ipc_commands import make_run_worker_command_handler
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.log import configure as configure_log
 from inspectord.log import get
@@ -393,6 +394,16 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
             name="ack_vulnerability",
             handler=lambda params: handle_ack_vulnerability(
                 params=params, db_path=cfg.storage.db_path
+            ),
+            mutates=True,
+        ),
+        # Worker command channel (worker-command-channel design §6): audited,
+        # allowlisted, rate-limited trigger path into the running workers. The
+        # supervisor reference is bound lazily inside the handler.
+        Method(
+            name="run_worker_command",
+            handler=make_run_worker_command_handler(
+                supervisor=supervisor, db_path=cfg.storage.db_path
             ),
             mutates=True,
         ),

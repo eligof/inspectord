@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from queue import Empty as QueueEmpty
 from typing import Any
+from uuid import uuid4
 
 import yaml as _yaml
 
@@ -84,6 +85,14 @@ PERSIST_FAILURE_ALERT_THRESHOLD = 10
 # Minimum seconds between two persistence_failing events.
 PERSIST_ALERT_COOLDOWN_S = 300.0
 
+# --- worker command channel (worker-command-channel design §5) ---------------
+# Default wait for a worker's command_result before answering "timeout".
+COMMAND_TIMEOUT_S = 10.0
+# Assert-grade bound on concurrently in-flight commands per worker. Unreachable
+# in single-user practice (documented as such): every pending entry is removed
+# in a `finally`, so only 32 simultaneous waiters could ever hit it.
+MAX_INFLIGHT_COMMANDS_PER_WORKER = 32
+
 # --- audit chain maintenance (spec 2026-08-25-audit-log-design §6a/§7) ------
 # How often the supervisor anchors the audit head into the journal (as an
 # audit_head event) and verifies the whole chain. Daily: verify walks every
@@ -134,11 +143,39 @@ def backoff_delay(
     return min(base * (2.0**exponent), cap)
 
 
+class _PendingCommand:
+    """One in-flight command awaiting its command_result. First fulfillment wins."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        # What the sender sees if nobody fulfills before its wait expires.
+        self.result: dict[str, Any] = {"status": "timeout"}
+
+    def fulfill(self, result: dict[str, Any]) -> None:
+        with self._lock:
+            if self._event.is_set():
+                return  # already fulfilled; a later worker_died/late result loses
+            self.result = result
+            self._event.set()
+
+    def wait(self, timeout_s: float) -> bool:
+        return self._event.wait(timeout_s)
+
+
 class _WorkerProc:
     def __init__(self, spec: WorkerSpec, proc: subprocess.Popen[bytes]) -> None:
         self.spec = spec
         self.proc = proc
         self.threads: list[threading.Thread] = []
+        # Serializes command writes to this incarnation's stdin (design §5).
+        self.stdin_lock = threading.Lock()
+        # Per-INCARNATION pending map, keyed by request_id: fulfillment identity
+        # is the pipe (only _read_stdout(self) consults it), so a hostile worker
+        # can never fulfill another worker's requests and a respawned
+        # incarnation structurally starts empty.
+        self.pending: dict[str, _PendingCommand] = {}
+        self.pending_lock = threading.Lock()
         # Monotonic timestamp of this incarnation's spawn, for the healthy check.
         self.started_at = time.monotonic()
         # Consecutive restarts carried across incarnations; reset once healthy.
@@ -329,6 +366,12 @@ class Supervisor:
         # Order matters: the monitor has to be stopped BEFORE any worker is
         # terminated, or it would helpfully restart them all mid-shutdown.
         self._stop.set()
+        # Immediately after setting _stop: every in-flight command is answered
+        # now, not after its own timeout — a blocked IPC thread must not outlive
+        # the daemon. list() is atomic; send_worker_command fast-fails once
+        # _stop is set, so entries cannot keep accumulating behind this sweep.
+        for wp in list(self._procs):
+            self._fail_pending(wp, {"status": "worker_unavailable", "detail": "shutting_down"})
         monitor = self._monitor_thread
         if monitor is not None:
             monitor.join(timeout=min(remaining(), 2.0))
@@ -489,13 +532,124 @@ class Supervisor:
         with contextlib.suppress(BrokenPipeError):
             proc.stdin.write((json.dumps(spec.config) + "\n").encode("utf-8"))
             proc.stdin.flush()
-        proc.stdin.close()
+        # stdin stays OPEN for ALL workers: it is the command channel
+        # (worker-command-channel design §1). Workers that never read past the
+        # config line are unaffected; _reap's close is the incarnation-end of
+        # the channel.
         wp = _WorkerProc(spec, proc)
         wp.threads.append(threading.Thread(target=self._read_stdout, args=(wp,), daemon=True))
         wp.threads.append(threading.Thread(target=self._read_stderr, args=(wp,), daemon=True))
         for t in wp.threads:
             t.start()
         return wp
+
+    # --- worker command channel (worker-command-channel design §5) ----------
+
+    def send_worker_command(
+        self,
+        worker_name: str,
+        command: str,
+        args: dict[str, Any] | None = None,
+        *,
+        timeout_s: float = COMMAND_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        """Send one command to a running worker and wait for its result.
+
+        Returns the worker's ``{"status": "accepted"|"rejected", "detail"}``,
+        or ``{"status": "timeout"}`` (the command may still run),
+        ``{"status": "worker_died"}``, or ``{"status": "worker_unavailable",
+        "detail": ...}``. Trigger-only, at-most-once: ``accepted`` means "will
+        run at the next loop iteration", never "done".
+
+        Lock discipline: ``_procs_lock`` only for the name lookup, the
+        per-worker stdin lock only for serialize+write+flush, and the response
+        wait holds NO supervisor lock.
+        """
+        if self._stop.is_set():
+            return {"status": "worker_unavailable", "detail": "shutting_down"}
+        with self._procs_lock:
+            wp = next((p for p in self._procs if p.spec.name == worker_name), None)
+        if wp is None:
+            return {"status": "worker_unavailable", "detail": f"no such worker: {worker_name}"}
+
+        request_id = uuid4().hex
+        line = (
+            json.dumps(
+                {"command": command, "args": args or {}, "request_id": request_id},
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        entry = _PendingCommand()
+        with wp.pending_lock:
+            if len(wp.pending) >= MAX_INFLIGHT_COMMANDS_PER_WORKER:
+                return {"status": "worker_unavailable", "detail": "too many in-flight commands"}
+            wp.pending[request_id] = entry
+        try:
+            # Registered before stop()'s sweep could run? Re-check so an entry
+            # added after the sweep cannot sit out its full timeout.
+            if self._stop.is_set():
+                return {"status": "worker_unavailable", "detail": "shutting_down"}
+            try:
+                with wp.stdin_lock:
+                    stdin = wp.proc.stdin
+                    if stdin is None:
+                        raise BrokenPipeError("worker stdin was not captured")
+                    stdin.write(line)
+                    stdin.flush()
+            except (BrokenPipeError, ValueError, OSError) as exc:
+                # Every write-failure shape — broken pipe, a reaped/closed file
+                # (ValueError), any OSError — means this incarnation cannot be
+                # commanded; the monitor owns recovery.
+                log.warning("cannot send %s to worker %s: %r", command, worker_name, exc)
+                return {"status": "worker_unavailable", "detail": "worker stdin unwritable"}
+            # The wait holds no lock; a wedged worker wedges only this caller.
+            entry.wait(timeout_s)
+            return dict(entry.result)
+        finally:
+            # Whatever the outcome — fulfilled, timeout, write failure — the
+            # entry is removed here, so a wedged worker cannot wedge the channel.
+            with wp.pending_lock:
+                wp.pending.pop(request_id, None)
+
+    def _fulfill_command_result(self, wp: _WorkerProc, ev: Event) -> None:
+        """Fulfill a pending send from this worker's own command_result.
+
+        Consults ONLY ``wp``'s pending map: the fulfillment identity is the
+        pipe the event arrived on, so a hostile or buggy worker can never
+        fulfill another worker's requests.
+        """
+        if ev.action != "command_result" or not isinstance(ev.raw, dict):
+            return
+        request_id = ev.raw.get("request_id")
+        if not isinstance(request_id, str):
+            return
+        with wp.pending_lock:
+            entry = wp.pending.get(request_id)
+        if entry is None:
+            # Late (post-timeout) or unknown: dispatched as an ordinary event
+            # by the caller, never fulfills anything.
+            log.info(
+                "late or unknown command_result from worker %s (request_id=%s)",
+                wp.spec.name,
+                request_id,
+            )
+            return
+        status = ev.raw.get("status")
+        entry.fulfill(
+            {
+                "status": "accepted" if status == "accepted" else "rejected",
+                "detail": str(ev.raw.get("detail", "")),
+            }
+        )
+
+    def _fail_pending(self, wp: _WorkerProc, result: dict[str, Any]) -> None:
+        """Fulfill every pending entry of one incarnation with *result*."""
+        with wp.pending_lock:
+            entries = list(wp.pending.values())
+            wp.pending.clear()
+        for entry in entries:
+            entry.fulfill(dict(result))
 
     # --- worker monitor (spec §3.2) -----------------------------------------
 
@@ -651,6 +805,10 @@ class Supervisor:
             # Reap first so the worker's final events reach the router before
             # worker_died does, and so the reader threads never outlive the child.
             self._reap(wp)
+            # After _reap (any final command_result has been read), before any
+            # respawn: the incarnation's pending senders learn their worker died
+            # at monitor-poll latency instead of sitting out their timeouts.
+            self._fail_pending(wp, {"status": "worker_died"})
             log.warning("worker %s died with exit code %d", wp.spec.name, rc)
             self._emit_supervisor_event(
                 action="worker_died",
@@ -785,6 +943,9 @@ class Supervisor:
             except Exception as exc:
                 log.error("worker %s emitted invalid event: %r", wp.spec.name, exc)
                 continue
+            # Fulfillment first, then the ordinary dispatch: command_result
+            # events also land in events_enriched like everything else.
+            self._fulfill_command_result(wp, ev)
             # Same path the monitor's own events take, on this reader thread.
             self._dispatch(ev)
 
