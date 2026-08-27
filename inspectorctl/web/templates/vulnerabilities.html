@@ -1,8 +1,14 @@
 {% extends "base.html" %}
-{% from "_macros.html" import severity_badge %}
+{% from "_macros.html" import severity_badge, command_banner as banner %}
 
 {% block content %}
 <h1>Vulnerabilities</h1>
+
+{{ banner(command_banner) }}
+
+<form method="post" action="/vulnerabilities/rescan" class="inline">
+  <button type="submit">Rescan now</button>
+</form>
 
 {% if freshness %}
   {% if freshness.mode == 'never' %}

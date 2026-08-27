@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 
+{% from "_macros.html" import command_banner as banner %}
 {% block content %}
 <h1>Scanners</h1>
+
+{{ banner(command_banner) }}
 
 <p class="muted">
   Last run, outcome and findings for each on-disk scanner. Schedules are not shown:

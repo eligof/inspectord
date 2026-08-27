@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from inspectorctl.web.app import create_app
+from inspectord.ipc_commands import RATE_LIMIT_PER_MIN, WorkerCommandError
 from inspectord.ipc_server import Method
-from tests.web import web_client
+from tests.web import SAME_ORIGIN, web_client
 
 _SUCCESS_RUN: dict[str, Any] = {
     "run_id": "run-1",
@@ -281,3 +282,113 @@ def test_populated_table_says_a_missing_scanner_is_not_clean(ipc_factory) -> Non
     body = client.get("/scanners/feed").text
     assert "has never run" in body
     assert "not the same as clean" in body
+
+
+# --------------------------------------------------------------------------
+# Run now (worker-command-channel design §2 PR2, §6, §8)
+# --------------------------------------------------------------------------
+
+
+def _cmd_method(
+    response: dict[str, Any] | None = None,
+    calls: list[dict[str, Any]] | None = None,
+    error: Exception | None = None,
+) -> Method:
+    def handler(params: dict[str, Any]) -> dict[str, Any]:
+        if calls is not None:
+            calls.append(params)
+        if error is not None:
+            raise error
+        if response is not None:
+            return response
+        return {"schema_version": "1.0.0", "ok": True, "status": "accepted", "detail": ""}
+
+    return Method(name="run_worker_command", handler=handler, mutates=True)
+
+
+def test_feed_renders_run_now_button_per_scanner(ipc_factory) -> None:
+    client = ipc_factory([_runs(_SUCCESS_RUN), _findings()])
+    response = client.get("/scanners/feed")
+    assert 'action="/scanners/run"' in response.text
+    assert 'name="name" value="aide"' in response.text
+    assert "Run now" in response.text
+
+
+def test_run_post_calls_ipc_and_redirects(ipc_factory) -> None:
+    calls: list[dict[str, Any]] = []
+    client = ipc_factory([_runs(), _findings(), _cmd_method(calls=calls)])
+    response = client.post(
+        "/scanners/run", headers=SAME_ORIGIN, data={"name": "aide"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/scanners?")
+    assert "cmd_status=accepted" in location
+    assert calls == [
+        {"worker": "scanner_runner", "command": "run_scanner", "args": {"name": "aide"}}
+    ]
+
+
+def test_run_accepted_banner_on_shell(ipc_factory) -> None:
+    client = ipc_factory([_runs(), _findings(), _cmd_method()])
+    response = client.post(
+        "/scanners/run", headers=SAME_ORIGIN, data={"name": "aide"}, follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert "accepted" in response.text
+    assert 'class="notice"' in response.text
+
+
+def test_run_rejected_banner_shows_scanner_disabled_detail(ipc_factory) -> None:
+    rejected = {
+        "schema_version": "1.0.0",
+        "ok": False,
+        "status": "rejected",
+        "detail": "scanner_disabled",
+    }
+    client = ipc_factory([_runs(), _findings(), _cmd_method(response=rejected)])
+    response = client.post(
+        "/scanners/run", headers=SAME_ORIGIN, data={"name": "aide"}, follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert "rejected" in response.text
+    assert "scanner_disabled" in response.text
+    assert 'class="notice-warn"' in response.text
+
+
+def test_run_rate_limited_error_banner(ipc_factory) -> None:
+    limited = WorkerCommandError(
+        f"run_worker_command rate limit exceeded ({RATE_LIMIT_PER_MIN}/min)"
+    )
+    client = ipc_factory([_runs(), _findings(), _cmd_method(error=limited)])
+    response = client.post(
+        "/scanners/run", headers=SAME_ORIGIN, data={"name": "aide"}, follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert "rate limit exceeded" in response.text
+    assert 'class="error"' in response.text
+
+
+def test_run_hostile_detail_escaped(ipc_factory) -> None:
+    hostile = "<script>alert(1)</script>"
+    rejected = {"schema_version": "1.0.0", "ok": False, "status": "rejected", "detail": hostile}
+    client = ipc_factory([_runs(), _findings(), _cmd_method(response=rejected)])
+    response = client.post(
+        "/scanners/run", headers=SAME_ORIGIN, data={"name": "aide"}, follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert "<script>alert(1)" not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
+
+
+def test_run_daemon_down_redirects_with_error_banner(tmp_path: Path) -> None:
+    app = create_app(socket_path=tmp_path / "no.sock")
+    client = web_client(app)
+    response = client.post(
+        "/scanners/run", headers=SAME_ORIGIN, data={"name": "aide"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert "cmd_status=error" in response.headers["location"]
+    followed = client.get(response.headers["location"])
+    assert followed.status_code == 200
+    assert "command failed" in followed.text

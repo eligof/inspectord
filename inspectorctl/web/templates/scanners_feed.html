@@ -22,6 +22,7 @@
       <th>Duration</th>
       <th>Findings</th>
       <th>Detail</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>
@@ -51,6 +52,12 @@
         {%- if s.output_truncated %}
         <div class="muted">scanner output was clipped — this run is degraded</div>
         {%- endif %}
+      </td>
+      <td>
+        <form method="post" action="/scanners/run" class="inline">
+          <input type="hidden" name="name" value="{{ s.scanner }}">
+          <button type="submit">Run now</button>
+        </form>
       </td>
     </tr>
     {% endfor %}

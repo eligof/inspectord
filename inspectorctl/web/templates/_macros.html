@@ -13,3 +13,9 @@
 {% macro entity_link(kind, key, label) -%}
 <a class="mono" href="/entity/{{ kind }}?key={{ key | urlencode }}">{{ label }}</a>
 {%- endmacro %}
+
+{% macro command_banner(banner) -%}
+{% if banner %}
+<div class="{{ banner.css }}">{{ banner.message }}{% if banner.detail %} — {{ banner.detail }}{% endif %}</div>
+{% endif %}
+{%- endmacro %}
