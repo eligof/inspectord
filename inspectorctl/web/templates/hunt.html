@@ -77,6 +77,9 @@
   <p class="mono">
     window {{ result.since }} → {{ result.until or 'now' }} · limit {{ result.limit }}
   </p>
+  {%- if horizon_note %}
+  <p class="mono warn">{{ horizon_note }}</p>
+  {%- endif %}
   {%- if rows %}
   <table>
     <thead>

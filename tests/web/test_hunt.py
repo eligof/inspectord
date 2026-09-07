@@ -185,6 +185,29 @@ def test_a_complete_result_says_so(ipc_factory) -> None:
     assert "TRUNCATED" not in body
 
 
+def test_hunt_renders_horizon_banner_when_window_reaches_past_data(ipc_factory) -> None:
+    """Spec 2026-09-07 §2: the window claims more history than survived."""
+    result = _result(data_horizon="2026-09-03T00:00:00", since="2026-09-01T00:00:00+00:00")
+    client = ipc_factory([_run(result), _saved()])
+    body = client.get("/hunt", params={"q": "x"}).text
+    assert "only cover since" in body
+    assert "2026-09-03" in body
+
+
+def test_hunt_no_banner_when_horizon_older_than_window(ipc_factory) -> None:
+    result = _result(data_horizon="2026-01-01T00:00:00", since="2026-09-01T00:00:00+00:00")
+    client = ipc_factory([_run(result), _saved()])
+    body = client.get("/hunt", params={"q": "x"}).text
+    assert "only cover since" not in body
+
+
+def test_hunt_banner_empty_store(ipc_factory) -> None:
+    result = _result(data_horizon=None, count=0, events=[])
+    client = ipc_factory([_run(result), _saved()])
+    body = client.get("/hunt", params={"q": "x"}).text
+    assert "no events in the store" in body
+
+
 def test_an_empty_result_says_no_matches_rather_than_nothing(ipc_factory) -> None:
     client = ipc_factory([_run(_result(count=0, events=[])), _saved()])
     body = client.get("/hunt", params={"q": "x"}).text
