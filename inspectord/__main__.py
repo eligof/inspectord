@@ -118,10 +118,19 @@ def _list_events_handler(params: dict[str, Any], db_path: Path) -> dict[str, Any
 
 def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
     def get_health(_params: dict[str, Any]) -> dict[str, Any]:
+        # Hunt-scheduler liveness (hunt-followups §4.1): a dead scheduler
+        # thread must be visible without reading logs — silent stop of
+        # standing detections is the #127 incident shape one layer up.
+        scheduler = getattr(supervisor, "_hunt_scheduler", None)
+        last_tick = scheduler.last_tick_at if scheduler is not None else None
         return {
             "schema_version": "1.0.0",
             "supervisor": "running",
             "workers": [{"name": w.name, "status": "up"} for w in cfg.workers],
+            "hunt_scheduler": {
+                "alive": scheduler is not None and scheduler.is_alive(),
+                "last_tick_at": last_tick.isoformat() if last_tick is not None else None,
+            },
         }
 
     manifests = load_packaged_manifests()

@@ -36,6 +36,7 @@ from inspectord.config import DaemonConfig, WorkerSpec
 from inspectord.enrichment import enrich
 from inspectord.evidence.collector import EvidenceCollector
 from inspectord.evidence.store import ForensicStore
+from inspectord.hunt.scheduler import HuntScheduler
 from inspectord.journal import Journal
 from inspectord.log import get
 from inspectord.parsers.base import build_event
@@ -261,6 +262,10 @@ class Supervisor:
             )
         self._alert_listeners: list[Callable[[Alert], None]] = []
         self._evidence_collector: EvidenceCollector | None = None
+        # Unconditional (no config knob): zero scheduled queries = no-op ticks.
+        # Same shape as the anomaly detector — the shared Database (per-thread
+        # cursors) and the one dispatch path every event takes (§4.1).
+        self._hunt_scheduler = HuntScheduler(db=self._db, emit=self._dispatch)
 
     def start(self) -> None:
         self._db.connect()
@@ -281,6 +286,7 @@ class Supervisor:
         if self._anomaly_detector is not None:
             self._anomaly_detector.load_checkpoints()
             self._anomaly_detector.start()
+        self._hunt_scheduler.start()
         self._subscribe_storage()
         for spec in self._cfg.workers:
             self._spawn_worker(spec)
@@ -404,6 +410,10 @@ class Supervisor:
         # before _db.close(): stop() runs the final first-sighting flush.
         if self._anomaly_detector is not None:
             self._anomaly_detector.stop(timeout=remaining())
+        # Before _db.close() for the same reason: the scheduler's in-flight
+        # SELECT runs on the shared Database. Its stop event is checked between
+        # queries and before the watermark stamp, so no run half-advances.
+        self._hunt_scheduler.stop(timeout=remaining())
         self._journal.close()
         self._db.close()
 
