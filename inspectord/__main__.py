@@ -51,11 +51,14 @@ from inspectord.hunt.ipc_handlers import (
     handle_list_hunt_queries,
     handle_run_hunt_query,
     handle_save_hunt_query,
+    handle_schedule_hunt_query,
+    handle_unschedule_hunt_query,
 )
 from inspectord.ipc_commands import make_run_worker_command_handler
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.log import configure as configure_log
 from inspectord.log import get
+from inspectord.ratelimit import SlidingWindowLimiter
 from inspectord.state.ipc_handlers import (
     handle_capture_baseline,
     handle_list_connections,
@@ -123,6 +126,10 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
 
     manifests = load_packaged_manifests()
     backend = PacmanBackend()
+    # ONE sliding window across all four mutating hunt methods (hunt-followups
+    # §4.6): each writes an audit row, and attacker-drivable append-only audit
+    # growth is what the limiter bounds.
+    hunt_limiter = SlidingWindowLimiter()
 
     return [
         Method(name="get_health", handler=get_health, mutates=False),
@@ -354,14 +361,31 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
         Method(
             name="save_hunt_query",
             handler=lambda params: handle_save_hunt_query(
-                params=params, db_path=cfg.storage.db_path
+                params=params, db_path=cfg.storage.db_path, limiter=hunt_limiter
             ),
             mutates=True,
         ),
         Method(
             name="delete_hunt_query",
             handler=lambda params: handle_delete_hunt_query(
-                params=params, db_path=cfg.storage.db_path
+                params=params, db_path=cfg.storage.db_path, limiter=hunt_limiter
+            ),
+            mutates=True,
+        ),
+        # Scheduled hunts (hunt-followups design §4.6): scheduling creates and
+        # unscheduling destroys a standing alert-generating detection — the
+        # same class of act as ack/close, so both mutate and both audit.
+        Method(
+            name="schedule_hunt_query",
+            handler=lambda params: handle_schedule_hunt_query(
+                params=params, db_path=cfg.storage.db_path, limiter=hunt_limiter
+            ),
+            mutates=True,
+        ),
+        Method(
+            name="unschedule_hunt_query",
+            handler=lambda params: handle_unschedule_hunt_query(
+                params=params, db_path=cfg.storage.db_path, limiter=hunt_limiter
             ),
             mutates=True,
         ),

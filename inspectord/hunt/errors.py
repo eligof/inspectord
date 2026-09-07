@@ -23,6 +23,7 @@ __all__ = [
     "HuntQueryExists",
     "HuntQueryNotFound",
     "HuntRequestError",
+    "HuntScheduledError",
     "HuntSyntaxError",
     "HuntUnsupportedError",
 ]
@@ -79,3 +80,12 @@ class HuntQueryNotFound(HuntError):
 
 class HuntRequestError(HuntError):
     """The request itself is malformed — a missing or contradictory parameter."""
+
+
+class HuntScheduledError(HuntError):
+    """The target query is scheduled and the caller did not pass `scheduled_ok`.
+
+    The expression IS the detection (hunt-followups §4.6): replacing or
+    deleting a scheduled query rewrites or destroys a standing alert-generating
+    detection, so it requires the explicit acknowledgement.
+    """

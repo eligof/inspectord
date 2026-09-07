@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from inspectord.config import dev_config
 from inspectord.hunt import ipc_handlers as h
 from inspectord.hunt import store
 from inspectord.parsers.base import build_event
+from inspectord.ratelimit import SlidingWindowLimiter
 from inspectord.storage.db import Database
 from inspectord.storage.events import insert_event
 from inspectord.storage.migrations import run_migrations
@@ -338,6 +340,228 @@ def test_delete_of_an_unknown_name_is_a_not_found(db_path: Path) -> None:
     result = h.handle_delete_hunt_query(params={"name": "nope"}, db_path=db_path)
     assert result["ok"] is False
     assert result["error_kind"] == "not_found"
+
+
+# --------------------------------------------------------------------------
+# schedule / unschedule (hunt-followups design §4.6)
+# --------------------------------------------------------------------------
+
+
+def _audit_rows(db_path: Path) -> list[tuple[str, str, dict[str, Any]]]:
+    with Database(db_path) as db:
+        rows = db.query(
+            "SELECT action, target, details_json FROM audit_log ORDER BY seq"
+        ).fetchall()
+    return [(str(r[0]), str(r[1]), json.loads(str(r[2]))) for r in rows]
+
+
+def _save(db_path: Path, name: str = "curl-hunt") -> None:
+    result = h.handle_save_hunt_query(
+        params={"name": name, "expression": 'process.name == "curl"'}, db_path=db_path
+    )
+    assert result["ok"] is True
+
+
+def _schedule(db_path: Path, name: str = "curl-hunt", **overrides: Any) -> dict[str, Any]:
+    params: dict[str, Any] = {"name": name, "interval_s": 900, "severity": "medium", **overrides}
+    return h.handle_schedule_hunt_query(params=params, db_path=db_path)
+
+
+def test_schedule_happy_path_is_visible_in_list_and_audited(db_path: Path) -> None:
+    _save(db_path)
+    result = _schedule(db_path)
+    assert result["ok"] is True
+    assert result["name"] == "curl-hunt"
+    assert result["interval_s"] == 900
+    assert result["severity"] == "medium"
+
+    listed = h.handle_list_hunt_queries(params={}, db_path=db_path)
+    (query,) = listed["queries"]
+    assert query["schedule_interval_s"] == 900
+    assert query["schedule_severity"] == "medium"
+    assert query["last_run_at"] is None
+    assert query["last_status"] is None
+
+    rows = [r for r in _audit_rows(db_path) if r[0] == "hunt_query_scheduled"]
+    assert len(rows) == 1
+    _action, target, details = rows[0]
+    assert target == "hunt:curl-hunt"
+    assert details == {"interval_s": 900, "severity": "medium", "watermark_preserved": False}
+
+
+def test_schedule_validation_rejections_write_nothing(db_path: Path) -> None:
+    _save(db_path)
+    floor = _schedule(db_path, interval_s=60)
+    assert floor["ok"] is False
+    assert floor["error_kind"] == "bounds"
+    enum = _schedule(db_path, severity="critical")
+    assert enum["ok"] is False
+    assert enum["error_kind"] == "request"
+    unknown = h.handle_schedule_hunt_query(
+        params={"name": "nope", "interval_s": 900, "severity": "low"}, db_path=db_path
+    )
+    assert unknown["ok"] is False
+    assert unknown["error_kind"] == "not_found"
+
+    # No write happened...
+    listed = h.handle_list_hunt_queries(params={}, db_path=db_path)
+    assert listed["queries"][0]["schedule_interval_s"] is None
+    # ...and no audit row either: a rejected request never touched state.
+    assert all(a != "hunt_query_scheduled" for a, _, _ in _audit_rows(db_path))
+
+
+def test_unschedule_audits_what_was_destroyed(db_path: Path) -> None:
+    _save(db_path)
+    _schedule(db_path, severity="high")
+    result = h.handle_unschedule_hunt_query(params={"name": "curl-hunt"}, db_path=db_path)
+    assert result["ok"] is True
+    assert result["interval_s"] == 900
+    assert result["severity"] == "high"
+
+    listed = h.handle_list_hunt_queries(params={}, db_path=db_path)
+    assert listed["queries"][0]["schedule_interval_s"] is None
+
+    rows = [r for r in _audit_rows(db_path) if r[0] == "hunt_query_unscheduled"]
+    assert len(rows) == 1
+    assert rows[0][1] == "hunt:curl-hunt"
+    assert rows[0][2] == {"interval_s": 900, "severity": "high"}
+
+
+def test_reschedule_preserves_the_watermark_and_says_so(db_path: Path) -> None:
+    _save(db_path)
+    _schedule(db_path)
+    h.handle_unschedule_hunt_query(params={"name": "curl-hunt"}, db_path=db_path)
+    again = _schedule(db_path, severity="low")
+    assert again["ok"] is True
+    rows = [r for r in _audit_rows(db_path) if r[0] == "hunt_query_scheduled"]
+    assert rows[-1][2]["watermark_preserved"] is True
+
+
+def test_mutating_hunt_calls_share_a_rate_limit(db_path: Path) -> None:
+    """13th mutating call in the window is refused; first rejection audited once."""
+    clock = [0.0]
+    limiter = SlidingWindowLimiter(monotonic=lambda: clock[0])
+    _save(db_path)
+    for index in range(12):
+        result = h.handle_schedule_hunt_query(
+            params={"name": "curl-hunt", "interval_s": 900 + index, "severity": "medium"},
+            db_path=db_path,
+            limiter=limiter,
+        )
+        assert result["ok"] is True
+    rejected = h.handle_schedule_hunt_query(
+        params={"name": "curl-hunt", "interval_s": 900, "severity": "medium"},
+        db_path=db_path,
+        limiter=limiter,
+    )
+    assert rejected["ok"] is False
+    assert rejected["error_kind"] == "rate_limited"
+    # The second rejection of the same window is NOT audited again.
+    again = h.handle_delete_hunt_query(
+        params={"name": "curl-hunt"}, db_path=db_path, limiter=limiter
+    )
+    assert again["ok"] is False
+    assert again["error_kind"] == "rate_limited"
+    rate_rows = [r for r in _audit_rows(db_path) if r[2].get("reason") == "rate_limited"]
+    assert len(rate_rows) == 1
+
+
+def test_save_replace_on_a_scheduled_name_needs_scheduled_ok(db_path: Path) -> None:
+    _save(db_path)
+    _schedule(db_path)
+    refused = h.handle_save_hunt_query(
+        params={"name": "curl-hunt", "expression": 'process.name == "wget"', "replace": True},
+        db_path=db_path,
+    )
+    assert refused["ok"] is False
+    assert refused["error_kind"] == "scheduled"
+    with Database(db_path) as db:
+        assert store.get_query(db, "curl-hunt").expression == 'process.name == "curl"'  # type: ignore[union-attr]
+
+    replaced = h.handle_save_hunt_query(
+        params={
+            "name": "curl-hunt",
+            "expression": 'process.name == "wget"',
+            "replace": True,
+            "scheduled_ok": True,
+        },
+        db_path=db_path,
+    )
+    assert replaced["ok"] is True
+    with Database(db_path) as db:
+        query = store.get_query(db, "curl-hunt")
+    assert query is not None
+    assert query.expression == 'process.name == "wget"'
+    # Save-replace preserves the schedule AND the watermark (§4.6).
+    assert query.schedule_interval_s == 900
+    assert query.schedule_severity == "medium"
+    assert query.watermark_seq is not None
+
+
+def test_save_audit_details_distinguish_idle_edits_from_gutted_detections(db_path: Path) -> None:
+    _save(db_path)
+    _schedule(db_path)
+    h.handle_save_hunt_query(
+        params={
+            "name": "curl-hunt",
+            "expression": 'process.name == "wget"',
+            "replace": True,
+            "scheduled_ok": True,
+        },
+        db_path=db_path,
+    )
+    rows = [r for r in _audit_rows(db_path) if r[0] == "hunt_query_saved"]
+    assert rows[0][2] == {
+        "replaced": False,
+        "was_scheduled": False,
+        "old_expression_sha256": None,
+        "new_expression_sha256": hashlib.sha256(b'process.name == "curl"').hexdigest(),
+    }
+    assert rows[1][2] == {
+        "replaced": True,
+        "was_scheduled": True,
+        "old_expression_sha256": hashlib.sha256(b'process.name == "curl"').hexdigest(),
+        "new_expression_sha256": hashlib.sha256(b'process.name == "wget"').hexdigest(),
+    }
+
+
+def test_delete_of_a_scheduled_name_needs_scheduled_ok_and_audits_the_schedule(
+    db_path: Path,
+) -> None:
+    _save(db_path)
+    _schedule(db_path)
+    refused = h.handle_delete_hunt_query(params={"name": "curl-hunt"}, db_path=db_path)
+    assert refused["ok"] is False
+    assert refused["error_kind"] == "scheduled"
+    with Database(db_path) as db:
+        assert store.get_query(db, "curl-hunt") is not None
+
+    deleted = h.handle_delete_hunt_query(
+        params={"name": "curl-hunt", "scheduled_ok": True}, db_path=db_path
+    )
+    assert deleted["ok"] is True
+    rows = [r for r in _audit_rows(db_path) if r[0] == "hunt_query_deleted"]
+    assert rows[0][2] == {
+        "expression_sha256": hashlib.sha256(b'process.name == "curl"').hexdigest(),
+        "was_scheduled": True,
+        "schedule_interval_s": 900,
+    }
+
+
+def test_delete_of_an_unscheduled_name_needs_no_scheduled_ok(db_path: Path) -> None:
+    _save(db_path)
+    deleted = h.handle_delete_hunt_query(params={"name": "curl-hunt"}, db_path=db_path)
+    assert deleted["ok"] is True
+    rows = [r for r in _audit_rows(db_path) if r[0] == "hunt_query_deleted"]
+    assert rows[0][2]["was_scheduled"] is False
+    assert rows[0][2]["schedule_interval_s"] is None
+
+
+def test_the_daemon_registers_schedule_methods_as_mutating(tmp_path: Path) -> None:
+    cfg = dev_config(base=tmp_path)
+    mutates = {m.name: m.mutates for m in _ipc_methods(None, cfg)}  # type: ignore[arg-type]
+    assert mutates["schedule_hunt_query"] is True
+    assert mutates["unschedule_hunt_query"] is True
 
 
 def test_every_response_is_json_serializable(db_path: Path) -> None:
