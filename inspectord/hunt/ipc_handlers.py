@@ -157,6 +157,18 @@ def _payload(row_json: str) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _data_horizon(db: Database) -> datetime | None:
+    """MIN(ts) over the store — the oldest surviving event, None when empty.
+
+    Advisory (spec §2): a log-derived event carries its log line's timestamp,
+    so one backdated line can overstate coverage. It is also a second
+    statement, not one transaction with the query SELECT — a retention prune
+    committing between the two skews the value by at most one prune cycle.
+    """
+    row = db.query("SELECT MIN(ts) FROM events_enriched").fetchone()
+    return row[0] if row is not None else None
+
+
 def _result_dict(
     result: HuntResult,
     *,
@@ -164,6 +176,7 @@ def _result_dict(
     name: str | None,
     since: datetime | None,
     until: datetime | None,
+    data_horizon: datetime | None,
 ) -> dict[str, Any]:
     return {
         "schema_version": _SCHEMA,
@@ -172,6 +185,7 @@ def _result_dict(
         "expression": expression,
         "since": _iso(since),
         "until": _iso(until),
+        "data_horizon": _iso(data_horizon),
         "limit": result.limit,
         # `truncated` is a field rather than something the caller infers by
         # counting: a silently-cut result set reads as "there were exactly N".
@@ -220,9 +234,12 @@ def handle_run_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[str,
             store.check_expression_length(text)
             compiled = compile_hunt_query(text, since=since, until=until, limit=limit)
             result = run_hunt_query(db, compiled)
+            horizon = _data_horizon(db)
     except HuntError as exc:
         return _failure(exc)
-    return _result_dict(result, expression=text, name=name, since=since, until=until)
+    return _result_dict(
+        result, expression=text, name=name, since=since, until=until, data_horizon=horizon
+    )
 
 
 def handle_save_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
