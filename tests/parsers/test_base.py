@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from inspectord.parsers.base import ParsedLine, build_event
+from inspectord.schemas.event import Event
 
 
 def test_parsedline_carries_raw_and_fields() -> None:
@@ -121,3 +122,22 @@ def test_build_event_carries_vulnerability_block() -> None:
     assert ev.vulnerability is not None
     assert ev.vulnerability["avg_id"] == "AVG-2870"
     assert ev.vulnerability["new"] is True
+
+
+def test_build_event_hunt_namespace_round_trips() -> None:
+    ev = build_event(
+        module="hunt_scheduler",
+        action="hunt_match",
+        category=["hunt"],
+        type_=["info"],
+        severity="medium",
+        kind="signal",
+        hunt={"name": "q1", "severity": "medium", "match_count": 3},
+    )
+    parsed = Event.model_validate_json(ev.model_dump_json())
+    assert parsed.hunt == {"name": "q1", "severity": "medium", "match_count": 3}
+
+
+def test_build_event_hunt_defaults_to_none() -> None:
+    ev = build_event(module="m", action="a", category=["host"], type_=["info"], severity="info")
+    assert ev.hunt is None

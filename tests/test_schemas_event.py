@@ -65,6 +65,16 @@ def test_vulnerability_namespace_roundtrips() -> None:
     assert parsed == ev
 
 
+def test_hunt_namespace_roundtrips() -> None:
+    payload = _minimal_event_dict() | {
+        "hunt": {"name": "q1", "severity": "medium", "match_count": 3}
+    }
+    ev = Event.model_validate(payload)
+    assert ev.hunt == {"name": "q1", "severity": "medium", "match_count": 3}
+    parsed = Event.model_validate_json(ev.model_dump_json())
+    assert parsed == ev
+
+
 def test_unknown_namespace_still_rejected() -> None:
     # extra="forbid" is the reason the vulnerability field is a schema change,
     # not an optional convenience — pin that it still rejects unknown blocks.
