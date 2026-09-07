@@ -337,6 +337,29 @@ def test_unschedule_mid_run_discards_the_result(
     assert row.last_run_at is None
 
 
+def test_unschedule_mid_failing_run_discards_the_failure(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The --off-while-running race on the FAILURE path (§4.3 item 4): the
+    guarded stamp reports the schedule changed under the run, so no failure
+    event may be emitted for a query that is no longer a standing detection."""
+    _schedule(db)
+    _insert(db)
+
+    def unschedule_then_boom(handle: Database, compiled: CompiledQuery) -> Any:
+        store.unschedule_query(db, name="q1")
+        raise HuntExecutionError("boom")
+
+    monkeypatch.setattr(scheduler_mod, "run_hunt_query", unschedule_then_boom)
+    emitted: list[Event] = []
+    HuntScheduler(db=db, emit=emitted.append).tick(now=NOW)
+
+    assert emitted == []
+    row = _row(db)
+    assert row.last_status is None  # nothing was stamped
+    assert row.last_run_at is None
+
+
 def test_unexpected_exception_in_one_query_is_contained(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:

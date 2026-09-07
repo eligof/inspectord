@@ -147,9 +147,10 @@ class HuntScheduler:
         # Transition state comes from the DB row, not the in-memory streak map:
         # `last_status` survives restarts, the map deliberately does not.
         transition = not (query.last_status or "").startswith("failed")
-        store.record_run(
+        if not store.record_run(
             self._db, name=query.name, watermark_seq=None, status=f"failed:{kind}", now=now
-        )
+        ):
+            return  # schedule changed mid-run: discard the failure too (§4.3 item 4)
         self._failure_streaks[query.name] = self._failure_streaks.get(query.name, 0) + 1
         if transition:
             self._emit(
