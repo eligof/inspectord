@@ -18,15 +18,13 @@ An audited, allowlisted, rate-limited bridge from the IPC socket to
 from __future__ import annotations
 
 import json
-import threading
-import time
-from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from inspectord.audit.log import append_audit
 from inspectord.ipc_errors import ClientFacingError
+from inspectord.ratelimit import SlidingWindowLimiter as _SlidingWindowLimiter
 from inspectord.workers.contract import COMMAND_ARGS_MAX_BYTES
 
 _SCHEMA_VERSION = "1.0.0"
@@ -65,42 +63,6 @@ class WorkerCommandError(ClientFacingError):
     The message may quote the caller's own worker/command back at them —
     names the client itself chose — and nothing else.
     """
-
-
-class _SlidingWindowLimiter:
-    """12/min sliding window; tells the caller when to audit a rejection.
-
-    ``check()`` returns ``(allowed, audit_this_rejection)``: the first
-    rejection of a saturated window is audited, the rest of that window's are
-    not — one row per window, however hard the client hammers.
-    """
-
-    def __init__(
-        self,
-        limit: int = RATE_LIMIT_PER_MIN,
-        window_s: float = RATE_WINDOW_S,
-        monotonic: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._limit = limit
-        self._window_s = window_s
-        self._monotonic = monotonic
-        self._lock = threading.Lock()
-        self._stamps: deque[float] = deque()
-        self._rejection_audited = False
-
-    def check(self) -> tuple[bool, bool]:
-        with self._lock:
-            now = self._monotonic()
-            while self._stamps and now - self._stamps[0] >= self._window_s:
-                self._stamps.popleft()
-            if len(self._stamps) < self._limit:
-                self._stamps.append(now)
-                self._rejection_audited = False
-                return True, False
-            if self._rejection_audited:
-                return False, False
-            self._rejection_audited = True
-            return False, True
 
 
 def _truncated_repr(value: Any) -> str:

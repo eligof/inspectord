@@ -1,0 +1,19 @@
+version: 1.0.0
+id: hunt.scheduled_match
+name: "scheduled hunt matched new events"
+severity: medium
+category: hunt
+dedup_window_s: 86400
+why: |
+  A hunt query you saved and scheduled matched events that arrived since its
+  last run. You wrote the query; this alert is it doing its job. The matched
+  event ids ride in the alert payload — open /hunt and run the saved query
+  interactively to investigate.
+false_positives:
+  - "The query is broader than intended — refine the expression and save --replace."
+detect:
+  any_of:
+    - event.module == "hunt_scheduler" AND event.action == "hunt_match" AND hunt.severity == "medium"
+short: "scheduled hunt {hunt.name}: {hunt.match_count} new match(es)"
+detail: "Scheduled hunt {hunt.name} matched {hunt.match_count} newly ingested event(s). Sample event ids are in the alert payload; run the saved query in /hunt to see them."
+labels: [hunt, scheduled]

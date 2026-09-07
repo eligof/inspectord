@@ -301,6 +301,38 @@ def test_time_bounds_are_optional_and_bound_as_parameters() -> None:
     assert "ts >= ?" in bounded.sql
 
 
+def test_compile_with_ingest_bounds_emits_placeholders() -> None:
+    compiled = compile_hunt_query('process.name == "x"', ingest_bounds=(10, 20))
+    assert "ingest_seq > ?" in compiled.sql
+    assert "ingest_seq <= ?" in compiled.sql
+    assert 10 in compiled.params
+    assert 20 in compiled.params
+    # Parameterized, never formatted: the bound values must not be in the text.
+    assert "10" not in compiled.sql
+    assert "20" not in compiled.sql
+    assert compiled.sql.count("?") == len(compiled.params)
+
+
+def test_ingest_bounds_are_absent_by_default() -> None:
+    assert "ingest_seq" not in compile_hunt_query('process.name == "x"').sql
+
+
+def test_compile_ingest_bounds_with_hostile_expression_stays_parameterized() -> None:
+    """A saved expression full of quote-and-drop bytes cannot break out of the
+    placeholders even when the scheduler appends its sequence window."""
+    compiled = compile_hunt_query(
+        'process.name == "\']; DROP TABLE events_enriched; --"',
+        ingest_bounds=(10, 20),
+    )
+    literals = [p for p in compiled.params if isinstance(p, str)]
+    assert literals, "expected at least one bound literal"
+    for literal in literals:
+        assert literal not in compiled.sql, literal
+    assert compiled.sql.count("?") == len(compiled.params)
+    assert 10 in compiled.params
+    assert 20 in compiled.params
+
+
 def test_the_query_is_read_only() -> None:
     sql = compile_hunt_query('process.name == "curl"').sql.upper()
     assert sql.startswith("SELECT")

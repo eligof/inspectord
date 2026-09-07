@@ -72,6 +72,34 @@ def to_iso(value: str) -> str:
     return (datetime.now(tz=UTC) - timedelta(**{unit: amount})).isoformat()
 
 
+def to_seconds(value: str) -> int | None:
+    """Turn `15m` / `1h` / `1d` into whole seconds, or None for anything else.
+
+    Unlike `to_iso` there is no pass-through: an interval that is not
+    shorthand is a mistake, and the caller says so.
+    """
+    match = _DURATION_RE.match(value)
+    if match is None:
+        return None
+    unit = _DURATION_UNITS[match.group(2)]
+    return int(timedelta(**{unit: int(match.group(1))}).total_seconds())
+
+
+#: The daemon's schedule floor (hunt-followups §4.6). Checked client-side as
+#: UX only — the daemon re-validates every schedule request.
+_SCHEDULE_FLOOR_S = 300
+
+#: Largest-exact-unit rendering for a stored interval: 900 → 15m, 3600 → 1h.
+_INTERVAL_UNITS = ((604_800, "w"), (86_400, "d"), (3_600, "h"), (60, "m"))
+
+
+def format_interval(seconds: int) -> str:
+    for unit_s, suffix in _INTERVAL_UNITS:
+        if seconds >= unit_s and seconds % unit_s == 0:
+            return f"{seconds // unit_s}{suffix}"
+    return f"{seconds}s"
+
+
 def _call(socket: Path, method: str, params: dict[str, Any]) -> dict[str, Any]:
     """Call the daemon, turning a transport failure into a clean exit."""
     try:
@@ -232,14 +260,24 @@ def save_cmd(
         bool,
         typer.Option("--replace", help="overwrite an existing query of the same name"),
     ] = False,
+    scheduled_ok: Annotated[
+        bool,
+        typer.Option(
+            "--scheduled-ok",
+            help="confirm replacing a SCHEDULED query (it rewrites a standing detection)",
+        ),
+    ] = False,
 ) -> None:
     """Compile a query and save it under a name.
 
     The expression is compiled before it is stored, so a query that cannot
     compile is refused now rather than at 2am. An existing name is **refused**
-    unless `--replace` is given.
+    unless `--replace` is given — and a *scheduled* name additionally needs
+    `--scheduled-ok`, because its expression is a standing detection.
     """
     params: dict[str, Any] = {"name": name, "expression": query, "replace": replace}
+    if scheduled_ok:
+        params["scheduled_ok"] = True
     if description is not None:
         params["description"] = description
     result = _call(socket, "save_hunt_query", params)
@@ -248,6 +286,11 @@ def save_cmd(
             rprint(f"[red]not saved[/red] — the name {escape(name)} is taken")
             rprint(f"  {escape(str(result.get('error', '')))}")
             rprint("[dim]re-run with --replace to overwrite it, or pick another name[/dim]")
+            raise typer.Exit(code=1)
+        if result.get("error_kind") == "scheduled":
+            rprint(f"[red]not saved[/red] — {escape(name)} is a scheduled standing detection")
+            rprint(f"  {escape(str(result.get('error', '')))}")
+            rprint("[dim]re-run with --scheduled-ok to confirm rewriting it[/dim]")
             raise typer.Exit(code=1)
         _fail(result)
 
@@ -280,12 +323,33 @@ def list_cmd(
     table.add_column("Expression")
     table.add_column("Description")
     table.add_column("Updated")
+    table.add_column("Every")
+    table.add_column("Severity")
+    table.add_column("Last run")
+    table.add_column("Last status")
+    now = datetime.now(tz=UTC)
     for query in queries:
+        interval = query.get("schedule_interval_s")
+        last_run = _short_ts(query.get("last_run_at")) if query.get("last_run_at") else "-"
+        # Overdue-ness is derived here, not sent by the daemon (§4.1): a run
+        # that should have happened by now and has not is worth a loud mark —
+        # a dead scheduler must be visible without reading logs.
+        if interval is not None and query.get("last_run_at"):
+            try:
+                ran = _as_utc(datetime.fromisoformat(str(query["last_run_at"])))
+                if ran + timedelta(seconds=int(interval)) < now:
+                    last_run += " [red]overdue[/red]"
+            except ValueError:
+                pass
         table.add_row(
             escape(str(query.get("name", ""))),
             escape(str(query.get("expression", ""))),
             escape(str(query.get("description") or "")),
             _short_ts(query.get("updated_at")),
+            format_interval(int(interval)) if interval is not None else "-",
+            escape(str(query.get("schedule_severity"))) if query.get("schedule_severity") else "-",
+            last_run,
+            escape(str(query.get("last_status"))) if query.get("last_status") else "-",
         )
     rprint(table)
 
@@ -294,14 +358,110 @@ def list_cmd(
 def delete_cmd(
     name: str,
     socket: Annotated[Path, typer.Option("--socket", "-s")] = _DEFAULT_SOCKET,
+    scheduled_ok: Annotated[
+        bool,
+        typer.Option(
+            "--scheduled-ok",
+            help="confirm deleting a SCHEDULED query (it destroys a standing detection)",
+        ),
+    ] = False,
 ) -> None:
     """Delete a saved query, printing what it was so it can be retyped."""
-    result = _call(socket, "delete_hunt_query", {"name": name})
+    params: dict[str, Any] = {"name": name}
+    if scheduled_ok:
+        params["scheduled_ok"] = True
+    result = _call(socket, "delete_hunt_query", params)
     if not result.get("ok", False):
+        if result.get("error_kind") == "scheduled":
+            rprint(f"[red]not deleted[/red] — {escape(name)} is a scheduled standing detection")
+            rprint(f"  {escape(str(result.get('error', '')))}")
+            rprint("[dim]re-run with --scheduled-ok to confirm destroying it[/dim]")
+            raise typer.Exit(code=1)
         _fail(result)
     expression = str(result.get("expression", ""))
     rprint(f"[green]deleted[/green] {escape(name)}")
     rprint(f"  [dim]expression:[/dim] {escape(expression)}")
     rprint(
         f"[dim]restore it with: inspectorctl hunt save {escape(name)} '{escape(expression)}'[/dim]"
+    )
+
+
+@app.command("schedule")
+def schedule_cmd(
+    name: str,
+    socket: Annotated[Path, typer.Option("--socket", "-s")] = _DEFAULT_SOCKET,
+    every: Annotated[
+        str | None,
+        typer.Option("--every", help="run interval: 15m / 1h / 1d (floor 5m)"),
+    ] = None,
+    severity: Annotated[
+        str,
+        typer.Option("--severity", help="alert severity for matches: low, medium or high"),
+    ] = "medium",
+    off: Annotated[
+        bool,
+        typer.Option("--off", help="stop the standing detection (the watermark is preserved)"),
+    ] = False,
+) -> None:
+    """Run a saved query on a schedule over newly ingested events (§4.6).
+
+    Scheduling makes the query a standing detection: every `--every` interval
+    it scans only events ingested since its last run, and any match raises an
+    alert at `--severity`. `--off` stops it; the watermark survives, so
+    re-scheduling scans the off-gap. The client-side checks below are UX only:
+    the daemon re-validates every request.
+    """
+    if every is not None and off:
+        rprint("[red]pass --every or --off[/red], not both: they are opposite acts")
+        raise typer.Exit(code=1)
+    if every is None and not off:
+        rprint("[red]nothing to do[/red] — pass --every <interval> to schedule, or --off to stop")
+        raise typer.Exit(code=1)
+
+    if off:
+        result = _call(socket, "unschedule_hunt_query", {"name": name})
+        if not result.get("ok", False):
+            _fail(result)
+        interval = format_interval(int(result.get("interval_s", 0)))
+        prior_severity = escape(str(result.get("severity", "")))
+        # Loudly different from scheduling: a standing detection was destroyed.
+        rprint(
+            f"[yellow]UNSCHEDULED[/yellow] {escape(name)} — "
+            f"was every {interval}, severity {prior_severity}"
+        )
+        rprint(
+            "[dim]the watermark is preserved: re-scheduling scans the gap; "
+            "only delete destroys it[/dim]"
+        )
+        return
+
+    assert every is not None  # the exclusivity checks above guarantee it
+    seconds = to_seconds(every)
+    if seconds is None:
+        rprint(f"[red]cannot read --every {escape(every)}[/red]: use 15m, 1h or 1d")
+        raise typer.Exit(code=1)
+    if seconds < _SCHEDULE_FLOOR_S:
+        rprint(
+            f"[red]interval too small[/red] — {escape(every)} is under the floor of "
+            f"{_SCHEDULE_FLOOR_S}s (5m); the daemon enforces this too"
+        )
+        raise typer.Exit(code=1)
+
+    result = _call(
+        socket,
+        "schedule_hunt_query",
+        {"name": name, "interval_s": seconds, "severity": severity},
+    )
+    if not result.get("ok", False):
+        _fail(result)
+    stands_interval = format_interval(int(result.get("interval_s", seconds)))
+    stands_severity = escape(str(result.get("severity", severity)))
+    rprint(
+        f"[green]SCHEDULED[/green] {escape(name)} — every {stands_interval}, "
+        f"severity {stands_severity}"
+    )
+    rprint(
+        "[dim]it scans only newly ingested events from now on; matches raise a "
+        f"{stands_severity} alert. Stop it with: inspectorctl hunt schedule "
+        f"{escape(name)} --off[/dim]"
     )

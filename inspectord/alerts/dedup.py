@@ -1,11 +1,24 @@
-"""Dedup engine: persists Alerts; same dedup_key within window bumps counter."""
+"""Dedup engine: persists Alerts; same dedup_key within window bumps counter.
+
+Two bump rules, both from hunt-followups design §4.5:
+
+- The window is per-call overridable (`window_s`) so a rule can hold one alert
+  open across a long-interval standing detection; `None` keeps the engine's
+  default, so no other rule changes behavior.
+- A bump of an alert whose status is no longer open (status != "new") advances
+  only `dedup_count`/`last_seen_at` — it never rewrites the alert's rendered
+  text or payload, and it is reported as not notifiable so the supervisor's
+  fan-out (notifier, evidence collector) skips it. An acked standing match
+  stays quiet until it either returns after the window (fresh alert) or is
+  unacked.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from inspectord.schemas.alert import Alert
+from inspectord.schemas.alert import Alert, AlertStatus
 from inspectord.storage.db import Database
 
 
@@ -14,12 +27,13 @@ class DedupEngine:
         self._db_path = Path(db_path)
         self._window = timedelta(seconds=window_s)
 
-    def persist(self, alert: Alert) -> tuple[Alert, bool]:
-        """Persist or update. Returns (final_alert, was_new)."""
-        cutoff = alert.ts - self._window
+    def persist(self, alert: Alert, *, window_s: float | None = None) -> tuple[Alert, bool, bool]:
+        """Persist or update. Returns (final_alert, was_new, notifiable)."""
+        window = self._window if window_s is None else timedelta(seconds=window_s)
+        cutoff = alert.ts - window
         with Database(self._db_path) as db:
             rows = db.query(
-                "SELECT alert_id, dedup_count, first_seen_at FROM alerts "
+                "SELECT alert_id, dedup_count, first_seen_at, status FROM alerts "
                 "WHERE dedup_key = ? AND last_seen_at >= ? "
                 "ORDER BY last_seen_at DESC LIMIT 1",
                 [alert.dedup_key, cutoff],
@@ -32,19 +46,27 @@ class DedupEngine:
                     first_seen = datetime.fromisoformat(first_seen)
                 if first_seen.tzinfo is None:
                     first_seen = first_seen.replace(tzinfo=UTC)
-                db.execute(
-                    "UPDATE alerts SET dedup_count = ?, last_seen_at = ?, "
-                    "rendered_short = ?, rendered_detail = ?, payload_json = ? "
-                    "WHERE alert_id = ?",
-                    [
-                        new_count,
-                        alert.last_seen_at,
-                        alert.rendered.short,
-                        alert.rendered.detail,
-                        alert.model_dump_json(),
-                        existing_id,
-                    ],
-                )
+                notifiable = str(rows[0][3]) == AlertStatus.new.value
+                if notifiable:
+                    db.execute(
+                        "UPDATE alerts SET dedup_count = ?, last_seen_at = ?, "
+                        "rendered_short = ?, rendered_detail = ?, payload_json = ? "
+                        "WHERE alert_id = ?",
+                        [
+                            new_count,
+                            alert.last_seen_at,
+                            alert.rendered.short,
+                            alert.rendered.detail,
+                            alert.model_dump_json(),
+                            existing_id,
+                        ],
+                    )
+                else:
+                    # §4.5: only the counters move on a non-open alert.
+                    db.execute(
+                        "UPDATE alerts SET dedup_count = ?, last_seen_at = ? WHERE alert_id = ?",
+                        [new_count, alert.last_seen_at, existing_id],
+                    )
                 return (
                     alert.model_copy(
                         update={
@@ -54,6 +76,7 @@ class DedupEngine:
                         }
                     ),
                     False,
+                    notifiable,
                 )
             db.execute(
                 "INSERT INTO alerts ("
@@ -77,4 +100,4 @@ class DedupEngine:
                     alert.model_dump_json(),
                 ],
             )
-            return alert, True
+            return alert, True, True

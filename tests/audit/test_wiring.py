@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -297,7 +298,14 @@ def test_save_hunt_query_audited(tmp_path: Path) -> None:
         "hunt:curl-runs",
         "user:local",
     )
-    assert row["details"] == {}
+    # PR3 (§4.6): the trail distinguishes "edited an idle saved query" from
+    # "gutted a standing detection", so the details stopped being empty.
+    assert row["details"] == {
+        "replaced": False,
+        "was_scheduled": False,
+        "old_expression_sha256": None,
+        "new_expression_sha256": hashlib.sha256(b'process.name == "curl"').hexdigest(),
+    }
 
 
 def test_delete_hunt_query_audited(tmp_path: Path) -> None:
@@ -315,7 +323,11 @@ def test_delete_hunt_query_audited(tmp_path: Path) -> None:
         "hunt:curl-runs",
         "user:local",
     )
-    assert row["details"] == {}
+    assert row["details"] == {
+        "expression_sha256": hashlib.sha256(b'process.name == "curl"').hexdigest(),
+        "was_scheduled": False,
+        "schedule_interval_s": None,
+    }
 
 
 # --------------------------------------------------------------------------

@@ -166,6 +166,7 @@ class CompiledQuery:
     limit: int
     since: datetime | None = None
     until: datetime | None = None
+    ingest_bounds: tuple[int, int] | None = None
 
 
 class _Binder:
@@ -185,12 +186,18 @@ def compile_hunt_query(
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int | None = None,
+    ingest_bounds: tuple[int, int] | None = None,
 ) -> CompiledQuery:
     """Compile `expression` into a parameterized query, or raise `HuntError`.
 
     `since` / `until` are inclusive bounds on the indexed `ts` column. They are
     optional here; the caller (CLI, IPC) is responsible for defaulting them to
     a recent window.
+
+    `ingest_bounds` is the scheduled-hunt watermark window `(low, high)` on the
+    `ingest_seq` column — exclusive below, inclusive above (hunt-followups
+    design §4.3: the low bound is the previous run's `upper`, already covered).
+    Both bounds are bound parameters, never formatted into the SQL text.
     """
     resolved_limit = _resolve_limit(limit)
     if since is not None and until is not None and since > until:
@@ -206,6 +213,9 @@ def compile_hunt_query(
         clauses.append(f"ts >= {binder.bind(since)}")
     if until is not None:
         clauses.append(f"ts <= {binder.bind(until)}")
+    if ingest_bounds is not None:
+        low, high = ingest_bounds
+        clauses.append(f"(ingest_seq > {binder.bind(low)} AND ingest_seq <= {binder.bind(high)})")
     sql = (
         f"{_SELECT}\n"
         "FROM events_enriched\n"
@@ -220,6 +230,7 @@ def compile_hunt_query(
         limit=resolved_limit,
         since=since,
         until=until,
+        ingest_bounds=ingest_bounds,
     )
 
 

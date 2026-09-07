@@ -146,6 +146,12 @@
 {%- if saved_error %}
 {{ ipc_failure(saved_error) }}
 {%- elif saved %}
+{#
+  Schedule state is DISPLAY-ONLY (hunt-followups §4.6): scheduling and
+  unscheduling are CLI-only mutating methods, so this table carries no
+  control for either — `inspectorctl hunt schedule <name> --every 15m`
+  and `--off` are where they live.
+#}
 <table>
   <thead>
     <tr>
@@ -153,6 +159,10 @@
       <th>Expression</th>
       <th>Description</th>
       <th>Updated</th>
+      <th>Every</th>
+      <th>Severity</th>
+      <th>Last run</th>
+      <th>Last status</th>
       <th></th>
     </tr>
   </thead>
@@ -163,6 +173,15 @@
       <td class="mono">{{ query.expression }}</td>
       <td>{{ query.description or '' }}</td>
       <td class="mono muted">{{ query.updated_at or '' }}</td>
+      <td class="mono">{{ query.schedule_every or '-' }}</td>
+      <td>{{ query.schedule_severity or '-' }}</td>
+      <td class="mono muted">{{ query.last_run_at or '-' }}</td>
+      {#- A failing standing detection must render visibly failed (§4.6). #}
+      {%- if query.last_status and (query.last_status is string) and query.last_status.startswith('failed') %}
+      <td class="mono bad">{{ query.last_status }}</td>
+      {%- else %}
+      <td class="mono">{{ query.last_status or '-' }}</td>
+      {%- endif %}
       <td><a href="/hunt?name={{ query.name|urlencode }}">Run</a></td>
     </tr>
     {%- endfor %}

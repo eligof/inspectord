@@ -21,6 +21,7 @@ compiler produced. Only save and delete write, and only to `hunt_query`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -38,26 +39,39 @@ from inspectord.hunt.errors import (
     HuntQueryExists,
     HuntQueryNotFound,
     HuntRequestError,
+    HuntScheduledError,
     HuntSyntaxError,
     HuntUnsupportedError,
 )
 from inspectord.hunt.execute import HuntResult, run_hunt_query
 from inspectord.hunt.store import HuntQuery
 from inspectord.log import get
+from inspectord.ratelimit import SlidingWindowLimiter
 from inspectord.storage.db import Database
 
 log = get(__name__)
 
 __all__ = [
     "DEFAULT_WINDOW",
+    "MUTATION_RATE_LIMIT_PER_MIN",
     "handle_delete_hunt_query",
     "handle_get_hunt_query",
     "handle_list_hunt_queries",
     "handle_run_hunt_query",
     "handle_save_hunt_query",
+    "handle_schedule_hunt_query",
+    "handle_unschedule_hunt_query",
 ]
 
 _SCHEMA = "1.0.0"
+
+#: One shared sliding window across ALL mutating hunt methods (§4.6): each of
+#: them writes an audit row, and attacker-drivable append-only audit growth is
+#: exactly what the command channel's limiter exists to bound.
+MUTATION_RATE_LIMIT_PER_MIN = 12
+
+#: Audit rows echo caller-typed names; bound what rides into the log.
+_NAME_AUDIT_MAX_CHARS = 64
 
 #: §7 — every query gets a time bound, defaulted to a recent window so the
 #: common case never scans all history. Widen it with an explicit `since`.
@@ -75,6 +89,7 @@ _ERROR_KINDS: dict[type[HuntError], str] = {
     HuntQueryExists: "exists",
     HuntQueryNotFound: "not_found",
     HuntRequestError: "request",
+    HuntScheduledError: "scheduled",
 }
 
 
@@ -139,6 +154,45 @@ def _query_dict(query: HuntQuery) -> dict[str, Any]:
         "description": query.description,
         "created_at": _iso(query.created_at),
         "updated_at": _iso(query.updated_at),
+        "schedule_interval_s": query.schedule_interval_s,
+        "schedule_severity": query.schedule_severity,
+        "watermark_seq": query.watermark_seq,
+        "last_run_at": _iso(query.last_run_at),
+        "last_status": query.last_status,
+    }
+
+
+def _sha256(expression: str) -> str:
+    return hashlib.sha256(expression.encode()).hexdigest()
+
+
+def _rate_limited(
+    limiter: SlidingWindowLimiter | None, *, db_path: Path, params: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The shared-limiter gate every mutating hunt method passes through first.
+
+    Returns the rejection response, or None when the call may proceed. Only
+    the FIRST rejection of a saturated window is audited (the limiter's own
+    contract) — one row per window, however hard a client hammers.
+    """
+    if limiter is None:
+        return None
+    allowed, audit_rejection = limiter.check()
+    if allowed:
+        return None
+    if audit_rejection:
+        append_audit(
+            db_path,
+            actor="user:local",
+            action="hunt_mutation_rate_limited",
+            target=f"hunt:{str(params.get('name', ''))[:_NAME_AUDIT_MAX_CHARS]}",
+            details={"reason": "rate_limited"},
+        )
+    return {
+        "schema_version": _SCHEMA,
+        "ok": False,
+        "error": f"hunt mutation rate limit exceeded ({MUTATION_RATE_LIMIT_PER_MIN}/min)",
+        "error_kind": "rate_limited",
     }
 
 
@@ -242,14 +296,35 @@ def handle_run_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[str,
     )
 
 
-def handle_save_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
-    """Compile and store a query under a name (§8)."""
+def handle_save_hunt_query(
+    *,
+    params: dict[str, Any],
+    db_path: Path,
+    limiter: SlidingWindowLimiter | None = None,
+) -> dict[str, Any]:
+    """Compile and store a query under a name (§8).
+
+    The expression IS the detection (§4.6): a replace whose target is
+    currently scheduled rewrites what a standing detection matches, so it
+    requires an explicit `scheduled_ok: true` — and the schedule columns
+    (watermark included) survive the replace.
+    """
+    rejection = _rate_limited(limiter, db_path=db_path, params=params)
+    if rejection is not None:
+        return rejection
     try:
         name = _required_str(params, "name")
         expression = _required_str(params, "expression")
         description = _optional_str(params, "description")
         replace = bool(params.get("replace", False))
         with Database(db_path) as db:
+            existing = store.get_query(db, name)
+            was_scheduled = existing is not None and existing.schedule_interval_s is not None
+            if was_scheduled and replace and params.get("scheduled_ok") is not True:
+                raise HuntScheduledError(
+                    f"{name!r} is a scheduled standing detection; replacing it rewrites "
+                    "what that detection matches. Pass scheduled_ok to confirm."
+                )
             outcome = store.save_query(
                 db,
                 name=name,
@@ -264,7 +339,18 @@ def handle_save_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[str
         actor="user:local",
         action="hunt_query_saved",
         target=f"hunt:{outcome.name}",
-        details={},
+        # The trail must distinguish "edited an idle saved query" from
+        # "gutted a standing detection" (§4.6).
+        details={
+            "replaced": outcome.replaced,
+            "was_scheduled": was_scheduled,
+            "old_expression_sha256": (
+                None
+                if outcome.previous_expression is None
+                else _sha256(outcome.previous_expression)
+            ),
+            "new_expression_sha256": _sha256(outcome.expression),
+        },
     )
     return {
         "schema_version": _SCHEMA,
@@ -308,11 +394,30 @@ def handle_get_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[str,
     }
 
 
-def handle_delete_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[str, Any]:
-    """Delete a saved query, returning what was deleted so it can be retyped."""
+def handle_delete_hunt_query(
+    *,
+    params: dict[str, Any],
+    db_path: Path,
+    limiter: SlidingWindowLimiter | None = None,
+) -> dict[str, Any]:
+    """Delete a saved query, returning what was deleted so it can be retyped.
+
+    Deleting a scheduled query destroys a standing detection (§4.6), so it
+    requires an explicit `scheduled_ok: true`.
+    """
+    rejection = _rate_limited(limiter, db_path=db_path, params=params)
+    if rejection is not None:
+        return rejection
     try:
         name = _required_str(params, "name")
         with Database(db_path) as db:
+            existing = store.get_query(db, name)
+            was_scheduled = existing is not None and existing.schedule_interval_s is not None
+            if was_scheduled and params.get("scheduled_ok") is not True:
+                raise HuntScheduledError(
+                    f"{name!r} is a scheduled standing detection; deleting it destroys "
+                    "that detection AND its watermark. Pass scheduled_ok to confirm."
+                )
             deleted = store.delete_query(db, name)
     except HuntError as exc:
         return _failure(exc)
@@ -321,7 +426,11 @@ def handle_delete_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[s
         actor="user:local",
         action="hunt_query_deleted",
         target=f"hunt:{deleted.name}",
-        details={},
+        details={
+            "expression_sha256": _sha256(deleted.expression),
+            "was_scheduled": was_scheduled,
+            "schedule_interval_s": deleted.schedule_interval_s,
+        },
     )
     return {
         "schema_version": _SCHEMA,
@@ -329,4 +438,103 @@ def handle_delete_hunt_query(*, params: dict[str, Any], db_path: Path) -> dict[s
         "name": deleted.name,
         "expression": deleted.expression,
         "description": deleted.description,
+    }
+
+
+def handle_schedule_hunt_query(
+    *,
+    params: dict[str, Any],
+    db_path: Path,
+    limiter: SlidingWindowLimiter | None = None,
+) -> dict[str, Any]:
+    """Schedule a saved query as a standing detection (§4.6).
+
+    Validation (interval floor, severity enum, name exists) is daemon-side and
+    happens in the store BEFORE any write or audit row; the CLI's own checks
+    are UX only.
+    """
+    rejection = _rate_limited(limiter, db_path=db_path, params=params)
+    if rejection is not None:
+        return rejection
+    try:
+        name = _required_str(params, "name")
+        raw_interval = params.get("interval_s")
+        try:
+            interval_s = int(raw_interval)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise HuntRequestError(
+                f"interval_s must be a whole number of seconds, got {raw_interval!r}"
+            ) from exc
+        severity = _optional_str(params, "severity") or "medium"
+        with Database(db_path) as db:
+            existing = store.get_query(db, name)
+            watermark_preserved = existing is not None and existing.watermark_seq is not None
+            row = db.query("SELECT COALESCE(MAX(ingest_seq), 0) FROM events_enriched").fetchone()
+            max_ingest_seq = int(row[0]) if row is not None else 0
+            scheduled = store.schedule_query(
+                db,
+                name=name,
+                interval_s=interval_s,
+                severity=severity,
+                max_ingest_seq=max_ingest_seq,
+            )
+    except HuntError as exc:
+        return _failure(exc)
+    append_audit(
+        db_path,
+        actor="user:local",
+        action="hunt_query_scheduled",
+        target=f"hunt:{scheduled.name}",
+        details={
+            "interval_s": scheduled.interval_s,
+            "severity": scheduled.severity,
+            # A preserved watermark means the off-gap WILL be scanned (§4.3).
+            "watermark_preserved": watermark_preserved,
+        },
+    )
+    return {
+        "schema_version": _SCHEMA,
+        "ok": True,
+        "name": scheduled.name,
+        "interval_s": scheduled.interval_s,
+        "severity": scheduled.severity,
+        "watermark_seq": scheduled.watermark_seq,
+        "last_run_at": _iso(scheduled.last_run_at),
+        "last_status": scheduled.last_status,
+    }
+
+
+def handle_unschedule_hunt_query(
+    *,
+    params: dict[str, Any],
+    db_path: Path,
+    limiter: SlidingWindowLimiter | None = None,
+) -> dict[str, Any]:
+    """Stop a scheduled query; the response and audit say what was destroyed.
+
+    Only the schedule pair is cleared — the watermark survives, so a later
+    re-schedule scans the off-gap (§4.3).
+    """
+    rejection = _rate_limited(limiter, db_path=db_path, params=params)
+    if rejection is not None:
+        return rejection
+    try:
+        name = _required_str(params, "name")
+        with Database(db_path) as db:
+            prior = store.unschedule_query(db, name=name)
+    except HuntError as exc:
+        return _failure(exc)
+    append_audit(
+        db_path,
+        actor="user:local",
+        action="hunt_query_unscheduled",
+        target=f"hunt:{prior.name}",
+        details={"interval_s": prior.interval_s, "severity": prior.severity},
+    )
+    return {
+        "schema_version": _SCHEMA,
+        "ok": True,
+        "name": prior.name,
+        "interval_s": prior.interval_s,
+        "severity": prior.severity,
     }

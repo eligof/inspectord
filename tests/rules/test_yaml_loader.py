@@ -235,3 +235,53 @@ def _rule_from_expr(expr: str) -> YamlRule:
         },
         source="test.yaml",
     )
+
+
+# --------------------------------------------------------------------------
+# per-rule dedup window (hunt-followups design §4.5)
+# --------------------------------------------------------------------------
+
+
+def _rule_dict(**extra: object) -> dict[str, object]:
+    return {
+        "version": "1.0.0",
+        "id": "test.window",
+        "name": "window",
+        "severity": "info",
+        "category": "test",
+        "why": "test",
+        "detect": {"any_of": ['event.action == "tick"']},
+        "short": "s",
+        "detail": "d",
+        **extra,
+    }
+
+
+def test_dedup_window_s_parses_as_float() -> None:
+    rule = load_yaml_rule_from_dict(_rule_dict(dedup_window_s=86400), source="t.yaml")
+    assert rule.dedup_window_s == 86400.0
+
+
+def test_dedup_window_s_defaults_to_none() -> None:
+    rule = load_yaml_rule_from_dict(_rule_dict(), source="t.yaml")
+    assert rule.dedup_window_s is None
+
+
+@pytest.mark.parametrize("bad", ["a day", True, 0, -600])
+def test_dedup_window_s_rejects_non_positive_and_non_numeric(bad: object) -> None:
+    with pytest.raises(YamlRuleError):
+        load_yaml_rule_from_dict(_rule_dict(dedup_window_s=bad), source="t.yaml")
+
+
+def test_dedup_window_s_rides_into_the_match() -> None:
+    rule = load_yaml_rule_from_dict(_rule_dict(dedup_window_s=86400), source="t.yaml")
+    ev = build_event(module="m", action="tick", category=["c"], type_=["t"], severity="info")
+    matches = evaluate_yaml_rule(rule, EvalContext(event=ev, history=[]))
+    assert matches[0].dedup_window_s == 86400.0
+
+
+def test_absent_dedup_window_s_rides_into_the_match_as_none() -> None:
+    rule = load_yaml_rule_from_dict(_rule_dict(), source="t.yaml")
+    ev = build_event(module="m", action="tick", category=["c"], type_=["t"], severity="info")
+    matches = evaluate_yaml_rule(rule, EvalContext(event=ev, history=[]))
+    assert matches[0].dedup_window_s is None

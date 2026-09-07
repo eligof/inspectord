@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from inspectorctl.cli.app import app
 from inspectorctl.cli.hunt import horizon_note, render_result
 from inspectord.hunt import ipc_handlers as h
+from inspectord.hunt import store
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.parsers.base import build_event
 from inspectord.storage.db import Database
@@ -73,6 +74,16 @@ def socket_path(tmp_path: Path) -> Iterator[Path]:
         Method(
             name="delete_hunt_query",
             handler=lambda params: h.handle_delete_hunt_query(params=params, db_path=db_path),
+            mutates=True,
+        ),
+        Method(
+            name="schedule_hunt_query",
+            handler=lambda params: h.handle_schedule_hunt_query(params=params, db_path=db_path),
+            mutates=True,
+        ),
+        Method(
+            name="unschedule_hunt_query",
+            handler=lambda params: h.handle_unschedule_hunt_query(params=params, db_path=db_path),
             mutates=True,
         ),
     ]
@@ -230,6 +241,138 @@ def test_deleting_an_unknown_name_fails_clearly(socket_path: Path) -> None:
     result = _invoke(socket_path, "hunt", "delete", "nope")
     assert result.exit_code == 1
     assert "not_found" in result.stdout
+
+
+# --------------------------------------------------------------------------
+# schedule (hunt-followups design §4.6)
+# --------------------------------------------------------------------------
+
+
+def test_schedule_prints_what_now_stands(socket_path: Path) -> None:
+    _invoke(socket_path, "hunt", "save", "curl-hunt", 'process.name == "curl"')
+    result = _invoke(socket_path, "hunt", "schedule", "curl-hunt", "--every", "15m")
+    assert result.exit_code == 0
+    assert "SCHEDULED" in result.stdout
+    assert "curl-hunt" in result.stdout
+    assert "15m" in result.stdout
+    assert "medium" in result.stdout  # the default severity
+
+
+def test_schedule_severity_passes_through(socket_path: Path) -> None:
+    _invoke(socket_path, "hunt", "save", "curl-hunt", 'process.name == "curl"')
+    result = _invoke(
+        socket_path, "hunt", "schedule", "curl-hunt", "--every", "1h", "--severity", "high"
+    )
+    assert result.exit_code == 0
+    listed = _invoke(socket_path, "hunt", "list").stdout
+    assert "1h" in listed
+    assert "high" in listed
+
+
+def test_schedule_floor_is_checked_client_side(tmp_path: Path) -> None:
+    """`--every 2m` never reaches the daemon (which re-validates anyway):
+    the socket below does not exist, so an IPC call would fail loudly."""
+    result = _invoke(tmp_path / "no-such.sock", "hunt", "schedule", "q1", "--every", "2m")
+    assert result.exit_code == 1
+    assert "300" in result.stdout or "5m" in result.stdout
+    assert "ERROR" not in result.stdout  # no transport error: no call was made
+
+
+def test_schedule_rejects_unreadable_every_client_side(tmp_path: Path) -> None:
+    result = _invoke(tmp_path / "no-such.sock", "hunt", "schedule", "q1", "--every", "soon")
+    assert result.exit_code == 1
+    assert "soon" in result.stdout
+    assert "ERROR" not in result.stdout
+
+
+def test_schedule_off_prints_what_was_destroyed(socket_path: Path) -> None:
+    _invoke(socket_path, "hunt", "save", "curl-hunt", 'process.name == "curl"')
+    _invoke(socket_path, "hunt", "schedule", "curl-hunt", "--every", "15m")
+    result = _invoke(socket_path, "hunt", "schedule", "curl-hunt", "--off")
+    assert result.exit_code == 0
+    assert "UNSCHEDULED" in result.stdout
+    assert "15m" in result.stdout
+    assert "medium" in result.stdout
+
+
+def test_schedule_every_and_off_together_is_an_error(tmp_path: Path) -> None:
+    result = _invoke(tmp_path / "no-such.sock", "hunt", "schedule", "q1", "--every", "15m", "--off")
+    assert result.exit_code == 1
+    assert "--every" in result.stdout
+    assert "--off" in result.stdout
+
+
+def test_schedule_needs_every_or_off(tmp_path: Path) -> None:
+    result = _invoke(tmp_path / "no-such.sock", "hunt", "schedule", "q1")
+    assert result.exit_code == 1
+    assert "--every" in result.stdout
+
+
+def test_list_shows_schedule_columns_and_dashes_for_unscheduled(socket_path: Path) -> None:
+    _invoke(socket_path, "hunt", "save", "curl-hunt", 'process.name == "curl"')
+    _invoke(socket_path, "hunt", "save", "idle", 'process.name == "wget"')
+    _invoke(socket_path, "hunt", "schedule", "curl-hunt", "--every", "15m", "--severity", "low")
+    result = _invoke(socket_path, "hunt", "list")
+    assert result.exit_code == 0
+    assert "Every" in result.stdout
+    assert "Severity" in result.stdout
+    assert "Last run" in result.stdout
+    assert "Last status" in result.stdout
+    assert "15m" in result.stdout
+    assert "low" in result.stdout
+    assert "-" in result.stdout  # the unscheduled row shows dashes
+
+
+def test_list_marks_an_overdue_schedule(socket_path: Path) -> None:
+    _invoke(socket_path, "hunt", "save", "curl-hunt", 'process.name == "curl"')
+    _invoke(socket_path, "hunt", "schedule", "curl-hunt", "--every", "15m")
+    db_path = socket_path.parent / "hunt.duckdb"
+    with Database(db_path) as db:
+        assert store.record_run(
+            db,
+            name="curl-hunt",
+            watermark_seq=None,
+            status="ok",
+            now=NOW - timedelta(hours=2),
+        )
+    result = _invoke(socket_path, "hunt", "list")
+    assert "overdue" in result.stdout
+    assert "ok" in result.stdout
+
+
+def test_save_replace_on_a_scheduled_query_hints_at_scheduled_ok(socket_path: Path) -> None:
+    _invoke(socket_path, "hunt", "save", "curl-hunt", 'process.name == "curl"')
+    _invoke(socket_path, "hunt", "schedule", "curl-hunt", "--every", "15m")
+    refused = _invoke(
+        socket_path, "hunt", "save", "curl-hunt", 'process.name == "wget"', "--replace"
+    )
+    assert refused.exit_code == 1
+    assert "scheduled" in refused.stdout
+    assert "--scheduled-ok" in refused.stdout
+
+    replaced = _invoke(
+        socket_path,
+        "hunt",
+        "save",
+        "curl-hunt",
+        'process.name == "wget"',
+        "--replace",
+        "--scheduled-ok",
+    )
+    assert replaced.exit_code == 0
+    assert "REPLACED" in replaced.stdout
+
+
+def test_delete_of_a_scheduled_query_hints_at_scheduled_ok(socket_path: Path) -> None:
+    _invoke(socket_path, "hunt", "save", "curl-hunt", 'process.name == "curl"')
+    _invoke(socket_path, "hunt", "schedule", "curl-hunt", "--every", "15m")
+    refused = _invoke(socket_path, "hunt", "delete", "curl-hunt")
+    assert refused.exit_code == 1
+    assert "--scheduled-ok" in refused.stdout
+
+    deleted = _invoke(socket_path, "hunt", "delete", "curl-hunt", "--scheduled-ok")
+    assert deleted.exit_code == 0
+    assert "deleted" in deleted.stdout
 
 
 # --------------------------------------------------------------------------

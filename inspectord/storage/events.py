@@ -13,8 +13,8 @@ from inspectord.storage.db import Database
 
 _INSERT = (
     "INSERT INTO events_enriched "
-    "(event_id, ts, kind, module, action, severity, payload_json) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    "(event_id, ts, kind, module, action, severity, payload_json, ingest_seq) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, nextval('event_ingest_seq'))"
 )
 
 
