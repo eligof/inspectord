@@ -58,6 +58,26 @@ def _run(db_path: Path, **params: Any) -> dict[str, Any]:
     return h.handle_run_hunt_query(params=params, db_path=db_path)
 
 
+def _store_with(tmp_path: Path, stamps: list[datetime]) -> Path:
+    """A store holding one curl exec per timestamp — for horizon assertions."""
+    path = tmp_path / "horizon.duckdb"
+    with Database(path) as db:
+        run_migrations(db)
+        for ts in stamps:
+            event = build_event(
+                module="probe",
+                action="exec",
+                category=["process"],
+                type_=["start"],
+                severity="info",
+                process={"name": "curl"},
+                message="ran curl",
+                ts=ts,
+            )
+            insert_event(db, event, event.model_dump_json())
+    return path
+
+
 # --------------------------------------------------------------------------
 # run
 # --------------------------------------------------------------------------
@@ -197,6 +217,25 @@ def test_the_limit_is_capped_not_honoured_blindly(db_path: Path) -> None:
     result = _run(db_path, expression='process.name == "curl"', limit=10_000_000)
     assert result["ok"] is True
     assert result["limit"] == 5000
+
+
+def test_run_reports_data_horizon(tmp_path: Path) -> None:
+    """§2: the horizon is MIN(ts) over the whole store, not over the window."""
+    path = _store_with(
+        tmp_path,
+        [datetime(2026, 9, 5, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC)],
+    )
+    result = _run(path, expression='process.name == "curl"')
+    assert result["ok"] is True
+    # MIN(ts), ISO, as stored (DuckDB strips the tz, so naive UTC).
+    assert result["data_horizon"] == "2026-09-01T00:00:00"
+
+
+def test_run_reports_null_horizon_on_empty_store(tmp_path: Path) -> None:
+    path = _store_with(tmp_path, [])
+    result = _run(path, expression='process.name == "curl"')
+    assert result["ok"] is True
+    assert result["data_horizon"] is None
 
 
 # --------------------------------------------------------------------------

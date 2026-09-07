@@ -32,10 +32,11 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.templating import _TemplateResponse
 
-# The CLI's `24h`/`7d` shorthand, reused rather than reimplemented: a second
-# parser here would drift from the CLI's, which is the same failure mode the
-# design forbids for the query grammar itself (§3).
-from inspectorctl.cli.hunt import to_iso
+# The CLI's `24h`/`7d` shorthand and its effective-coverage conditional,
+# reused rather than reimplemented: a second parser or a second horizon
+# comparison here would drift from the CLI's, which is the same failure mode
+# the design forbids for the query grammar itself (§3).
+from inspectorctl.cli.hunt import horizon_note, to_iso
 from inspectorctl.web.ipc import WebIpcError, call
 
 router = APIRouter()
@@ -202,6 +203,7 @@ def hunt(
             # never claims a bound the query did not run under.
             "limit": str(result["limit"]) if result else (limit or ""),
             "result": result,
+            "horizon_note": horizon_note(result) if result else None,
             "rows": _rows(result) if result else [],
             "query_error": query_error,
             "run_error": run_error,

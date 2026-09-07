@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from inspectorctl.cli.app import app
+from inspectorctl.cli.hunt import horizon_note, render_result
 from inspectord.hunt import ipc_handlers as h
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.parsers.base import build_event
@@ -270,3 +271,64 @@ def test_event_text_is_not_treated_as_rich_markup(tmp_path: Path) -> None:
         server.stop()
     assert result.exit_code == 0
     assert "[red]not really red[/red]" in result.stdout
+
+
+# --------------------------------------------------------------------------
+# effective coverage (spec 2026-09-07 §2)
+# --------------------------------------------------------------------------
+
+
+def test_horizon_note_none_when_horizon_before_since() -> None:
+    """The common case — data older than the window — must not over-claim."""
+    note = horizon_note(
+        {"data_horizon": "2026-08-01T00:00:00", "since": "2026-09-01T00:00:00+00:00"}
+    )
+    assert note is None
+
+
+def test_horizon_note_warns_when_window_reaches_past_data() -> None:
+    # data_horizon is naive (DuckDB strips tz), since is aware: the mix must
+    # not raise TypeError inside the comparison.
+    note = horizon_note(
+        {"data_horizon": "2026-09-03T00:00:00", "since": "2026-09-01T00:00:00+00:00"}
+    )
+    assert note is not None
+    assert "2026-09-03" in note
+    assert "only cover" in note
+
+
+def test_horizon_note_empty_store() -> None:
+    note = horizon_note({"data_horizon": None, "since": "2026-09-01T00:00:00+00:00"})
+    assert note == "no events in the store"
+
+
+def test_horizon_note_absent_from_an_older_daemon_claims_nothing() -> None:
+    assert horizon_note({"since": "2026-09-01T00:00:00+00:00"}) is None
+
+
+def test_render_result_prints_horizon_note_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    render_result(
+        {
+            "ok": True,
+            "name": None,
+            "expression": 'process.name == "curl"',
+            "since": "2026-09-01T00:00:00+00:00",
+            "until": None,
+            "limit": 500,
+            "truncated": False,
+            "count": 1,
+            "data_horizon": "2026-09-03T00:00:00",
+            "events": [
+                {
+                    "ts": "2026-09-05T00:00:00",
+                    "severity": "info",
+                    "module": "probe",
+                    "action": "exec",
+                    "payload": {"message": "ran curl"},
+                }
+            ],
+        }
+    )
+    captured = capsys.readouterr()
+    assert "only cover" in captured.err
+    assert "only cover" not in captured.out

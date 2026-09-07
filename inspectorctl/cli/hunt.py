@@ -27,10 +27,13 @@ from typing import Annotated, Any, NoReturn
 
 import typer
 from rich import print as rprint
+from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
 from inspectorctl.ipc_client import IpcClient, IpcError
+
+_err_console = Console(stderr=True)
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -87,6 +90,40 @@ def _fail(result: dict[str, Any]) -> NoReturn:
     raise typer.Exit(code=1)
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Naive timestamps are UTC by contract (DuckDB strips tz on read)."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def horizon_note(result: dict[str, Any]) -> str | None:
+    """The effective-coverage warning for one run response, or None.
+
+    Only warns when the requested window reaches past the surviving data
+    (spec §2: the common case — horizon far older than the window — must not
+    over-claim coverage, so it renders nothing). Shared by the CLI and the
+    web route so there is exactly one implementation of the conditional.
+    """
+    if "data_horizon" not in result:
+        return None  # older daemon; claim nothing
+    horizon = result.get("data_horizon")
+    if horizon is None:
+        return "no events in the store"
+    since = result.get("since")
+    if since is None:
+        return None
+    try:
+        horizon_ts = _as_utc(datetime.fromisoformat(str(horizon)))
+        since_ts = _as_utc(datetime.fromisoformat(str(since)))
+    except ValueError:
+        return None
+    if horizon_ts > since_ts:
+        return (
+            "your window reaches past the surviving data; "
+            f"results only cover since {horizon_ts.isoformat()}"
+        )
+    return None
+
+
 def _short_ts(value: object) -> str:
     text = str(value or "")
     return text.replace("T", " ")[:19] if text else "-"
@@ -105,6 +142,9 @@ def render_result(result: dict[str, Any]) -> None:
     window_from = _short_ts(result.get("since"))
     window_to = _short_ts(result.get("until")) if result.get("until") else "now"
     rprint(f"[dim]window[/dim] {window_from} → {window_to}  [dim]limit[/dim] {result.get('limit')}")
+    note = horizon_note(result)
+    if note is not None:
+        _err_console.print(f"[yellow]{escape(note)}[/yellow]")
 
     events = list(result.get("events", []))
     if not events:
