@@ -48,8 +48,14 @@ class RuleEngine:
             if is_suppressed(match, self._allowlist):
                 continue
             candidate = build_alert(match=match, event=event)
-            persisted, _was_new = self._dedup.persist(candidate)
-            out.append(persisted)
+            persisted, _was_new, notifiable = self._dedup.persist(
+                candidate, window_s=match.dedup_window_s
+            )
+            if notifiable:
+                # A bump of a non-open alert never fans out (§4.5): the
+                # notifier and the evidence collector both only see what this
+                # method returns.
+                out.append(persisted)
         return out
 
     def _trim_history(self, now: datetime) -> None:

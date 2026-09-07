@@ -40,6 +40,9 @@ class YamlRule:
     detail_tpl: str
     version: str = "1.0.0"
     labels: list[str] = field(default_factory=list)
+    #: Per-rule dedup window in seconds (hunt-followups design §4.5);
+    #: None keeps the dedup engine's default.
+    dedup_window_s: float | None = None
 
 
 _FIELD_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_.]*)\}")
@@ -82,7 +85,19 @@ def load_yaml_rule_from_dict(data: dict[str, Any], *, source: str = "<inline>") 
         short_tpl=str(data["short"]),
         detail_tpl=str(data["detail"]),
         labels=list(data.get("labels") or []),
+        dedup_window_s=_parse_dedup_window(data, source),
     )
+
+
+def _parse_dedup_window(data: dict[str, Any], source: str) -> float | None:
+    raw = data.get("dedup_window_s")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        raise YamlRuleError(
+            f"{source}: dedup_window_s must be a positive number of seconds, got {raw!r}"
+        )
+    return float(raw)
 
 
 def evaluate_yaml_rule(rule: YamlRule, ctx: EvalContext) -> list[Match]:
@@ -106,6 +121,7 @@ def evaluate_yaml_rule(rule: YamlRule, ctx: EvalContext) -> list[Match]:
                     false_positives=rule.false_positives,
                     triggering_event_ids=[ctx.event.event_id],
                     labels=list(rule.labels),
+                    dedup_window_s=rule.dedup_window_s,
                 )
             ]
     return []

@@ -31,6 +31,8 @@ class Match:
     false_positives: list[str] = field(default_factory=list)
     triggering_event_ids: list[str] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
+    #: Per-rule dedup window in seconds; None keeps the engine's default.
+    dedup_window_s: float | None = None
 
 
 @dataclass
