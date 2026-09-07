@@ -219,6 +219,44 @@ def test_an_empty_result_says_no_matches_rather_than_nothing(ipc_factory) -> Non
     assert "complete for this window" not in body
 
 
+def test_saved_query_list_shows_schedule_state_read_only(ipc_factory) -> None:
+    """PR3 §4.6: the panel displays schedule state; it never mutates it."""
+    scheduled = _query(
+        name="standing",
+        schedule_interval_s=900,
+        schedule_severity="high",
+        last_run_at="2026-09-06T00:00:00",
+        last_status="ok",
+    )
+    client = ipc_factory([_run(_result()), _saved(scheduled, _query(name="idle"))])
+    body = client.get("/hunt").text
+    assert "15m" in body
+    assert "high" in body
+    assert "2026-09-06" in body
+    assert "ok" in body
+    # The unscheduled row shows dashes, never blanks.
+    assert ">-<" in body.replace("\n", "").replace(" ", "")
+    # ZERO mutating controls: schedule changes live in the CLI.
+    assert "schedule_hunt_query" not in body
+    assert "unschedule_hunt_query" not in body
+
+
+def test_a_failing_schedule_renders_visibly_failed(ipc_factory) -> None:
+    """§4.6: a failing query renders visibly failed, not as quiet text."""
+    failing = _query(
+        name="standing",
+        schedule_interval_s=900,
+        schedule_severity="medium",
+        last_run_at="2026-09-06T00:00:00",
+        last_status="failed:execution",
+    )
+    client = ipc_factory([_run(_result()), _saved(failing)])
+    body = client.get("/hunt").text
+    assert "failed:execution" in body
+    # The status cell carries the warning css class.
+    assert 'class="mono bad"' in body
+
+
 def test_saved_queries_are_listed_with_run_links(ipc_factory) -> None:
     client = ipc_factory([_run(_result()), _saved(_query(), _query(name="ssh-failures"))])
     body = client.get("/hunt").text
@@ -375,6 +413,10 @@ def test_escapes_every_attacker_influenceable_field(ipc_factory) -> None:
                     name=f"name{payload}",
                     expression=f"expr{payload}",
                     description=f"desc{payload}",
+                    # A row already in the table predates any daemon-side enum
+                    # validation, so schedule fields are hostile too.
+                    schedule_severity=payload,
+                    last_status=f"failed:{payload}",
                 )
             ),
         ]
@@ -388,9 +430,9 @@ def test_escapes_every_attacker_influenceable_field(ipc_factory) -> None:
     # than generous, so a silently dropped field cannot make this test pass:
     # event_id, kind, module, action, message, process.name, file.path (7),
     # severity twice (badge class + badge text), the echoed expression twice
-    # (form value + results header), and the saved query's name, expression and
-    # description (3) — 14.
-    assert response.text.count(escaped) == 14
+    # (form value + results header), and the saved query's name, expression,
+    # description, schedule_severity and last_status (5) — 16.
+    assert response.text.count(escaped) == 16
 
 
 def test_escapes_a_rejection_message_that_quotes_the_query_back(ipc_factory) -> None:

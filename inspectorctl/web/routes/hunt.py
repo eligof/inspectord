@@ -32,11 +32,11 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.templating import _TemplateResponse
 
-# The CLI's `24h`/`7d` shorthand and its effective-coverage conditional,
-# reused rather than reimplemented: a second parser or a second horizon
-# comparison here would drift from the CLI's, which is the same failure mode
-# the design forbids for the query grammar itself (§3).
-from inspectorctl.cli.hunt import horizon_note, to_iso
+# The CLI's `24h`/`7d` shorthand, its effective-coverage conditional and its
+# interval rendering, reused rather than reimplemented: a second parser or a
+# second horizon comparison here would drift from the CLI's, which is the same
+# failure mode the design forbids for the query grammar itself (§3).
+from inspectorctl.cli.hunt import format_interval, horizon_note, to_iso
 from inspectorctl.web.ipc import WebIpcError, call
 
 router = APIRouter()
@@ -164,6 +164,15 @@ def hunt(
         saved_error = _ipc_failure(exc)
     else:
         saved = list(listed.get("queries", []))
+        # Display-only derivation (PR3 §4.6): the panel shows schedule state
+        # read-only — the two mutating schedule methods are CLI-only, so this
+        # page carries zero controls for them. A non-integer interval (a fake,
+        # a hostile row) renders nothing rather than 500ing the panel.
+        for query in saved:
+            interval = query.get("schedule_interval_s")
+            query["schedule_every"] = (
+                format_interval(interval) if isinstance(interval, int) else None
+            )
 
     result: dict[str, Any] | None = None
     query_error: dict[str, Any] | None = None

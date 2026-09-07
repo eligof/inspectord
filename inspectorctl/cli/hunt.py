@@ -93,7 +93,7 @@ _SCHEDULE_FLOOR_S = 300
 _INTERVAL_UNITS = ((604_800, "w"), (86_400, "d"), (3_600, "h"), (60, "m"))
 
 
-def _fmt_interval(seconds: int) -> str:
+def format_interval(seconds: int) -> str:
     for unit_s, suffix in _INTERVAL_UNITS:
         if seconds >= unit_s and seconds % unit_s == 0:
             return f"{seconds // unit_s}{suffix}"
@@ -346,7 +346,7 @@ def list_cmd(
             escape(str(query.get("expression", ""))),
             escape(str(query.get("description") or "")),
             _short_ts(query.get("updated_at")),
-            _fmt_interval(int(interval)) if interval is not None else "-",
+            format_interval(int(interval)) if interval is not None else "-",
             escape(str(query.get("schedule_severity"))) if query.get("schedule_severity") else "-",
             last_run,
             escape(str(query.get("last_status"))) if query.get("last_status") else "-",
@@ -422,7 +422,7 @@ def schedule_cmd(
         result = _call(socket, "unschedule_hunt_query", {"name": name})
         if not result.get("ok", False):
             _fail(result)
-        interval = _fmt_interval(int(result.get("interval_s", 0)))
+        interval = format_interval(int(result.get("interval_s", 0)))
         prior_severity = escape(str(result.get("severity", "")))
         # Loudly different from scheduling: a standing detection was destroyed.
         rprint(
@@ -454,7 +454,7 @@ def schedule_cmd(
     )
     if not result.get("ok", False):
         _fail(result)
-    stands_interval = _fmt_interval(int(result.get("interval_s", seconds)))
+    stands_interval = format_interval(int(result.get("interval_s", seconds)))
     stands_severity = escape(str(result.get("severity", severity)))
     rprint(
         f"[green]SCHEDULED[/green] {escape(name)} — every {stands_interval}, "
