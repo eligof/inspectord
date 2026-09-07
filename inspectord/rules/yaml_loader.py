@@ -219,6 +219,11 @@ def _primary_entity_for(event: Event) -> tuple[str, str]:
         avg_id = event.vulnerability["avg_id"]
         package = event.vulnerability["package"]
         return "package", f"{avg_id}/{package}"
+    if event.module == "hunt_scheduler" and event.hunt and "name" in event.hunt:
+        # One alert per scheduled query, keyed on the (charset-validated) saved
+        # name; module-pinned so no other event source can steal the identity.
+        # Before the process branch on purpose — the vuln_scanner lesson.
+        return "hunt", str(event.hunt["name"])
     if event.process and ("pid" in event.process or "name" in event.process):
         key = (
             f"pid:{event.process['pid']}"
@@ -226,10 +231,12 @@ def _primary_entity_for(event: Event) -> tuple[str, str]:
             else f"name:{event.process['name']}"
         )
         return "process", key
-    if event.file and "path" in event.file:
-        return "file", str(event.file["path"])
-    if event.user and "name" in event.user:
-        return "user", str(event.user["name"])
-    if event.source and "ip" in event.source:
-        return "ip", str(event.source["ip"])
+    simple_branches: tuple[tuple[str, dict[str, Any] | None, str], ...] = (
+        ("file", event.file, "path"),
+        ("user", event.user, "name"),
+        ("ip", event.source, "ip"),
+    )
+    for kind, block, field_name in simple_branches:
+        if block and field_name in block:
+            return kind, str(block[field_name])
     return "event", event.event_id

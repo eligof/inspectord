@@ -1,0 +1,21 @@
+version: 1.0.0
+id: hunt.scheduled_run_failed
+name: "scheduled hunt is failing"
+severity: medium
+category: hunt
+dedup_window_s: 86400
+why: |
+  A scheduled hunt's run failed: the standing detection you authored is not
+  scanning, which is itself a monitoring gap — the window it should have
+  covered is retried, but nothing is watching until it succeeds. Emission is
+  transition-only, so this fires once per failure streak, not once per retry.
+  Check the query's last status with `inspectorctl hunt list`, and its
+  expression in /hunt.
+false_positives:
+  - "A regular expression the database engine cannot run — simplify it and save --replace."
+detect:
+  any_of:
+    - event.module == "hunt_scheduler" AND event.action == "hunt_run_failed"
+short: "scheduled hunt {hunt.name} is failing ({hunt.error_kind})"
+detail: "Scheduled hunt {hunt.name} failed to run ({hunt.error_kind}). Its watermark is held, so the window will be re-scanned once the query runs again; until then this standing detection is not covering new events."
+labels: [hunt, scheduled]
