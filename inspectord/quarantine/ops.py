@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import logging
 import os
 import secrets
 import stat
@@ -64,8 +65,12 @@ from inspectord.quarantine.errors import (
 from inspectord.quarantine.paths import QuarantinePaths, open_parent_dirfd, quarantine_deny
 from inspectord.storage.db import Database
 
+log = logging.getLogger(__name__)
+
 _MAX_QUARANTINE_BYTES = 256 * 1024 * 1024  # refusal, not truncation (§3.2)
 _PACMAN_TIMEOUT_S = 5.0
+_LIST_LIMIT_DEFAULT = 200
+_LIST_LIMIT_MAX = 1000
 
 #: §3.2 step 6 — carried on every success surface alongside the PID list.
 RUNNING_WARNING = "processes already running from this file are NOT stopped"
@@ -684,3 +689,107 @@ def _delete(
         quarantine_id=quarantine_id, original_path=original_path, blob_removed=blob_removed
     )
     return result, case_id
+
+
+# ---------------------------------------------------------------------------
+# list + reconciliation (§3.6, §4)
+# ---------------------------------------------------------------------------
+
+
+def _health_flags(store: ForensicStore, *, status: str, original_path: str, sha: str) -> list[str]:
+    """Per-row reconciliation flags — a row must never lie (§3.6).
+
+    ``isolation_incomplete``: an ``isolating`` row (crash between INSERT and
+    unlink) or a ``failed`` one — the file may still be on disk; re-run the
+    quarantine. ``file_still_present``: an ``active`` row whose original path
+    exists again. ``blob_missing``: a non-``deleted`` row whose blob is gone
+    from the store (backup drift?) — visible here, not first discovered at
+    restore time.
+    """
+    flags: list[str] = []
+    if status in ("isolating", "failed"):
+        flags.append("isolation_incomplete")
+    if status == "active" and os.path.lexists(original_path):
+        flags.append("file_still_present")
+    if status != "deleted" and not store.path_for(sha).exists():
+        flags.append("blob_missing")
+    return flags
+
+
+def list_quarantine(
+    db: Database, store: ForensicStore, *, limit: int = _LIST_LIMIT_DEFAULT
+) -> dict[str, Any]:
+    """Bounded quarantine listing, newest first, with health flags (§4).
+
+    One query powers the CLI and the panel; ``limit`` is clamped to
+    [1, 1000] and echoed hunt-style.
+    """
+    limit = max(1, min(int(limit), _LIST_LIMIT_MAX))
+    rows = db.query(
+        "SELECT quarantine_id, sha256, original_path, file_mode, file_uid, file_gid, "
+        "size_bytes, pkg_owner, note, alert_id, case_id, status, quarantined_at, "
+        "restored_at, deleted_at FROM quarantine "
+        "ORDER BY quarantined_at DESC, quarantine_id DESC LIMIT ?",
+        [limit],
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        (
+            quarantine_id,
+            sha,
+            original_path,
+            file_mode,
+            file_uid,
+            file_gid,
+            size_bytes,
+            pkg_owner,
+            note,
+            alert_id,
+            case_id,
+            status,
+            quarantined_at,
+            restored_at,
+            deleted_at,
+        ) = row
+        out.append(
+            {
+                "quarantine_id": quarantine_id,
+                "sha256": sha,
+                "original_path": original_path,
+                "file_mode": file_mode,
+                "file_uid": file_uid,
+                "file_gid": file_gid,
+                "size_bytes": size_bytes,
+                "pkg_owner": pkg_owner,
+                "note": note,
+                "alert_id": alert_id,
+                "case_id": case_id,
+                "status": status,
+                "quarantined_at": quarantined_at.isoformat() if quarantined_at else None,
+                "restored_at": restored_at.isoformat() if restored_at else None,
+                "deleted_at": deleted_at.isoformat() if deleted_at else None,
+                "flags": _health_flags(store, status=status, original_path=original_path, sha=sha),
+            }
+        )
+    return {"rows": out, "limit": limit}
+
+
+def log_incomplete_isolations(db: Database) -> int:
+    """Startup reconciliation (§3.6): warn per ``isolating`` row, no auto-repair.
+
+    A crash between INSERT and unlink leaves ``isolating`` — the file may
+    still be sitting on disk; re-running the quarantine is the user's call.
+    Returns the number of rows logged.
+    """
+    rows = db.query(
+        "SELECT quarantine_id, original_path FROM quarantine WHERE status = 'isolating' "
+        "ORDER BY quarantined_at"
+    ).fetchall()
+    for quarantine_id, original_path in rows:
+        log.warning(
+            "quarantine %s of %r is incomplete (status isolating) — "
+            "the file may still be on disk; re-run the quarantine",
+            quarantine_id,
+            original_path,
+        )
+    return len(rows)
