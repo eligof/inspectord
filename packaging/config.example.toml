@@ -8,6 +8,11 @@ journal_dir = "/var/lib/inspectord/journal"
 socket_path = "/run/inspectord/inspectord.sock"
 socket_group = "inspectord"
 allowed_uids = []
+# Mutating quarantine verbs are polkit-gated. The policy file is a one-time
+# manual install (inspectord never writes to /usr/share — that is YOUR call):
+#   sudo cp packaging/polkit/org.inspectord.policy /usr/share/polkit-1/actions/
+# Until it is installed every gated call fails closed with `action_unknown`
+# and a message naming this exact command.
 
 [[workers]]
 name = "healthcheck"
