@@ -77,7 +77,7 @@ def _call(socket: Path, method: str, params: dict[str, Any], *, agent: bool) -> 
     """
     try:
         with _tty_agent() if agent else contextlib.nullcontext():
-            result = IpcClient(socket_path=socket).call(method, params)
+            result = dict(IpcClient(socket_path=socket).call(method, params))
     except IpcError as exc:
         if exc.code == AUTHZ_DENIED_CODE:
             rprint(f"[red]not authorized[/red] {escape(str(exc))}")

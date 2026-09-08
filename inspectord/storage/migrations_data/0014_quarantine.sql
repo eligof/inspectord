@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS quarantine (
     note           VARCHAR,
     alert_id       VARCHAR,
     case_id        VARCHAR,
-    status         VARCHAR NOT NULL,      -- isolating | active | failed | restored | deleted
+    status         VARCHAR NOT NULL,      -- isolating | active | failed | restoring | restored | deleting | deleted
     quarantined_at TIMESTAMP NOT NULL,    -- naive UTC
     restored_at    TIMESTAMP,
     deleted_at     TIMESTAMP
