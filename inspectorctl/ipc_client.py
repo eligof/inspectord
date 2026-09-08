@@ -16,7 +16,13 @@ _MAX_RESPONSE_BYTES = 96 * 1024 * 1024
 
 
 class IpcError(RuntimeError):
-    pass
+    """IPC failure. `code` is the JSON-RPC error code when the daemon answered
+    with one (e.g. -32001 authorization denials), None for transport errors —
+    so callers branch on the code, never on message text."""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class IpcClient:
@@ -52,7 +58,10 @@ class IpcClient:
                     )
             resp = json.loads(bytes(buf).decode("utf-8"))
             if "error" in resp:
-                raise IpcError(f"{resp['error']['code']}: {resp['error']['message']}")
+                raise IpcError(
+                    f"{resp['error']['code']}: {resp['error']['message']}",
+                    code=resp["error"]["code"],
+                )
             return resp["result"]
         finally:
             sock.close()
