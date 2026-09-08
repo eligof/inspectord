@@ -21,6 +21,7 @@ __all__ = [
     "QuarantineNotFound",
     "QuarantineNotRegular",
     "QuarantinePathOccupied",
+    "QuarantineRequestError",
     "QuarantineRestoreNoParent",
     "QuarantineShaMismatch",
     "QuarantineSwapped",
@@ -32,6 +33,12 @@ class QuarantineError(ClientFacingError):
     """Base class for every quarantine refusal/failure."""
 
     error_kind: str = "error"
+
+
+class QuarantineRequestError(QuarantineError):
+    """A malformed IPC request (missing/mistyped param, unknown alert/case id)."""
+
+    error_kind = "request"
 
 
 class QuarantineDenied(QuarantineError):

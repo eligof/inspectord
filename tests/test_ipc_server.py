@@ -12,7 +12,7 @@ from pathlib import Path
 
 from inspectord.authz import AuthzResult, PeerIdentity
 from inspectord.config import IpcConfig
-from inspectord.ipc_server import IpcServer, Method
+from inspectord.ipc_server import PEER_PARAM, IpcServer, Method
 from inspectord.schemas.versions import IPC_PROTOCOL_VERSION
 
 
@@ -184,12 +184,14 @@ class _Conn:
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.connect(str(sock_path))
 
-    def call(self, method: str, req_id: int = 1) -> dict[str, object]:
+    def call(
+        self, method: str, req_id: int = 1, params: dict[str, object] | None = None
+    ) -> dict[str, object]:
         req = {
             "jsonrpc": "2.0",
             "id": req_id,
             "method": method,
-            "params": {},
+            "params": params or {},
             "schema_version": IPC_PROTOCOL_VERSION,
         }
         self._sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
@@ -248,6 +250,7 @@ def _gated_server(
     limiter: _FakeLimiter | None = None,
     audit: _RecordingAudit | None = None,
     handler_calls: list[dict[str, object]] | None = None,
+    polkit_target=None,
 ) -> IpcServer:
     calls = handler_calls if handler_calls is not None else []
 
@@ -264,6 +267,7 @@ def _gated_server(
                 mutates=True,
                 polkit_action="org.inspectord.quarantine",
                 limiter=limiter,
+                polkit_target=polkit_target,
             ),
             Method(name="ping", handler=lambda _p: "pong", mutates=False, limiter=limiter),
         ],
@@ -455,3 +459,67 @@ def test_actionable_client_messages(tmp_path: Path) -> None:
         assert error["code"] == -32001
         assert error["message"].startswith(outcome)
         assert needle in error["message"]
+
+
+def test_gated_handler_receives_server_injected_peer(tmp_path: Path) -> None:
+    """An authorized gated call hands the handler the accept-time PeerIdentity."""
+    gate = _FakeGate(AuthzResult("authorized"))
+    handler_calls: list[dict[str, object]] = []
+    server = _gated_server(tmp_path / "ipc.sock", gate=gate, handler_calls=handler_calls)
+    server.start()
+    try:
+        conn = _Conn(tmp_path / "ipc.sock")
+        # A client-supplied reserved param must be overridden, never trusted.
+        resp = conn.call("quarantine_file", params={"path": "/tmp/x", PEER_PARAM: "spoof"})
+        conn.close()
+    finally:
+        server.stop()
+    assert resp["result"] == "did-it"
+    [params] = handler_calls
+    peer = params[PEER_PARAM]
+    assert isinstance(peer, PeerIdentity)
+    assert peer.pid == os.getpid()
+    assert peer.uid == os.getuid()
+    assert params["path"] == "/tmp/x"
+
+
+def test_ungated_handler_never_sees_reserved_param(tmp_path: Path) -> None:
+    """The reserved key is stripped from client params even on ungated methods."""
+    seen: list[dict[str, object]] = []
+
+    server = IpcServer(
+        socket_path=tmp_path / "ipc.sock",
+        methods=[Method(name="echo", handler=lambda p: seen.append(p) or "ok")],
+        allowed_uids=[],
+    )
+    server.start()
+    try:
+        conn = _Conn(tmp_path / "ipc.sock")
+        conn.call("echo", params={PEER_PARAM: "spoof", "x": 1})
+        conn.close()
+    finally:
+        server.stop()
+    assert seen == [{"x": 1}]
+
+
+def test_polkit_target_reaches_gate_and_audit(tmp_path: Path) -> None:
+    """`polkit_target` extracts the pkcheck --detail path; denials audit it."""
+    gate = _FakeGate(AuthzResult("denied", "Not authorized."))
+    audit = _RecordingAudit()
+    server = _gated_server(
+        tmp_path / "ipc.sock",
+        gate=gate,
+        audit=audit,
+        polkit_target=lambda params: params.get("path"),
+    )
+    server.start()
+    try:
+        conn = _Conn(tmp_path / "ipc.sock")
+        conn.call("quarantine_file", params={"path": "/tmp/evil.bin"})
+        conn.close()
+    finally:
+        server.stop()
+    [(_action, _peer, target)] = gate.calls
+    assert target == "/tmp/evil.bin"
+    [row] = audit.rows
+    assert row["details"]["path"] == "/tmp/evil.bin"

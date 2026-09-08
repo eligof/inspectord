@@ -14,10 +14,12 @@ from typing import Any
 
 import pytest
 
+from inspectord.config import dev_config
 from inspectord.evidence.store import ForensicStore
 from inspectord.quarantine import ops
 from inspectord.storage.db import Database
 from inspectord.storage.migrations import run_migrations
+from inspectord.supervisor import Supervisor
 
 BASE_TS = datetime(2026, 9, 1, 12, 0)
 
@@ -127,4 +129,28 @@ def test_startup_logs_isolating_rows(
     assert count == 1
     assert len(caplog.records) == 1
     assert "q1" in caplog.text
+    assert "/tmp/half-done" in caplog.text
+
+
+def test_supervisor_start_logs_incomplete_isolations(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reconciliation helper is wired into daemon boot, not just exported."""
+    cfg = dev_config(base=tmp_path).model_copy(update={"workers": []})
+    boot_db = Database(cfg.storage.db_path)
+    boot_db.connect()
+    run_migrations(boot_db)
+    boot_db.execute(
+        "INSERT INTO quarantine (quarantine_id, sha256, original_path, file_mode, file_uid, "
+        "file_gid, size_bytes, status, quarantined_at) "
+        "VALUES ('q-boot', 'ab' || repeat('cd', 31), '/tmp/half-done', 420, 1000, 1000, 4, "
+        "'isolating', ?)",
+        [BASE_TS],
+    )
+    boot_db.close()
+    sup = Supervisor(cfg)
+    with caplog.at_level(logging.WARNING, logger="inspectord.quarantine.ops"):
+        sup.start()
+        sup.stop(timeout=10.0)
+    assert "q-boot" in caplog.text
     assert "/tmp/half-done" in caplog.text

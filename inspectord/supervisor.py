@@ -40,6 +40,7 @@ from inspectord.hunt.scheduler import HuntScheduler
 from inspectord.journal import Journal
 from inspectord.log import get
 from inspectord.parsers.base import build_event
+from inspectord.quarantine.ops import log_incomplete_isolations
 from inspectord.retention.engine import run_retention
 from inspectord.router import DropPolicy, EventRouter, RouterFull
 from inspectord.rule_engine import RuleEngine
@@ -270,6 +271,10 @@ class Supervisor:
     def start(self) -> None:
         self._db.connect()
         run_migrations(self._db)
+        # Boot-state reconciliation (quarantine design §3.6): every row a
+        # crash left `isolating` gets one warning — the file may still be on
+        # disk, and the panel must never quietly imply containment.
+        log_incomplete_isolations(self._db)
         self._evidence_collector = EvidenceCollector(
             self._cfg.storage.db_path, ForensicStore(self._cfg.storage.evidence_dir)
         )
