@@ -24,7 +24,8 @@ from inspectord.alerts.ipc_handlers import (
     handle_suppress_alert,
 )
 from inspectord.audit.ipc_handlers import handle_list_audit_log, handle_verify_audit_log
-from inspectord.audit.log import assert_audit_table
+from inspectord.audit.log import append_audit, assert_audit_table
+from inspectord.authz import AuthzResult, PeerIdentity, check_polkit
 from inspectord.cases.ipc_handlers import (
     handle_add_note,
     handle_attach_alert,
@@ -45,6 +46,7 @@ from inspectord.dependencies.ipc_handlers import (
 from inspectord.dependencies.manifest import load_packaged_manifests
 from inspectord.dependencies.pacman_backend import PacmanBackend
 from inspectord.entities.ipc_handlers import handle_get_entity_card
+from inspectord.evidence.store import ForensicStore
 from inspectord.hunt.ipc_handlers import (
     handle_delete_hunt_query,
     handle_get_hunt_query,
@@ -58,6 +60,13 @@ from inspectord.ipc_commands import make_run_worker_command_handler
 from inspectord.ipc_server import IpcServer, Method
 from inspectord.log import configure as configure_log
 from inspectord.log import get
+from inspectord.quarantine.ipc_handlers import (
+    handle_delete_quarantined,
+    handle_list_quarantine,
+    handle_quarantine_file,
+    handle_restore_quarantined,
+)
+from inspectord.quarantine.paths import QuarantinePaths
 from inspectord.ratelimit import SlidingWindowLimiter
 from inspectord.state.ipc_handlers import (
     handle_capture_baseline,
@@ -116,7 +125,34 @@ def _list_events_handler(params: dict[str, Any], db_path: Path) -> dict[str, Any
     }
 
 
-def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
+def _authz_check(action_id: str, peer: PeerIdentity, target: str | None) -> AuthzResult:
+    """`check_polkit` adapted to the server's positional gate signature."""
+    return check_polkit(action_id, peer, target=target)
+
+
+def _make_ipc_audit(db_path: Path) -> Any:
+    """Audit sink for the server's denial rows (quarantine design §2.3).
+
+    The server passes action/target/details; the actor is the peer's uid:pid
+    identity, which rides in the details the server already assembled.
+    """
+
+    def _audit(*, action: str, target: str | None, details: dict[str, Any]) -> None:
+        actor = f"uid:{details.get('peer_uid')}:pid:{details.get('peer_pid')}"
+        append_audit(db_path, actor=actor, action=action, target=target, details=details)
+
+    return _audit
+
+
+def _polkit_target_path(params: dict[str, Any]) -> str | None:
+    """`pkcheck --detail path` extractor for quarantine_file (§2.2)."""
+    value = params.get("path")
+    return value if isinstance(value, str) else None
+
+
+def _ipc_methods(
+    supervisor: Supervisor, cfg: DaemonConfig, *, config_path: Path | None = None
+) -> list[Method]:
     def get_health(_params: dict[str, Any]) -> dict[str, Any]:
         # Hunt-scheduler liveness (hunt-followups §4.1): a dead scheduler
         # thread must be visible without reading logs — silent stop of
@@ -139,6 +175,28 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
     # §4.6): each writes an audit row, and attacker-drivable append-only audit
     # growth is what the limiter bounds.
     hunt_limiter = SlidingWindowLimiter()
+
+    # Quarantine (quarantine design §4). Per-verb windows: one shared window
+    # would let a denied-quarantine flood lock the user out of `restore`
+    # mid-incident — restore's availability is a security property.
+    quarantine_limiter = SlidingWindowLimiter()
+    restore_delete_limiter = SlidingWindowLimiter()
+    quarantine_store = ForensicStore(cfg.storage.evidence_dir)
+    quarantine_paths = QuarantinePaths(
+        state_dir=cfg.storage.db_path.parent,
+        socket_dir=cfg.ipc.socket_path.parent,
+        config_path=config_path,
+    )
+
+    def _capture_lock() -> threading.Lock:
+        # Resolved at call time: the supervisor owns the EvidenceCollector,
+        # which exists only after start() (spec §3.2 — the lock serializes
+        # captures against the retention pruner).
+        collector = getattr(supervisor, "_evidence_collector", None)
+        if collector is None:
+            raise RuntimeError("evidence collector is not running; cannot quarantine")
+        lock: threading.Lock = collector.capture_lock
+        return lock
 
     return [
         Method(name="get_health", handler=get_health, mutates=False),
@@ -440,6 +498,53 @@ def _ipc_methods(supervisor: Supervisor, cfg: DaemonConfig) -> list[Method]:
             ),
             mutates=True,
         ),
+        # Quarantine (quarantine design §4): the three mutating verbs are
+        # polkit-gated server-side; list is a read like every other list_*.
+        Method(
+            name="quarantine_file",
+            handler=lambda params: handle_quarantine_file(
+                params=params,
+                db_path=cfg.storage.db_path,
+                store=quarantine_store,
+                lock=_capture_lock(),
+                paths=quarantine_paths,
+            ),
+            mutates=True,
+            polkit_action="org.inspectord.quarantine",
+            limiter=quarantine_limiter,
+            polkit_target=_polkit_target_path,
+        ),
+        Method(
+            name="list_quarantine",
+            handler=lambda params: handle_list_quarantine(
+                params=params, db_path=cfg.storage.db_path, store=quarantine_store
+            ),
+            mutates=False,
+        ),
+        Method(
+            name="restore_quarantined",
+            handler=lambda params: handle_restore_quarantined(
+                params=params,
+                db_path=cfg.storage.db_path,
+                store=quarantine_store,
+                paths=quarantine_paths,
+            ),
+            mutates=True,
+            polkit_action="org.inspectord.quarantine-restore",
+            limiter=restore_delete_limiter,
+        ),
+        Method(
+            name="delete_quarantined",
+            handler=lambda params: handle_delete_quarantined(
+                params=params,
+                db_path=cfg.storage.db_path,
+                store=quarantine_store,
+                lock=_capture_lock(),
+            ),
+            mutates=True,
+            polkit_action="org.inspectord.quarantine-delete",
+            limiter=restore_delete_limiter,
+        ),
     ]
 
 
@@ -472,9 +577,11 @@ def main() -> None:
 
     ipc = IpcServer(
         socket_path=cfg.ipc.socket_path,
-        methods=_ipc_methods(sup, cfg),
+        methods=_ipc_methods(sup, cfg, config_path=args.config),
         allowed_uids=cfg.ipc.allowed_uids,
         socket_group=cfg.ipc.socket_group,
+        authz_check=_authz_check,
+        audit=_make_ipc_audit(cfg.storage.db_path),
     )
     ipc.start()
     log.info("inspectord ready; socket=%s", cfg.ipc.socket_path)

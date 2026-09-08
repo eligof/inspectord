@@ -274,3 +274,41 @@ def test_prune_evidence_rejects_naive_now(tmp_path: Path) -> None:
         prune_evidence(
             db, tmp_path / "ev", now=NOW.replace(tzinfo=None), days=365, capture_lock=None
         )
+
+
+# --- quarantine protection (quarantine design §3.5) ---
+
+
+def _seed_quarantine(db: Database, sha: str, *, status: str, qid: str = "q1") -> None:
+    db.execute(
+        "INSERT INTO quarantine (quarantine_id, sha256, original_path, file_mode, file_uid, "
+        "file_gid, size_bytes, status, quarantined_at) "
+        "VALUES (?, ?, '/tmp/x', 420, 1000, 1000, 4, ?, TIMESTAMP '2026-01-01 00:00:00')",
+        [qid, sha, status],
+    )
+
+
+@pytest.mark.parametrize("status", ["isolating", "active", "failed", "restoring"])
+def test_quarantine_hold_protects_blob(tmp_path: Path, status: str) -> None:
+    db = _db(tmp_path)
+    root = tmp_path / "ev"
+    _seed_case(db, "c1", status="closed", alert_id="a1")
+    _seed_evidence(db, "c1", SHA)  # old, closed, non-critical: prunable on its own
+    blob = _blob(root, SHA)
+    _seed_quarantine(db, SHA, status=status)
+    result = prune_evidence(db, root, now=NOW, days=365, capture_lock=None)
+    assert result.blobs_deleted == 0
+    assert blob.exists()
+
+
+@pytest.mark.parametrize("status", ["restored", "deleted"])
+def test_settled_quarantine_does_not_protect(tmp_path: Path, status: str) -> None:
+    db = _db(tmp_path)
+    root = tmp_path / "ev"
+    _seed_case(db, "c1", status="closed", alert_id="a1")
+    _seed_evidence(db, "c1", SHA)
+    blob = _blob(root, SHA)
+    _seed_quarantine(db, SHA, status=status)
+    result = prune_evidence(db, root, now=NOW, days=365, capture_lock=None)
+    assert result.blobs_deleted == 1
+    assert not blob.exists()

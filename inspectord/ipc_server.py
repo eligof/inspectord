@@ -2,8 +2,15 @@
 
 Each connection is line-delimited JSON. Authentication is SO_PEERCRED:
 if `allowed_uids` is non-empty, the caller's uid must be in the list.
-Mutating methods can require a polkit check in a later phase; here we
-only check the allowlist.
+
+Methods carrying a `polkit_action` are additionally gated (quarantine design
+§2.3). The pipeline order is load-bearing: validate → **rate limit** → polkit
+→ handler, so a request flood can never stack pkcheck prompts. The peer's
+(pid, uid, start-time) is snapshotted ONCE at connection accept — the peer
+provably lives at that instant (it holds the connection open); a check-time
+/proc read would describe whatever process currently owns the pid. Denials
+answer on the dedicated -32001 channel, message prefixed with the outcome
+token, and every non-authorized outcome is audited.
 
 A handler failure answers with a generic message and a correlation id; only a
 `ClientFacingError` (see `inspectord.ipc_errors`) is passed through verbatim.
@@ -21,8 +28,9 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from inspectord.authz import AuthzResult, PeerIdentity, proc_start_time
 from inspectord.ipc_errors import ClientFacingError, new_error_ref
 from inspectord.log import get
 from inspectord.schemas.versions import IPC_PROTOCOL_VERSION
@@ -36,18 +44,65 @@ _CRED_FMT = "iII"  # pid, uid, gid
 #: the whole message: it is what a user pastes so the traceback can be found.
 _INTERNAL_ERROR = "internal error (error_ref={ref}); the daemon log has the details"
 
+#: JSON-RPC error code for authorization/rate-limit refusals — machine-
+#: distinguishable from -32000 internal errors, so the CLI's exit codes need
+#: no string matching. The message always starts with the outcome token.
+AUTHZ_DENIED_CODE = -32001
+
+#: Reserved, server-injected param: handlers of gated methods receive the
+#: accept-time `PeerIdentity` under this key (quarantine design §4 — audit
+#: actor). It is stripped from every client request before dispatch, so a
+#: client can never spoof it.
+PEER_PARAM = "_peer"
+
+#: Actionable client messages per outcome (quarantine design §2.2).
+_DENIAL_MESSAGES = {
+    "rate_limited": "too many requests; retry in a minute",
+    "peer_gone": "peer process identity could not be captured at connect; reconnect and retry",
+    "polkit_unavailable": "polkit is unavailable; the daemon cannot authorize this action",
+    "agent_missing": (
+        "no polkit agent in this session — use a desktop terminal, "
+        "or run pkttyagent --process <your pid> --fallback"
+    ),
+    "action_unknown": (
+        "polkit policy not installed — run: "
+        "sudo cp packaging/polkit/org.inspectord.policy /usr/share/polkit-1/actions/"
+    ),
+    "timeout": "no answer to the authorization prompt in 60s",
+    "authz_busy": "another authorization prompt is in progress; retry in a moment",
+    "denied": "authorization denied",
+}
+
+
+def _denial_message(outcome: str) -> str:
+    return f"{outcome}: {_DENIAL_MESSAGES.get(outcome, 'authorization failed')}"
+
+
+class RateLimiter(Protocol):
+    """The `SlidingWindowLimiter` surface: (allowed, audit_this_rejection)."""
+
+    def check(self) -> tuple[bool, bool]: ...
+
 
 @dataclass
 class Method:
     name: str
     handler: Callable[[dict[str, Any]], Any]
     mutates: bool = False
+    #: When set, calls are polkit-gated with this action id (design §2.3).
+    polkit_action: str | None = None
+    #: Consulted BEFORE polkit for gated methods; shared across verbs by choice.
+    limiter: RateLimiter | None = None
+    #: Extracts the pkcheck `--detail path` target from the request params
+    #: (quarantine design §2.2); None = no target detail for this method.
+    polkit_target: Callable[[dict[str, Any]], str | None] | None = None
 
 
-def _peer_uid(sock: socket.socket) -> int:
+def _peer_creds(sock: socket.socket) -> tuple[int, int]:
+    """SO_PEERCRED (pid, uid) of the connected peer."""
     raw = sock.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED, struct.calcsize(_CRED_FMT))
-    _pid, uid, _gid = struct.unpack(_CRED_FMT, raw)
-    return int(uid)
+    pid, uid, _gid = struct.unpack(_CRED_FMT, raw)
+    return int(pid), int(uid)
 
 
 def _err(req_id: object, code: int, message: str) -> bytes:
@@ -84,6 +139,8 @@ class IpcServer:
         methods: list[Method],
         allowed_uids: list[int],
         socket_group: str | None = None,
+        authz_check: Callable[[str, PeerIdentity, str | None], AuthzResult] | None = None,
+        audit: Callable[..., object] | None = None,
     ) -> None:
         """Initialise the IPC server.
 
@@ -96,11 +153,19 @@ class IpcServer:
                 is also hardened to 0o750 for defence-in-depth.  If the group
                 does not exist or a permission operation fails, the server falls
                 back to owner-only (0o600) rather than crashing.
+            authz_check: Polkit gate for methods carrying a `polkit_action`
+                (`check_polkit`-shaped). None = every gated method fails
+                closed with `polkit_unavailable`.
+            audit: Called on every non-authorized outcome of a gated method
+                (`append_audit`-shaped keyword surface). None = no audit rows,
+                gating still applies.
         """
         self._path = Path(socket_path)
         self._methods = {m.name: m for m in methods}
         self._allowed_uids = list(allowed_uids)
         self._socket_group = socket_group
+        self._authz_check = authz_check
+        self._audit = audit
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -207,9 +272,19 @@ class IpcServer:
 
     def _handle(self, conn: socket.socket) -> None:
         try:
-            if self._allowed_uids and _peer_uid(conn) not in self._allowed_uids:
+            pid, uid = _peer_creds(conn)
+            if self._allowed_uids and uid not in self._allowed_uids:
                 conn.sendall(_err(None, -32000, "peer uid not allowed"))
                 return
+            # Accept-time snapshot (design §2.1): the peer provably lives right
+            # now — it holds this connection open. A later /proc read would
+            # re-bind gated calls to whatever process owns the pid by then.
+            start_time = proc_start_time(pid)
+            peer = (
+                None  # peer_gone: gated calls on this connection are dead
+                if start_time is None
+                else PeerIdentity(pid=pid, uid=uid, start_time=start_time)
+            )
             with conn.makefile("rb") as rf:
                 for line in rf:
                     stripped = line.rstrip(b"\n")
@@ -220,11 +295,83 @@ class IpcServer:
                     except Exception:
                         conn.sendall(_err(None, -32700, "parse error"))
                         continue
-                    self._dispatch(conn, req)
+                    self._dispatch(conn, req, pid, uid, peer)
         finally:
             conn.close()
 
-    def _dispatch(self, conn: socket.socket, req: dict[str, Any]) -> None:
+    def _gate(
+        self,
+        method: Method,
+        pid: int,
+        uid: int,
+        peer: PeerIdentity | None,
+        params: dict[str, Any],
+    ) -> str | None:
+        """Run the limiter-then-polkit pipeline. Returns a denial message or None.
+
+        Order is the contract (design §2.3): the limiter runs BEFORE polkit so
+        a request flood can never spawn concurrent 60 s pkcheck prompts.
+        """
+        action_id = method.polkit_action
+        assert action_id is not None
+        target = method.polkit_target(params) if method.polkit_target is not None else None
+        if method.limiter is not None:
+            allowed, audit_this = method.limiter.check()
+            if not allowed:
+                if audit_this:
+                    self._audit_denial(method, action_id, pid, uid, "rate_limited", target)
+                return _denial_message("rate_limited")
+        if peer is None:
+            self._audit_denial(method, action_id, pid, uid, "peer_gone", target)
+            return _denial_message("peer_gone")
+        if self._authz_check is None:
+            self._audit_denial(method, action_id, pid, uid, "polkit_unavailable", target)
+            return _denial_message("polkit_unavailable")
+        result = self._authz_check(action_id, peer, target)
+        if result.authorized:
+            return None
+        self._audit_denial(method, action_id, pid, uid, result.outcome, target)
+        return _denial_message(result.outcome)
+
+    def _audit_denial(
+        self,
+        method: Method,
+        action_id: str,
+        pid: int,
+        uid: int,
+        reason: str,
+        target: str | None = None,
+    ) -> None:
+        log.info("ipc: %s refused for pid=%d uid=%d: %s", method.name, pid, uid, reason)
+        if self._audit is None:
+            return
+        details: dict[str, Any] = {
+            "action_id": action_id,
+            "peer_pid": pid,
+            "peer_uid": uid,
+            "reason": reason,
+        }
+        if target is not None:
+            details["path"] = target
+        try:
+            self._audit(
+                action="polkit_denied",
+                target=method.name,
+                details=details,
+            )
+        except Exception:
+            # Audit is fail-open project-wide: a dropped row must never turn a
+            # clean denial into a connection error.
+            log.exception("ipc: audit callable failed for %s", method.name)
+
+    def _dispatch(
+        self,
+        conn: socket.socket,
+        req: dict[str, Any],
+        pid: int,
+        uid: int,
+        peer: PeerIdentity | None,
+    ) -> None:
         req_id = req.get("id")
         if req.get("jsonrpc") != "2.0":
             conn.sendall(_err(req_id, -32600, "invalid request"))
@@ -237,8 +384,18 @@ class IpcServer:
         if method is None:
             conn.sendall(_err(req_id, -32601, "method not found"))
             return
+        # The reserved key is server-owned: strip whatever the client sent.
+        params = dict(req.get("params") or {})
+        params.pop(PEER_PARAM, None)
+        if method.polkit_action is not None:
+            denial = self._gate(method, pid, uid, peer, params)
+            if denial is not None:
+                conn.sendall(_err(req_id, AUTHZ_DENIED_CODE, denial))
+                return
+            # Only past the gate: gated handlers audit with the peer's uid:pid.
+            params[PEER_PARAM] = peer
         try:
-            result = method.handler(req.get("params") or {})
+            result = method.handler(params)
             response = _ok(req_id, result)
         except ClientFacingError as exc:
             # The message was written for the caller (see `inspectord.ipc_errors`),

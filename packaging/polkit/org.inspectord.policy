@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>inspectord</vendor>
+  <vendor_url>https://example.invalid/local-inspection</vendor_url>
+
+  <!-- Quarantine actions (quarantine design §2.4). All three defaults are
+       pinned explicitly: an unpinned allow_any/allow_inactive is an implicit
+       value we'd be trusting blind.
+
+       Restore and delete prompt EVERY time (auth_self): auth_self_keep's
+       session-scoped grant would make them promptless for ANY same-uid
+       process during the keep window — the exact window malware would use to
+       delete the evidence after the user's one legitimate click. Quarantine
+       keeps auth_self_keep for multi-file UX (accepted residual, on record
+       in the spec).
+
+       Install: sudo cp packaging/polkit/org.inspectord.policy /usr/share/polkit-1/actions/ -->
+
+  <action id="org.inspectord.quarantine">
+    <description>Quarantine a file into the inspectord forensic store</description>
+    <message>Authentication is required to quarantine a file (the original is removed from disk).</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.inspectord.quarantine-restore">
+    <description>Restore a quarantined file to its original path</description>
+    <message>Authentication is required to restore a quarantined file to disk.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.inspectord.quarantine-delete">
+    <description>Permanently delete a quarantined file</description>
+    <message>Authentication is required to permanently delete quarantined file contents.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

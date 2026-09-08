@@ -271,7 +271,10 @@ def prune_evidence(
     Candidates are the DISTINCT shas among ``case_evidence`` rows older than
     the cutoff whose ``meta_json`` does not already carry a ``pruned_at``
     marker. A sha is prunable iff it has no younger row, every referencing
-    case is closed, and no referencing case has a critical alert (§4.2). The
+    case is closed, and no referencing case has a critical alert (§4.2). A
+    sha referenced by any ``quarantine`` row in status ``isolating``,
+    ``active``, ``failed`` or ``restoring`` is never pruned (quarantine
+    design §3.5); ``restored`` and ``deleted`` rows do not protect. The
     whole body runs under the EvidenceCollector's capture lock so a concurrent
     capture cannot dedup against a blob mid-unlink. ``case_evidence`` rows are
     never deleted; on unlink (or an already-missing blob) every row for the
@@ -292,6 +295,9 @@ def prune_evidence(
                 "SELECT DISTINCT sha256 FROM case_evidence "
                 "WHERE captured_at < ? "
                 "  AND (meta_json IS NULL OR meta_json NOT LIKE '%\"pruned_at\"%') "
+                "  AND sha256 NOT IN ("
+                "    SELECT sha256 FROM quarantine "
+                "    WHERE status IN ('isolating', 'active', 'failed', 'restoring')) "
                 "ORDER BY sha256",
                 [cutoff],
             ).fetchall()
