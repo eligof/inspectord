@@ -16,8 +16,9 @@ log = logging.getLogger(__name__)
 
 _MAX_FILE_BYTES = 32 * 1024 * 1024  # 32 MiB
 
-# Resolved-path prefixes we refuse to read into the forensic store.
-_DENY_PREFIXES = (
+# Resolved-path prefixes we refuse to read into the forensic store. Public:
+# quarantine's deny-list (quarantine design §3.2) is a superset built on this.
+DENY_PREFIXES = (
     "/proc",
     "/sys",
     "/dev",
@@ -33,7 +34,7 @@ def _path_allowed(path: str) -> bool:
     if ".." in Path(path).parts:
         return False
     real = os.path.realpath(path)
-    return not any(real == deny or real.startswith(deny + "/") for deny in _DENY_PREFIXES)
+    return not any(real == deny or real.startswith(deny + "/") for deny in DENY_PREFIXES)
 
 
 def read_capture(path: str, *, max_bytes: int = _MAX_FILE_BYTES) -> bytes | None:
