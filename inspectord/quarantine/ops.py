@@ -1,8 +1,11 @@
-"""Quarantine core operations (quarantine design §3.2).
+"""Quarantine core operations (quarantine design §3.2-§3.4).
 
 Isolate a file into the forensic store and unlink the original — reversibly,
 with every post-open step going through the held fd/dirfd, never back through
-the user-supplied path string (§3.2 "no re-traversal, ever").
+the user-supplied path string (§3.2 "no re-traversal, ever"). Restore commits
+via a link-no-replace through the same symlink-free parent dirfd; delete
+removes the blob only when no other reference claims the sha, re-checked
+under the capture lock.
 
 Lifecycle: the row is INSERTed as ``isolating`` and flips to ``active`` only
 after the unlink succeeds; unlink failure or a detected swap leaves ``failed``
@@ -24,7 +27,9 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import os
+import secrets
 import stat
 import subprocess
 import threading
@@ -41,12 +46,18 @@ from inspectord.cases.store import append_timeline
 from inspectord.evidence.store import BlobTooLarge, ForensicStore
 from inspectord.ids import uuid7
 from inspectord.quarantine.errors import (
+    QuarantineBadStatus,
+    QuarantineBlobMissing,
     QuarantineDenied,
     QuarantineError,
     QuarantineIOError,
     QuarantineIsolationFailed,
+    QuarantineNotActive,
     QuarantineNotFound,
     QuarantineNotRegular,
+    QuarantinePathOccupied,
+    QuarantineRestoreNoParent,
+    QuarantineShaMismatch,
     QuarantineSwapped,
     QuarantineTooLarge,
 )
@@ -394,3 +405,282 @@ def _isolate(
         running_pids=running,
         warnings=warnings,
     )
+
+
+# ---------------------------------------------------------------------------
+# restore (§3.3)
+# ---------------------------------------------------------------------------
+
+_RESTORE_CHUNK_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class RestoreResult:
+    quarantine_id: str
+    original_path: str
+    sha256: str
+    #: A restored mode carrying 0o6000 bits — restoring a quarantined setuid
+    #: binary is the single most dangerous act this feature can perform (§3.3).
+    setuid_warning: bool
+
+
+@dataclass(frozen=True)
+class DeleteResult:
+    quarantine_id: str
+    original_path: str
+    blob_removed: bool
+
+
+def _fetch_row(db: Database, quarantine_id: str) -> tuple[Any, ...]:
+    row = db.query(
+        "SELECT sha256, original_path, file_mode, file_uid, file_gid, case_id, status "
+        "FROM quarantine WHERE quarantine_id = ?",
+        [quarantine_id],
+    ).fetchone()
+    if row is None:
+        raise QuarantineNotFound(f"no quarantine row with id {quarantine_id!r}")
+    return row
+
+
+def _verify_blob(blob: Path, sha: str) -> None:
+    """Chunked sha256 verification against the row (§3.3 step 2)."""
+    hasher = hashlib.sha256()
+    try:
+        with open(blob, "rb") as fh:
+            while chunk := fh.read(_RESTORE_CHUNK_BYTES):
+                hasher.update(chunk)
+    except FileNotFoundError as exc:
+        raise QuarantineBlobMissing(
+            f"stored blob for sha256 {sha} is missing from the forensic store (backup/store drift?)"
+        ) from exc
+    if hasher.hexdigest() != sha:
+        raise QuarantineShaMismatch(f"stored blob content does not match the recorded sha256 {sha}")
+
+
+def _open_parent_for_restore(path: str) -> int:
+    try:
+        return open_parent_dirfd(path)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        parent = os.path.dirname(path)
+        raise QuarantineRestoreNoParent(
+            f"parent directory {parent!r} no longer exists — recreate it, then retry "
+            "(quarantine records no directory metadata to recreate it faithfully)"
+        ) from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise QuarantineDenied(f"parent path of {path!r} contains a symlink component") from exc
+        raise QuarantineIOError(f"cannot open parent directory of {path!r}") from exc
+
+
+def _write_and_commit(
+    dirfd: int, *, blob: Path, path: str, mode: int, uid: int, gid: int, quarantine_id: str
+) -> None:
+    """§3.3 step 4: tmp 0600 + write + fsync + fchown + fchmod, then link-no-replace.
+
+    fchmod runs AFTER fchown (chown clears setuid/setgid bits). The commit is
+    ``linkat`` without replace: EEXIST means something re-created the path —
+    evidence, never clobber-fodder. Both link ends go through the held dirfd.
+    """
+    base = os.path.basename(path)
+    tmp_name = f".inspectord-restore-{quarantine_id}-{secrets.token_hex(8)}"
+    tfd = os.open(
+        tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600, dir_fd=dirfd
+    )
+    try:
+        try:
+            os.fchmod(tfd, 0o600)  # os.open honors umask; force 0600
+            with open(blob, "rb") as src:
+                while chunk := src.read(_RESTORE_CHUNK_BYTES):
+                    os.write(tfd, chunk)
+            os.fsync(tfd)
+            os.fchown(tfd, uid, gid)
+            os.fchmod(tfd, mode)
+        finally:
+            os.close(tfd)
+        try:
+            os.link(tmp_name, base, src_dir_fd=dirfd, dst_dir_fd=dirfd, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise QuarantinePathOccupied(
+                f"{path!r} already exists; something re-created it after quarantine. "
+                "The existing file is untouched — that re-creation is evidence"
+            ) from exc
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name, dir_fd=dirfd)
+
+
+def restore(
+    db: Database,
+    store: ForensicStore,
+    *,
+    quarantine_id: str,
+    actor: str,
+    paths: QuarantinePaths,
+) -> RestoreResult:
+    """Put the quarantined bytes back at ``original_path`` (§3.3).
+
+    CAS-gated ``active → restoring → restored``; every failure path CASes the
+    row back to ``active``. The blob stays — bytes are removed only by delete
+    or by normal evidence retention once no protecting reference remains.
+    """
+    try:
+        result, case_id = _restore(db, store, quarantine_id=quarantine_id, paths=paths)
+    except QuarantineError as exc:
+        append_audit(
+            db.path,
+            actor=actor,
+            action="quarantine_refused",
+            target=quarantine_id,
+            details={"verb": "restore", "error_kind": exc.error_kind, "error": str(exc)},
+        )
+        raise
+    append_audit(
+        db.path,
+        actor=actor,
+        action="quarantine_restored",
+        target=result.original_path,
+        details={
+            "quarantine_id": result.quarantine_id,
+            "sha256": result.sha256,
+            "setuid_warning": result.setuid_warning,
+        },
+    )
+    if case_id is not None:
+        append_timeline(db, case_id=case_id, kind="quarantine_restored", text=result.original_path)
+    return result
+
+
+def _restore(
+    db: Database, store: ForensicStore, *, quarantine_id: str, paths: QuarantinePaths
+) -> tuple[RestoreResult, str | None]:
+    sha, original_path, mode, uid, gid, case_id, _status = _fetch_row(db, quarantine_id)
+    # Guarded transition FIRST (§3.3 step 1): a concurrent restore/delete must
+    # lose here, before anything touches disk. The row read above is for
+    # fields and messaging only — the CAS is the gate.
+    if not _cas(db, quarantine_id, from_statuses=("active",), to_status="restoring"):
+        current = _fetch_row(db, quarantine_id)[6]
+        raise QuarantineNotActive(
+            f"quarantine {quarantine_id} is not active (status: {current}); nothing restored"
+        )
+    try:
+        _verify_blob(store.path_for(sha), sha)
+        # Deny-list re-validation at restore time (§3.3 step 3).
+        if quarantine_deny(os.path.realpath(original_path), paths):
+            raise QuarantineDenied(
+                f"restore path is on the quarantine deny-list: {original_path!r}"
+            )
+        dirfd = _open_parent_for_restore(original_path)
+        try:
+            _write_and_commit(
+                dirfd,
+                blob=store.path_for(sha),
+                path=original_path,
+                mode=mode,
+                uid=uid,
+                gid=gid,
+                quarantine_id=quarantine_id,
+            )
+        finally:
+            os.close(dirfd)
+    except QuarantineError:
+        _cas(db, quarantine_id, from_statuses=("restoring",), to_status="active")
+        raise
+    except OSError as exc:
+        _cas(db, quarantine_id, from_statuses=("restoring",), to_status="active")
+        raise QuarantineIOError(f"restore failed: {exc.strerror}") from exc
+    if not _cas(
+        db,
+        quarantine_id,
+        from_statuses=("restoring",),
+        to_status="restored",
+        ts_column="restored_at",
+    ):
+        raise QuarantineIOError("quarantine row changed status mid-restore")
+    result = RestoreResult(
+        quarantine_id=quarantine_id,
+        original_path=original_path,
+        sha256=sha,
+        setuid_warning=bool(mode & 0o6000),
+    )
+    return result, case_id
+
+
+# ---------------------------------------------------------------------------
+# delete (§3.4)
+# ---------------------------------------------------------------------------
+
+
+def delete(
+    db: Database,
+    store: ForensicStore,
+    lock: threading.Lock,
+    *,
+    quarantine_id: str,
+    actor: str,
+) -> DeleteResult:
+    """Discard a quarantined file for good (§3.4).
+
+    The blob is unlinked ONLY when no ``case_evidence`` row and no other
+    non-``deleted`` quarantine row claims the sha — re-checked under the
+    capture lock, so a concurrent capture cannot dedup against the blob
+    mid-unlink.
+    """
+    try:
+        result, case_id = _delete(db, store, lock, quarantine_id=quarantine_id)
+    except QuarantineError as exc:
+        append_audit(
+            db.path,
+            actor=actor,
+            action="quarantine_refused",
+            target=quarantine_id,
+            details={"verb": "delete", "error_kind": exc.error_kind, "error": str(exc)},
+        )
+        raise
+    append_audit(
+        db.path,
+        actor=actor,
+        action="quarantine_deleted",
+        target=result.original_path,
+        details={"quarantine_id": result.quarantine_id, "blob_removed": result.blob_removed},
+    )
+    if case_id is not None:
+        append_timeline(db, case_id=case_id, kind="quarantine_deleted", text=result.original_path)
+    return result
+
+
+def _delete(
+    db: Database, store: ForensicStore, lock: threading.Lock, *, quarantine_id: str
+) -> tuple[DeleteResult, str | None]:
+    sha, original_path, _mode, _uid, _gid, case_id, _status = _fetch_row(db, quarantine_id)
+    if not _cas(
+        db, quarantine_id, from_statuses=("active", "restored", "failed"), to_status="deleting"
+    ):
+        current = _fetch_row(db, quarantine_id)[6]
+        raise QuarantineBadStatus(
+            f"quarantine {quarantine_id} cannot be deleted from status {current!r}"
+        )
+    blob_removed = False
+    with lock:
+        held_by_case = db.query(
+            "SELECT 1 FROM case_evidence WHERE sha256 = ? LIMIT 1", [sha]
+        ).fetchone()
+        held_by_other = db.query(
+            "SELECT 1 FROM quarantine WHERE sha256 = ? AND quarantine_id != ? "
+            "AND status != 'deleted' LIMIT 1",
+            [sha, quarantine_id],
+        ).fetchone()
+        if held_by_case is None and held_by_other is None:
+            blob = store.path_for(sha)
+            if blob.exists():
+                blob.unlink()
+                with contextlib.suppress(OSError):
+                    blob.parent.rmdir()
+                blob_removed = True
+    if not _cas(
+        db, quarantine_id, from_statuses=("deleting",), to_status="deleted", ts_column="deleted_at"
+    ):
+        raise QuarantineIOError("quarantine row changed status mid-delete")
+    result = DeleteResult(
+        quarantine_id=quarantine_id, original_path=original_path, blob_removed=blob_removed
+    )
+    return result, case_id

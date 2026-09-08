@@ -8,7 +8,10 @@ blocks — a symlink-free parent-directory open, and the quarantine deny-list.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,10 +58,11 @@ def open_parent_dirfd(path: str) -> int:
 
     Component-wise walk from ``/`` with ``O_NOFOLLOW | O_DIRECTORY`` on every
     component: CPython exposes no ``openat2(RESOLVE_NO_SYMLINKS)``, so this
-    walk IS the no-symlink resolution mechanism. A symlink component fails
-    with ELOOP (ENOTDIR on some paths), a missing one with ENOENT; callers
-    map the OSError to their typed refusal. The returned fd is the caller's
-    to close.
+    walk IS the no-symlink resolution mechanism. A symlink component raises
+    ELOOP (the kernel reports ENOTDIR for an O_PATH|O_NOFOLLOW symlink open
+    with O_DIRECTORY, so the walk lstat-disambiguates), a missing one ENOENT;
+    callers map the OSError to their typed refusal. The returned fd is the
+    caller's to close.
     """
     parent = os.path.dirname(path)
     fd = os.open("/", _DIR_OPEN_FLAGS)
@@ -66,10 +70,24 @@ def open_parent_dirfd(path: str) -> int:
         for component in parent.split("/"):
             if not component:
                 continue
-            nxt = os.open(component, _DIR_OPEN_FLAGS, dir_fd=fd)
+            nxt = _open_component(fd, component)
             os.close(fd)
             fd = nxt
     except OSError:
         os.close(fd)
         raise
     return fd
+
+
+def _open_component(fd: int, component: str) -> int:
+    try:
+        return os.open(component, _DIR_OPEN_FLAGS, dir_fd=fd)
+    except OSError as exc:
+        is_symlink = False
+        if exc.errno in (errno.ENOTDIR, errno.ELOOP):
+            with contextlib.suppress(OSError):
+                st = os.stat(component, dir_fd=fd, follow_symlinks=False)
+                is_symlink = stat.S_ISLNK(st.st_mode)
+        if is_symlink:
+            raise OSError(errno.ELOOP, "symlink component refused", component) from exc
+        raise

@@ -11,12 +11,18 @@ from __future__ import annotations
 from inspectord.ipc_errors import ClientFacingError
 
 __all__ = [
+    "QuarantineBadStatus",
+    "QuarantineBlobMissing",
     "QuarantineDenied",
     "QuarantineError",
     "QuarantineIOError",
     "QuarantineIsolationFailed",
+    "QuarantineNotActive",
     "QuarantineNotFound",
     "QuarantineNotRegular",
+    "QuarantinePathOccupied",
+    "QuarantineRestoreNoParent",
+    "QuarantineShaMismatch",
     "QuarantineSwapped",
     "QuarantineTooLarge",
 ]
@@ -75,3 +81,44 @@ class QuarantineIOError(QuarantineError):
     """An OS-level failure that fits no more specific refusal."""
 
     error_kind = "io_error"
+
+
+class QuarantineNotActive(QuarantineError):
+    """Restore requires an ``active`` row; the guarded CAS found otherwise (§3.3)."""
+
+    error_kind = "not_active"
+
+
+class QuarantineBadStatus(QuarantineError):
+    """Delete requires ``active``/``restored``/``failed``; the CAS found otherwise (§3.4)."""
+
+    error_kind = "bad_status"
+
+
+class QuarantinePathOccupied(QuarantineError):
+    """Something re-created the original path after quarantine (§3.3 step 4).
+
+    The link-no-replace commit found the path occupied. That is evidence, not
+    clobber-fodder: the existing file is left untouched and there is no
+    ``--force``.
+    """
+
+    error_kind = "path_occupied"
+
+
+class QuarantineRestoreNoParent(QuarantineError):
+    """The original path's parent directory no longer exists (§3.3 step 3)."""
+
+    error_kind = "restore_no_parent"
+
+
+class QuarantineBlobMissing(QuarantineError):
+    """The stored blob is gone from the forensic store (backup/store drift?)."""
+
+    error_kind = "blob_missing"
+
+
+class QuarantineShaMismatch(QuarantineError):
+    """The stored blob's content no longer matches the recorded sha256."""
+
+    error_kind = "sha_mismatch"
