@@ -19,13 +19,13 @@ jobs:
           cache: pip
 
       - name: Install nightly Rust (for bpf-linker + aya-build)
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: nightly
           components: rust-src
 
       - name: Install Rust toolchain (stable — default for cargo gates)
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
           components: rustfmt, clippy
