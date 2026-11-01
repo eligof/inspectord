@@ -10,7 +10,7 @@ edition = "2021"
 rust-version = "1.74"
 
 [workspace.dependencies]
-aya = "0.14"
+aya = "0.16"
 aya-ebpf = "0.2"
 aya-log-ebpf = "0.2"
 aya-build = "0.2"
